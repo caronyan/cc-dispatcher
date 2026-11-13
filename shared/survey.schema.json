@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "locations", "test_commands", "conventions", "open_questions"],
+  "properties": {
+    "summary": { "type": "string", "description": "现状概述：相关代码怎么工作、需求落在哪里，3-5 句" },
+    "locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "role", "note"],
+        "properties": {
+          "ref": { "type": "string", "description": "文件:起始行-结束行" },
+          "role": { "type": "string", "enum": ["entry", "change", "reuse", "test", "config"], "description": "入口 / 要改 / 可参照 / 测试 / 配置或共享文件" },
+          "note": { "type": "string", "description": "这里是什么、与需求的关系" }
+        }
+      }
+    },
+    "test_commands": { "type": "array", "items": { "type": "string" } },
+    "conventions": { "type": "array", "items": { "type": "string" }, "description": "要遵守的约定和容易踩的坑" },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

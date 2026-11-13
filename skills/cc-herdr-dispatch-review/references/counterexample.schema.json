@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "cases", "retracted"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["FAILS", "HOLDS"],
+      "description": "存在 critical/high 级别反例时为 FAILS，否则为 HOLDS"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "area", "title", "conditions", "trigger", "consequence", "repro", "confidence", "fix_hint"],
+        "properties": {
+          "id": { "type": "string", "description": "C1, C2, ...；跨轮次沿用同一反例的编号" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+          "area": { "type": "string", "description": "取自检查清单的维度" },
+          "title": { "type": "string" },
+          "conditions": { "type": "string", "description": "前提条件" },
+          "trigger": { "type": "string", "description": "触发它的输入或步骤" },
+          "consequence": { "type": "string" },
+          "repro": { "type": "string", "description": "复现测试的路径和运行命令；没有写时填空字符串" },
+          "confidence": { "type": "string", "enum": ["reproduced", "likely", "speculative"] },
+          "fix_hint": { "type": "string" }
+        }
+      }
+    },
+    "retracted": {
+      "type": "array",
+      "description": "本轮因对方给出证据而撤回的反例：'C3: <撤回理由>'",
+      "items": { "type": "string" }
+    }
+  }
+}

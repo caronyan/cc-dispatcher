@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["options", "recommendation", "open_questions"],
+  "properties": {
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "design", "pros", "cons", "risks", "effort", "criteria_fit"],
+        "properties": {
+          "id": { "type": "string", "description": "O1, O2, ..." },
+          "name": { "type": "string" },
+          "design": { "type": "string", "description": "设计要点，落到模块和文件路径" },
+          "pros": { "type": "array", "items": { "type": "string" } },
+          "cons": { "type": "array", "items": { "type": "string" } },
+          "risks": { "type": "array", "items": { "type": "string" } },
+          "effort": { "type": "string", "enum": ["S", "M", "L"] },
+          "criteria_fit": { "type": "string", "description": "对每个评估维度的满足情况" }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["option", "reason"],
+      "properties": {
+        "option": { "type": "string", "description": "推荐方案的 id" },
+        "reason": { "type": "string", "description": "理由，对应评估维度" }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

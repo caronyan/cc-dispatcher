@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "findings"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["LGTM", "ISSUES"] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "category", "location", "problem", "evidence", "suggestion"],
+        "properties": {
+          "id": { "type": "string", "description": "R1, R2, ..." },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "feasibility", "completeness", "edge-case", "security", "performance", "architecture", "maintainability", "over-engineering"]
+          },
+          "location": { "type": "string", "description": "方案章节或 文件:行号" },
+          "problem": { "type": "string" },
+          "evidence": { "type": "string", "description": "能说明问题存在的代码、引文或推理" },
+          "suggestion": { "type": "string" }
+        }
+      }
+    }
+  }
+}

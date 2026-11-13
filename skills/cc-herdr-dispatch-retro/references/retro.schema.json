@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "candidates", "skipped"],
+  "properties": {
+    "summary": { "type": "string", "description": "这批运行里最值得改的 1-3 件事，3-5 句" },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "scope", "lesson", "evidence", "occurrences", "target_file", "target_section", "existing_coverage", "proposed_change"],
+        "properties": {
+          "id": { "type": "string", "description": "L1, L2, ..." },
+          "kind": { "type": "string", "enum": ["mistake", "correction", "preference", "fact", "contradiction", "procedure"] },
+          "scope": { "type": "string", "enum": ["skill", "project"], "description": "skill：改这套 skill 的文件；project：写进被派发仓库的 CLAUDE.md / AGENTS.md" },
+          "lesson": { "type": "string", "description": "一句话的教训，写成以后照做的规则" },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run", "ref", "detail"],
+              "properties": {
+                "run": { "type": "string", "description": "运行名" },
+                "ref": { "type": "string", "description": "材料里的出处：小节标题、调用名加轮次，或用户原话的时间戳" },
+                "detail": { "type": "string", "description": "原文摘录（尽量逐字）" }
+              }
+            }
+          },
+          "occurrences": { "type": "integer", "description": "材料里出现的次数（不同调用或不同运行各算一次）" },
+          "target_file": { "type": "string", "description": "要改的文件的绝对路径" },
+          "target_section": { "type": "string", "description": "要改的小节标题或要替换的原句" },
+          "existing_coverage": { "type": "string", "description": "目标文件里已经写了什么相关的话（逐字引用），没有写 none" },
+          "proposed_change": { "type": "string", "description": "具体改动：替换前后的原句，或要新增的句子及插入位置" }
+        }
+      }
+    },
+    "skipped": { "type": "array", "items": { "type": "string" }, "description": "看过但没提的线索及理由（一次性、已覆盖、证据不足、retro-log 里已被拒绝）" }
+  }
+}

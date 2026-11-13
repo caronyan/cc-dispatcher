@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "files_changed", "tests", "deviations", "open_questions"],
+  "properties": {
+    "status": { "type": "string", "enum": ["done", "partial", "blocked"] },
+    "summary": { "type": "string", "description": "实现思路，3-8 句" },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "change"],
+        "properties": {
+          "path": { "type": "string" },
+          "change": { "type": "string", "description": "这个文件改了什么、为什么" }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "passed", "output_tail"],
+      "properties": {
+        "command": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "output_tail": { "type": "string", "description": "测试输出的最后 30 行" }
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "description": "与任务卡不一致之处（改了范围外的文件、改了接口、跳过了验收项），每条写明原因",
+      "items": { "type": "string" }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

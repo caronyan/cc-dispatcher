@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "addressed", "files_changed", "tests", "open_questions"],
+  "properties": {
+    "status": { "type": "string", "enum": ["done", "partial", "blocked"] },
+    "summary": { "type": "string", "description": "修复思路，3-8 句" },
+    "addressed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "fix", "test"],
+        "properties": {
+          "id": { "type": "string", "description": "问题编号，如 A1" },
+          "fix": { "type": "string", "description": "怎么修的，改了哪些位置" },
+          "test": { "type": "string", "description": "对应的回归测试：文件和测试名" }
+        }
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "change"],
+        "properties": { "path": { "type": "string" }, "change": { "type": "string" } }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "passed", "output_tail"],
+      "properties": {
+        "command": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "output_tail": { "type": "string", "description": "测试输出的最后 30 行" }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

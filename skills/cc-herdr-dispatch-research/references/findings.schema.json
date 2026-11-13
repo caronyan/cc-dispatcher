@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "findings", "open_questions"],
+  "properties": {
+    "answer": { "type": "string", "description": "对分配给本线程的子问题的直接回答，3-5 句" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question", "claim", "confidence", "evidence"],
+        "properties": {
+          "id": { "type": "string", "description": "F1, F2, ..." },
+          "question": { "type": "string", "description": "回答的是哪个子问题（编号或原文）" },
+          "claim": { "type": "string", "description": "一个可核实的说法" },
+          "confidence": { "type": "string", "enum": ["verified", "likely", "speculative"] },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "ref", "detail"],
+              "properties": {
+                "kind": { "type": "string", "enum": ["code", "url", "run", "doc"] },
+                "ref": { "type": "string", "description": "文件:行、链接，或实验命令" },
+                "detail": { "type": "string", "description": "引文、关键输出或推理依据" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" }, "description": "答不了的子问题及所缺信息" }
+  }
+}

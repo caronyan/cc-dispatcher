@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "suites", "failures", "tests_added", "open_questions"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "summary": { "type": "string", "description": "这一片测了什么、结果如何，2-4 句" },
+    "suites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "exit_code", "passed", "failed", "skipped", "duration_s"],
+        "properties": {
+          "command": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "passed": { "type": "integer", "description": "数不出来时为 -1" },
+          "failed": { "type": "integer" },
+          "skipped": { "type": "integer" },
+          "duration_s": { "type": "number" }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "test", "category", "reproduce", "evidence", "location", "suggested_fix"],
+        "properties": {
+          "id": { "type": "string", "description": "F1, F2, ..." },
+          "test": { "type": "string", "description": "用例全名" },
+          "category": { "type": "string", "enum": ["product", "test", "env", "flaky"] },
+          "reproduce": { "type": "string", "description": "只跑这一个用例的命令" },
+          "evidence": { "type": "string", "description": "关键报错或断言输出；flaky 写每次重跑的结果" },
+          "location": { "type": "string", "description": "疑似位置 文件:行，不确定时写空字符串" },
+          "suggested_fix": { "type": "string", "description": "一句话修复建议，不确定时写空字符串" }
+        }
+      }
+    },
+    "tests_added": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "covers"],
+        "properties": {
+          "path": { "type": "string" },
+          "covers": { "type": "string", "description": "覆盖了什么行为" }
+        }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}
