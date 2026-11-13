@@ -1,5 +1,7 @@
 # cc-dispatcher
 
+仓库：<https://github.com/caronyan/cc-dispatcher>
+
 在 [herdr](https://herdr.dev/) 里，让 Claude Code 把调研、审查、实现、修复、测试派给 Codex 子 agent 执行、收回报并验收的一组 Claude Code skill。
 
 子 agent 由 herdr-core（`hc`）托管：它们以 Claude Code 的子终端出现在 herdr 侧栏，状态（干活 / 完成 / 出错 / 等人）由 herdr 跟踪，出错和等人时 herdr 把通知送进 Claude 的对话。Claude 只负责拆分、派发、看状态、验收，不做用量计量。
@@ -86,11 +88,32 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 
 ## 安装
 
-前提：herdr（带 herdr-core `hc`）、Codex CLI（已 `codex login`）、Python 3。
+前提：
+
+- [herdr](https://herdr.dev/)，带 herdr-core（`hc` 在 PATH 上）；要面板的话还需要 Herdr app
+- Codex CLI，已 `codex login`
+- Python 3、git
+- 可选：[magpie](https://usemagpie.ai)，面板上的主 agent 额度和额度交接提醒靠它（没有时 Codex 退回读会话日志，Claude Code 不显示）
+
+步骤：
 
 ```sh
+# 1. 克隆。skill 链接指向这个目录，装好后别移动或删除它
+git clone git@github.com:caronyan/cc-dispatcher.git ~/cc-dispatcher   # 或 https://github.com/caronyan/cc-dispatcher.git
+cd ~/cc-dispatcher
+
+# 2. 安装（可重复运行）
 ./install.sh
+
+# 3. 在 ~/.zshrc 里加一行（见下文），然后开新终端
+echo 'source ~/cc-dispatcher/shared/herdr-shell.zsh' >> ~/.zshrc
 ```
+
+4. 新开一个 Claude Code 会话，检查：`hc templates` 应列出 6 个 `cc-hd-*` 模板；装了 Herdr app 时打开 `herdr-cc-dispatch` layout，右侧有 cc-dispatch 面板。
+
+更新：`git pull && ./install.sh`。skill 和模板是软链接，pull 后即生效；面板 mod 是复制的，要重跑 `install.sh` 才会刷新。
+
+`install.sh` 做的事：
 
 它建两类软链接：
 
@@ -107,7 +130,7 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 子 agent 状态由 herdr 管理，herdr 里不需要 Claude Code 的进度类 mod。在 `~/.zshrc` 里加一行：
 
 ```sh
-source /path/to/cc-dispatcher/shared/herdr-shell.zsh
+source ~/cc-dispatcher/shared/herdr-shell.zsh   # 换成你克隆的路径
 ```
 
 之后在 herdr 终端里（`HC_TERMINAL_ID` 有值）启动 `claude` 时，会清空 `CLAUDE_CODE_PLUGIN_DIRS`，不加载其中的 mod；herdr 之外不受影响。
