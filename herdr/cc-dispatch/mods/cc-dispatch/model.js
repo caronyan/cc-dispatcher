@@ -198,6 +198,17 @@ export function callNeed(c) {
 const rank = (need) => { const i = URGENCY.indexOf(need); return i < 0 ? URGENCY.length : i; };
 
 /** Runs, newest first; each with its calls in call order and a summary. */
+/**
+ * A run's main agent terminal: of the helpers' parents, newest dispatch first, one whose terminal is
+ * still live; else the newest. A long run outlives its first main agent (closed, then a new one carries
+ * on dispatching), so the first helper's parent may be long gone.
+ */
+export function runParent(calls, terminals) {
+  const byNewest = calls.filter((c) => c.parent).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  const live = new Set((terminals ?? []).filter((t) => t.state === "live").map((t) => t.address));
+  return (byNewest.find((c) => live.has(c.parent)) ?? byNewest[0])?.parent ?? null;
+}
+
 export function buildRuns(entries, terminals, controls = {}) {
   const byRun = new Map();
   for (const { path, meta } of entries ?? []) {
@@ -217,7 +228,7 @@ export function buildRuns(entries, terminals, controls = {}) {
       calls, counts, need, control,
       hd: calls.find((c) => c.hd)?.hd ?? null,
       live: calls.some((c) => c.state === "live"),
-      parent: calls.find((c) => c.parent)?.parent ?? null,
+      parent: runParent(calls, terminals),
       session: calls.find((c) => c.session)?.session ?? null,
       space: calls.find((c) => c.space)?.space ?? null,
       claudeCwd: calls.find((c) => c.claudeCwd)?.claudeCwd ?? null,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
   summary, callDetail, runSpace, splitBySpace, callStage, runStage, stageSummary, groupByStage, SETTLED, cardCounts, ago, handoffAsk, handoffText, prettyReport, taskPath, timelineMarkdown, eventWords,
-  CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, callTags,
+  CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, callTags,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
@@ -389,4 +389,16 @@ test("quotaView: windows that have not reset, with their level", () => {
   assert.equal(quotaView("claude", { windows: [] }), null);
   assert.equal(quotaView("claude", null), null);
   assert.equal(quotaView("claude", { windows: [{ name: "5 hours", used: 1 }] }).label, "Claude Code");
+});
+
+test("a run's main agent is a live parent, newest dispatch first, not the first helper's", () => {
+  const calls = [
+    { call: "A", parent: "t19", startedAt: 1000 },
+    { call: "B", parent: null, startedAt: 2000 },
+    { call: "C", parent: "t4h", startedAt: 3000 },
+  ];
+  assert.equal(runParent(calls, [{ address: "t19", state: "finished" }, { address: "t4h", state: "live" }]), "t4h");
+  assert.equal(runParent(calls, [{ address: "t19", state: "live" }, { address: "t4h", state: "finished" }]), "t19");
+  assert.equal(runParent(calls, []), "t4h"); // none live: the newest
+  assert.equal(runParent([{ call: "A" }], []), null);
 });
