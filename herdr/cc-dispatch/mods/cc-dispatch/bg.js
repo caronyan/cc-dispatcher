@@ -268,7 +268,8 @@ print(json.dumps(out))
 /** The script's request: each run's dispatching Claude, where to look for it, and when it began. */
 export function bgRequest(runs) {
   return {
-    runs: runs.map((r) => ({ dir: r.dir, session: r.session || null, cwd: r.claudeCwd || r.repo || null, since: r.startedAt || 0 })),
+    runs: runs.flatMap((r) => (r.sessions?.length ? r.sessions : [r.session || null])
+      .map((session) => ({ dir: r.dir, session, cwd: r.claudeCwd || r.repo || null, since: r.startedAt || 0 }))),
   };
 }
 
@@ -279,15 +280,17 @@ export const BG_MORE = 5;       // each "earlier" click shows this many more
 
 /**
  * Each run's tasks: a task belongs to the latest run of the same session that started before it
- * (less BG_GRACE). → { dir: [task] }.
+ * (less BG_GRACE). A run's sessions are all its main agents' (`sessions`), else the one the script
+ * found for it. → { dir: [task] }.
  */
 export function assignTasks(runs, resolved, sessions) {
   const out = {}, bySession = new Map();
   for (const r of runs) {
-    const sid = resolved?.[r.dir];
-    if (!sid) continue;
-    if (!bySession.has(sid)) bySession.set(sid, []);
-    bySession.get(sid).push(r);
+    for (const sid of r.sessions?.length ? r.sessions : [resolved?.[r.dir]]) {
+      if (!sid) continue;
+      if (!bySession.has(sid)) bySession.set(sid, []);
+      bySession.get(sid).push(r);
+    }
   }
   for (const [sid, list] of bySession) {
     list.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
   summary, callDetail, runSpace, splitBySpace, callStage, runStage, stageSummary, groupByStage, SETTLED, cardCounts, ago, handoffAsk, handoffText, prettyReport, taskPath, timelineMarkdown, eventWords,
-  CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, callTags,
+  CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, activeRuns, callTags,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
@@ -401,4 +401,26 @@ test("a run's main agent is a live parent, newest dispatch first, not the first 
   assert.equal(runParent(calls, [{ address: "t19", state: "live" }, { address: "t4h", state: "finished" }]), "t19");
   assert.equal(runParent(calls, []), "t4h"); // none live: the newest
   assert.equal(runParent([{ call: "A" }], []), null);
+});
+
+test("a run is live while a helper or its main agent goes on: helpers, paused, or a live main agent's newest run; never stopped", () => {
+  const terms = [{ address: "t4h", state: "live" }, { address: "t19", state: "finished" }];
+  const runs = [
+    { dir: "old", parent: "t4h", lastAt: 1, live: false },
+    { dir: "new", parent: "t4h", lastAt: 5, live: false },
+    { dir: "gone", parent: "t19", lastAt: 9, live: false },
+    { dir: "held", parent: "t19", lastAt: 2, live: false, control: { state: "paused" } },
+    { dir: "busy", parent: "t19", lastAt: 3, live: true },
+    { dir: "halt", parent: "t4h", lastAt: 99, live: false, control: { state: "stopped" } },
+  ];
+  assert.deepEqual([...activeRuns(runs, terms)].sort(), ["busy", "held", "new"]);
+});
+
+test("buildRuns: a run whose helpers all ended stays live while its main agent works on", () => {
+  const entries = [{ path: "/repo/.cc-dispatch/r1/agents/A/meta.json", meta: { call: "A", address: "t9", parent: "t4h", started_at: 10 } }];
+  const terms = [{ address: "t9", state: "finished" }, { address: "t4h", state: "live" }];
+  const [r] = buildRuns(entries, terms);
+  assert.equal(r.helpersLive, false);
+  assert.equal(r.live, true);
+  assert.equal(buildRuns(entries, [{ address: "t9", state: "finished" }])[0].live, false);
 });

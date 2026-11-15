@@ -215,7 +215,7 @@ def need_env():
         if subprocess.run(["sh", "-c", f"command -v {prog}"], capture_output=True).returncode:
             fail(tag)
     if not os.environ.get("HC_TERMINAL_ID"):
-        fail("NOT_IN_HERDR: start Claude Code inside a herdr terminal ($HC_TERMINAL_ID is unset)")
+        fail("NOT_IN_HERDR: start the main agent (Claude Code, Codex, ...) inside a herdr terminal ($HC_TERMINAL_ID is unset)")
     ensure_home()
 
 

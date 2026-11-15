@@ -181,3 +181,11 @@ test("bg script: a running shell whose output file says it ended is ended, and t
   writeFileSync(out, "ok\n[exited with code 1]\n");
   assert.equal(bg(home, { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b9").status, "failed");
 });
+
+test("a run read by every main agent session that dispatched to it", () => {
+  const r = { dir: "/r", sessions: ["s2", "s1"], startedAt: 1000, repo: "/repo" };
+  assert.deepEqual(bgRequest([r]).runs.map((x) => x.session), ["s2", "s1"]);
+  const out = assignTasks([r], { "/r": "s1" }, { s1: [{ id: "a", started: 2000 }], s2: [{ id: "b", started: 3000 }] });
+  assert.deepEqual(out["/r"].map((t) => t.id).sort(), ["a", "b"]);
+  assert.deepEqual(bgRequest([{ dir: "/x", startedAt: 0 }]).runs.map((x) => x.session), [null]);
+});

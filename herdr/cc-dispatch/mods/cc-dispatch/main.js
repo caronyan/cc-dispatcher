@@ -9,7 +9,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsk, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, MARKDOWN_LIMIT, controlOps, controlBanner, runQuotaAgent, quotaView } from "./model.js";
+import { callTags, callStage, runStage, stageSummary, cardCounts, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsk, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, runQuotaAgent, quotaView } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -130,6 +130,85 @@ const note = (t, text, color) => div().flex_none().text_size(S().small).text_col
 const monoBox = (t, id, text) => div().id(id).flex_1().min_h(0).overflow_y_scrollbar().px(12).py(10).rounded(8)
   .border_1().border_color(t.border).bg(t.background).font_family(mono()).text_size(S().small).text_color(t.foreground).child(text);
 
+// ---- Structured docs (model.js resultDoc / taskDoc): an outline on the left, the chosen part on the right ----
+
+const toneColor = (t, tone) => ({ ok: t.ansi2, bad: t.ansi1, warn: t.ansi3, accent: t.accent, info: t.ansi4, muted: t.muted })[tone] ?? null;
+const KIND_COLOR = (t) => ({ added: t.ansi2, untracked: t.ansi6, modified: t.ansi3, deleted: t.ansi1, renamed: t.accent, conflict: t.ansi1 });
+// One letter per kind in place of git's two-column code (untracked is "??", which reads as a broken glyph).
+const KIND_MARK = { added: "A", untracked: "N", modified: "M", deleted: "D", renamed: "R", conflict: "!" };
+const KIND_SHORT = { added: "added", untracked: "new", modified: "modified", deleted: "deleted", renamed: "renamed", conflict: "conflict" };
+const tdot = (color, size = 7) => div().size(size).flex_none().rounded(size / 2).bg(color);
+const blockLabel = (t, text) => div().flex_none().text_size(S().label).font_semibold().text_color(t.muted).child(String(text).toUpperCase());
+
+function docBlock(t, b, id) {
+  const z = S(), md = (text) => TextView.markdown(id, String(text ?? "")).selectable(true);
+  const labelled = (el) => b.label ? v_flex().gap(4).child(blockLabel(t, b.label)).child(el) : el;
+  switch (b.t) {
+    case "lead": {
+      const c = toneColor(t, b.tone) ?? t.accent;
+      return h_flex().items_start().gap(10).rounded(6).bg(t.raised).pr(12).py(8)
+        .child(div().w(3).flex_none().self_stretch().rounded(2).bg(c))
+        .child(v_flex().flex_1().min_w(0).gap(3).child(blockLabel(t, b.label))
+          .child(b.short ? div().text_size(z.dialog).font_semibold().text_color(c).child(b.text)
+            : div().text_size(z.body).font_semibold().text_color(t.foreground).child(md(b.text))));
+    }
+    case "kv": return labelled(v_flex().gap(3).children(b.rows.map((r, i) => h_flex().id(`${id}-${i}`).items_start().gap(10)
+      .child(div().w(128).flex_none().text_size(z.small).text_color(t.muted).child(r.k))
+      .child(h_flex().flex_1().min_w(0).gap(6).items_start()
+        .when(Boolean(toneColor(t, r.tone)) && r.tone !== "muted", (el) => el.child(tdot(toneColor(t, r.tone), 7).mt(5)))
+        .child(div().flex_1().min_w(0).text_size(z.small).text_color(toneColor(t, r.tone) ?? t.foreground)
+          .when(Boolean(r.mono), (el) => el.font_family(mono())).when(r.tone === "bad" || r.tone === "ok", (el) => el.font_semibold()).child(r.v))))));
+    case "md": return labelled(div().text_size(z.body).text_color(t.foreground).child(md(b.text)));
+    case "code": return labelled(div().px(10).py(8).rounded(6).border_1().border_color(t.border).bg(t.background)
+      .font_family(mono()).text_size(z.label).text_color(t.foreground).child(b.text));
+    case "files": {
+      const k = KIND_COLOR(t);
+      return v_flex().gap(2).children(b.rows.map((f, i) => h_flex().id(`${id}-${i}`).h(22).gap(8).items_center()
+        .child(h_flex().w(26).h(17).flex_none().justify_center().items_center().rounded(4).bg(t.selected)
+          .font_family(mono()).text_size(z.label).font_semibold().text_color(k[f.kind]).child(KIND_MARK[f.kind] ?? f.code))
+        .child(div().w(62).flex_none().text_size(z.label).text_color(k[f.kind]).child(KIND_SHORT[f.kind]))
+        .child(div().flex_1().min_w(0).truncate().font_family(mono()).text_size(z.small)
+          .text_color(f.kind === "deleted" ? t.muted : t.foreground).child(f.path))));
+    }
+    case "stat": {
+      const max = Math.max(1, ...b.rows.map((r) => r.n)), W = 110;
+      return v_flex().gap(2).children(b.rows.map((r, i) => h_flex().id(`${id}-${i}`).h(22).gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().font_family(mono()).text_size(z.small).child(r.path))
+        .child(div().w(70).flex_none().text_size(z.label).font_family(mono())
+          .child(h_flex().gap(4).child(div().text_color(t.ansi2).child(`+${r.plus}`)).child(div().text_color(t.ansi1).child(`−${r.minus}`))))
+        .child(h_flex().w(W).h(6).flex_none().rounded(3).bg(t.selected).overflow_hidden()
+          .child(div().h_full().w(Math.round(W * r.plus / max)).bg(t.ansi2))
+          .child(div().h_full().w(Math.round(W * r.minus / max)).bg(t.ansi1)))));
+    }
+    case "events": return v_flex().gap(4).children(b.rows.map((e, i) => h_flex().id(`${id}-${i}`).items_start().gap(8)
+      .child(div().w(112).flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(e.time))
+      .child(tdot(toneColor(t, e.tone) ?? t.border, 7).mt(5))
+      .child(div().flex_1().min_w(0).text_size(z.small)
+        .text_color(e.tone === "bad" || e.tone === "warn" ? toneColor(t, e.tone) : e.tone === "muted" ? t.muted : t.foreground)
+        .when(e.tone === "bad", (el) => el.font_semibold()).child(e.text))));
+    default: return null;
+  }
+}
+
+/** The outline entries, in order: groups, then their children (with depth). */
+const docEntries = (doc) => (doc?.nodes ?? []).flatMap((n) => [{ node: n, group: n, depth: -1 }, ...n.children.map((c) => ({ node: c, group: n, depth: c.depth ?? 0 }))]);
+
+/** What the chosen entry shows: a group and all its children; a child and the ones nested under it. */
+function docSelection(doc, sel) {
+  const groups = doc?.nodes ?? [];
+  if (!sel) return groups.map((g) => ({ group: g, parts: g.children, whole: true }));
+  const g = groups.find((x) => x.id === sel);
+  if (g) return [{ group: g, parts: g.children, whole: true }];
+  for (const grp of groups) {
+    const i = grp.children.findIndex((c) => c.id === sel);
+    if (i < 0) continue;
+    const d = grp.children[i].depth ?? 0, parts = [grp.children[i]];
+    for (let j = i + 1; j < grp.children.length && (grp.children[j].depth ?? 0) > d; j++) parts.push(grp.children[j]);
+    return [{ group: grp, parts, whole: false }];
+  }
+  return groups.map((x) => ({ group: x, parts: x.children, whole: true }));
+}
+
 // ---- The tab-bar button ----
 
 function toggle() {
@@ -216,8 +295,8 @@ export default class Dispatch extends View {
     });
   }
 
-  // Spend comes from the helpers' Codex logs, a slower read than meta.json: live runs every poll,
-  // ended runs once (they no longer change).
+  // Spend and the main agent's background tasks, a slower read than meta.json: live runs (model.js
+  // activeRuns: helpers or main agent still going) every poll, ended runs once (they no longer change).
   refreshStats(cx, files, token) {
     if (this.statsBusy) return;
     const want = this.runs.filter((r) => r.live || !this.statsFor.has(r.dir));
@@ -246,7 +325,7 @@ export default class Dispatch extends View {
   refreshQuota(cx, files) {
     const now = Date.now(), want = new Map();
     for (const r of this.runs) {
-      if (!r.live && r.control?.state !== "paused") continue;
+      if (!r.live) continue;
       const agent = runQuotaAgent(r, terminals() ?? []);
       if (agent && !want.has(agent)) want.set(agent, r.hd);
     }
@@ -264,7 +343,7 @@ export default class Dispatch extends View {
 
   // Under a live run's head: the subscription its main agent runs on and how much of each window is used.
   renderQuota(t, r) {
-    if (!r.live && r.control?.state !== "paused") return null;
+    if (!r.live) return null;
     const agent = runQuotaAgent(r, terminals() ?? []);
     const v = agent ? quotaView(agent, this.quota[agent]?.q) : null;
     if (!v) return null;
@@ -608,9 +687,9 @@ export default class Dispatch extends View {
         const [events, tasks] = [await loadEvents(files, c), await loadTasks(files, c)];
         const text = Object.entries(tasks).reverse().map(([k, x]) => `==> task-${k}.md <==\n${x ?? "(missing)"}`).join("\n\n")
           + `\n\n==> events.jsonl <==\n${events ?? ""}`;
-        return { text, markdown: roundsMarkdown(c, events, tasks) };
+        return { text, markdown: roundsMarkdown(c, events, tasks), doc: taskDoc(c, events, tasks) };
       }, "No task file.")),
-      live && cell(`peek-${c.key}`, "Peek", "eye", () => run("terminal.peek", { terminal: c.address })),
+      live && cell(`peek-${c.key}`, "Peek", "eye", () => goTo(c.address, c.parent)),
     ], live && square(`kill-${c.key}`, "Clean up", "trash", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 440, height: 220,
       props: { role: "cleanup", address: c.address, call: c.call, name: c.name } }), t.ansi1));
@@ -643,15 +722,16 @@ export default class Dispatch extends View {
   // the markdown and can switch to the source.
   showText(cx, title, load, empty, render = (text) => text) {
     cx.spawn(async () => {
-      let text, markdown;
+      let text, markdown, doc = null;
       try {
         const got = await load();
         text = (typeof got === "string" ? got : got?.text) || empty;
         markdown = got?.markdown ?? render(text);
+        doc = got?.doc ?? null;
       } catch (e) {
         text = markdown = String(e?.message ?? e);
       }
-      openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 760, height: 600, props: { role: "text", title, text, markdown } });
+      openOverlay({ mod: "cc-dispatch", kind: "dialog", width: doc ? 980 : 760, height: doc ? 680 : 600, props: { role: "text", title, text, markdown, doc } });
     });
   }
 
@@ -669,7 +749,7 @@ export default class Dispatch extends View {
         older.length ? `earlier rounds: ${older.join(", ")}` : null,
       ].filter(Boolean).join("\n");
       return { text: `${head}\n\n${exists ? text : "(no report written yet)"}${diff != null ? `\n\n==> worktree <==\n${diff}` : ""}`,
-        markdown: resultMarkdown(c, exists ? text : null, older, diff) };
+        markdown: resultMarkdown(c, exists ? text : null, older, diff), doc: resultDoc(c, exists ? text : null, older, diff) };
     }, "");
   }
 
@@ -687,6 +767,56 @@ export default class Dispatch extends View {
 
   // ---- Dialogs ----
 
+  // A structured doc: the outline (all, then each group and its parts), and what the chosen entry shows.
+  renderDoc(t, p) {
+    const z = S(), doc = p.doc;
+    if (this.docFor !== p.title) { this.docFor = p.title; this.docSel = null; }
+    const sel = this.docSel ?? null;
+    const entry = (id, title, opts = {}) => {
+      const on = (sel ?? null) === id, c = toneColor(t, opts.tone);
+      return h_flex().id(`nav-${id ?? "all"}`).h(opts.group ? 26 : 22).flex_none().gap(6).items_center().rounded(5)
+        .pl(opts.group ? 8 : 18 + 12 * Math.max(0, opts.depth ?? 0)).pr(6).cursor_pointer()
+        .bg(on ? t.selected : t.background).hover((s) => s.bg(on ? t.selected : t.hover))
+        .on_click((_e, cx) => { this.docSel = id; cx.notify(); })
+        .when(Boolean(opts.group), (el) => el.child(tdot(c ?? t.border, 7)))
+        .when(!opts.group && Boolean(c) && opts.tone !== "muted", (el) => el.child(tdot(c, 5)))
+        .child(div().flex_1().min_w(0).truncate().text_size(opts.group ? z.small : z.label)
+          .when(Boolean(opts.group), (el) => el.font_semibold())
+          .text_color(on || opts.group ? t.foreground : t.muted).child(title))
+        .when(Boolean(opts.badge), (el) => el.child(div().flex_none().max_w(90).truncate().text_size(z.label - 1).text_color(opts.tone === "accent" ? t.accent : t.muted).child(opts.badge)));
+    };
+    const nav = v_flex().id("doc-nav").w(230).flex_none().min_h(0).overflow_y_scrollbar().p(6).gap(1).rounded(8)
+      .border_1().border_color(t.border).bg(t.background)
+      .child(entry(null, "All", { group: true, tone: "accent" }))
+      .children(docEntries(doc).map((x) => x.depth < 0
+        ? div().pt(6).child(entry(x.node.id, x.node.title, { group: true, tone: x.node.tone, badge: x.node.badge }))
+        : entry(x.node.id, x.node.title, { depth: x.depth, tone: x.node.tone, badge: x.node.badge })));
+    const head = (n, level, depth = 0) => {
+      const c = toneColor(t, n.tone);
+      return level === 0
+        ? h_flex().gap(8).items_center().pb(6).border_b(1).border_color(t.border)
+          .child(div().w(4).h(16).flex_none().rounded(2).bg(c ?? t.accent))
+          .child(div().flex_1().min_w(0).truncate().text_size(z.title + 1).font_semibold().child(n.title))
+          .when(Boolean(n.badge), (el) => el.child(pill(t, n.badge, n.tone === "accent" ? t.accent : t.muted)))
+        : h_flex().gap(7).items_center().pt(depth > 0 ? 2 : 4)
+          .when(Boolean(c) && n.tone !== "muted", (el) => el.child(tdot(c, 7)))
+          .child(div().flex_1().min_w(0).text_size(depth > 0 ? z.body : z.title).font_semibold()
+            .text_color(depth > 1 ? t.muted : t.foreground).child(n.title))
+          .when(Boolean(n.badge), (el) => el.child(pill(t, n.badge)));
+    };
+    const blocks = (n) => n.blocks.map((b, i) => docBlock(t, b, `doc-${n.id}-${i}`));
+    const content = v_flex().gap(22).children(docSelection(doc, sel).map(({ group, parts, whole }) => v_flex().gap(12)
+      .child(whole ? head(group, 0) : h_flex().gap(6).items_center().text_size(z.small).text_color(t.muted)
+        .child(group.title).child(icon("chevron-right", 11, t.muted)))
+      .children(whole ? blocks(group) : [])
+      .children(parts.map((n) => v_flex().gap(8).pl(Math.min(2, n.depth ?? 0) * 10)
+        .child(head(n, 1, n.depth ?? 0)).children(blocks(n))))));
+    return h_flex().flex_1().min_h(0).gap(10).items_start()
+      .child(nav.h_full())
+      .child(div().id(`doc-${p.title ?? ""}-${sel ?? "all"}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().px(18).py(14)
+        .rounded(8).border_1().border_color(t.border).bg(t.background).text_color(t.foreground).child(content));
+  }
+
   renderDialog() {
     const t = theme(), p = blockProps() ?? {}, close = () => closeOverlay(p.overlay);
     if (p.role === "text") {
@@ -697,6 +827,7 @@ export default class Dispatch extends View {
       const modes = md && md.length <= MARKDOWN_LIMIT ? h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
         .child(seg("rendered", "Rendered", !raw, false)).child(seg("source", "Source", raw, true)) : null;
       const body = raw ? monoBox(t, "out", p.text ?? "")
+        : p.doc ? this.renderDoc(t, p)
         : div().id(`md-${p.title ?? ""}`).flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).rounded(8).border_1().border_color(t.border).bg(t.background)
           .text_size(S().body).text_color(t.foreground).child(TextView.markdown("md-view", md).selectable(true));
       return dialogFrame(t, "text", p.title ?? "", [body], [dialogButton("close", "Close", t, close, "primary")], close, modes);

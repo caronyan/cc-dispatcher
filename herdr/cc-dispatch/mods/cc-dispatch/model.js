@@ -227,9 +227,12 @@ export function buildRuns(entries, terminals, controls = {}) {
       dir, id: baseName(dir), kind: kindOf(dir), repo: repoOf(dir),
       calls, counts, need, control,
       hd: calls.find((c) => c.hd)?.hd ?? null,
-      live: calls.some((c) => c.state === "live"),
+      helpersLive: calls.some((c) => c.state === "live"),
       parent: runParent(calls, terminals),
+      // Every main agent session that dispatched here, newest first: a long run outlives its first one.
+      sessions: [...new Set([...calls].sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).map((c) => c.session).filter(Boolean))],
       session: calls.find((c) => c.session)?.session ?? null,
+      lastAt: Math.max(0, ...calls.map((c) => c.startedAt || 0)),
       space: calls.find((c) => c.space)?.space ?? null,
       claudeCwd: calls.find((c) => c.claudeCwd)?.claudeCwd ?? null,
       // The program the main agent runs (claude, codex, …) as hd_dispatch.py recorded it; the newest wins (adopt).
@@ -238,6 +241,11 @@ export function buildRuns(entries, terminals, controls = {}) {
     };
   });
   for (const r of runs) if (!Number.isFinite(r.startedAt)) r.startedAt = 0;
+  // `live`: the run is still going, the one test the whole panel uses (polling, tasks, quota, controls,
+  // looks). Not just "a helper's terminal lives": between dispatches all may have ended while the main
+  // agent works on (runs shells, reviews, merges).
+  const active = activeRuns(runs, terminals);
+  for (const r of runs) r.live = active.has(r.dir);
   return runs.sort((a, b) => (b.live - a.live) || (b.startedAt - a.startedAt) || b.id.localeCompare(a.id));
 }
 
@@ -553,6 +561,235 @@ export function diffMarkdown(text) {
   return [head && `### \`${head}\``, body ? fence(body) : "*No changes.*"].filter(Boolean).join("\n\n");
 }
 
+// ---- Structured documents for the Result and Task dialogs ----
+//
+// A doc is { nodes: [node] }; a node is { id, title, tone?, badge?, blocks: [block], children: [node] }
+// (children: same shape, `depth` for indenting in the outline). The dialog draws an outline of the
+// nodes on the left and the chosen one on the right. Blocks:
+//   { t: "lead", label, text, tone }      a conclusion, set off and bold
+//   { t: "kv", rows: [{ k, v, tone, mono }] }
+//   { t: "md", label?, text }             markdown prose
+//   { t: "code", label?, text }           logs and output
+//   { t: "files", rows: [{ code, kind, path }] }   git status, kind added|modified|deleted|renamed|untracked|conflict
+//   { t: "stat", rows: [{ path, n, plus, minus }], total }
+//   { t: "events", rows: [{ time, text, tone }] }
+// Tones: ok, bad, warn, accent, info, muted.
+
+const TONE_RANK = { bad: 0, warn: 1, accent: 2, info: 3, ok: 4, muted: 5 };
+const worst = (tones) => tones.filter(Boolean).sort((a, b) => TONE_RANK[a] - TONE_RANK[b])[0] ?? null;
+
+/** A verdict / status word's tone. */
+export function wordTone(v) {
+  const w = String(v ?? "").toLowerCase().trim();
+  if (v === true || /^(done|ok|pass|passed|lgtm|holds|fixed|accepted|merged|success|yes|true)$/.test(w)) return "ok";
+  if (v === false || /^(fail|fails|failed|blocked|error|bad|missing|no|false|critical|blocker|high|p0|p1|severe)$/.test(w)) return "bad";
+  if (/^(partial|issues|medium|major|p2|warn|warning|skipped|skip|flaky|unknown)$/.test(w)) return "warn";
+  if (/^(low|minor|info|nit|p3|trivial)$/.test(w)) return "muted";
+  return null;
+}
+
+const TONE_KEYS = ["severity", "priority", "level", "impact", "risk", "verdict", "status", "result", "passed", "outcome"];
+const itemTone = (o) => worst(TONE_KEYS.filter((k) => k in o).map((k) => wordTone(o[k])));
+const LOG_KEY = /(output|tail|log|stdout|stderr|trace|diff|snippet|excerpt|command)/i;
+// Fields the conclusion lives in, shown first and set off.
+const VERDICT_KEYS = ["verdict", "status"];
+const LEAD_KEYS = ["summary", "answer"];
+// Fields that are trouble when they have anything in them.
+const FIELD_TONE = { failures: "bad", open_questions: "warn", deviations: "warn", blocked: "bad", retracted: "muted", skipped: "muted" };
+const label = (k) => String(k).replace(/_/g, " ");
+
+/** An object's fields as blocks: short scalars together as a table, prose, logs and nested values apart. */
+function fieldBlocks(o) {
+  const blocks = [];
+  let kv = null;
+  for (const [k, v] of Object.entries(o ?? {})) {
+    if (isScalar(v) && !(typeof v === "string" && (v.length > 100 || v.includes("\n")))) {
+      if (!kv) blocks.push(kv = { t: "kv", rows: [] });
+      const str = typeof v === "string" ? v : v == null ? "—" : String(v);
+      kv.rows.push({ k: label(k), v: str || "(empty)", tone: TONE_KEYS.includes(k) ? wordTone(v) : null,
+        mono: typeof v !== "string" || /^[\w./:#@-]{1,100}$/.test(v) });
+      continue;
+    }
+    kv = null;
+    if (typeof v === "string") blocks.push(LOG_KEY.test(k) || /\n\s{2,}|\t/.test(v) ? { t: "code", label: label(k), text: v.replace(/\s+$/, "") } : { t: "md", label: label(k), text: v });
+    else if (Array.isArray(v) && !v.length) blocks.push({ t: "kv", rows: [{ k: label(k), v: "none", tone: "muted" }] });
+    else blocks.push({ t: "md", label: `${label(k)}${Array.isArray(v) ? ` (${v.length})` : ""}`, text: listMd(v, 0).join("\n") });
+  }
+  return blocks;
+}
+
+/** A top-level report field as an outline node. */
+function fieldNode(k, v, id) {
+  const node = { id, title: label(k), blocks: [], children: [] };
+  if (Array.isArray(v)) {
+    node.badge = String(v.length);
+    if (!v.length) { node.blocks.push({ t: "kv", rows: [{ k: "items", v: "none", tone: "muted" }] }); node.tone = "muted"; return node; }
+    if (v.every((x) => x && typeof x === "object" && !Array.isArray(x))) {
+      v.forEach((item, i) => {
+        const key = itemTitle(item);
+        const rest = Object.fromEntries(Object.entries(item).filter(([kk]) => kk !== key));
+        node.children.push({ id: `${id}.${i}`, title: `${i + 1}. ${key ? item[key] : `item ${i + 1}`}`, depth: 0,
+          tone: itemTone(item), blocks: fieldBlocks(rest), children: [] });
+      });
+    } else node.blocks.push({ t: "md", text: listMd(v, 0).join("\n") });
+    node.tone = FIELD_TONE[k] ?? worst(node.children.map((c) => c.tone));
+    return node;
+  }
+  if (v && typeof v === "object") { node.blocks = fieldBlocks(v); node.tone = itemTone(v); return node; }
+  node.blocks.push(typeof v === "string" ? { t: "md", text: v || "*(empty)*" } : { t: "kv", rows: [{ k: label(k), v: String(v), mono: true }] });
+  return node;
+}
+
+const STATUS_KIND = (xy) => xy === "??" ? "untracked" : /U|AA|DD/.test(xy) ? "conflict" : /R|C/.test(xy) ? "renamed"
+  : /D/.test(xy) ? "deleted" : /A/.test(xy) ? "added" : "modified";
+
+/** DIFF_SCRIPT's output: { head, files: [{ code, kind, path }], stat: [{ path, n, plus, minus }], total, note }. */
+export function parseDiff(text) {
+  const lines = String(text ?? "").split("\n");
+  const head = lines[0]?.startsWith("## ") ? lines.shift().slice(3) : null;
+  const files = [], stat = [];
+  let total = null, note = [];
+  for (const l of lines) {
+    let m;
+    if (!l.trim()) continue;
+    if ((m = /^([ MADRCU?!]{2}) (.+)$/.exec(l)) && !l.includes(" | ")) { files.push({ code: m[1].trim() || m[1], kind: STATUS_KIND(m[1]), path: m[2] }); continue; }
+    if ((m = /^\s*(.+?)\s+\|\s+(\d+|Bin.*)\s*([+-]*)\s*$/.exec(l))) {
+      const plus = (m[3].match(/\+/g) ?? []).length, minus = (m[3].match(/-/g) ?? []).length, n = Number(m[2]) || 0;
+      const share = plus + minus ? plus / (plus + minus) : 0;
+      stat.push({ path: m[1], n, plus: Math.round(n * share), minus: n - Math.round(n * share) });
+      continue;
+    }
+    if (/files? changed/.test(l)) { total = l.trim(); continue; }
+    note.push(l);
+  }
+  return { head, files, stat, total, note: note.join("\n").trim() };
+}
+
+const KIND_WORD = { added: "added", modified: "modified", deleted: "deleted", renamed: "renamed", untracked: "new", conflict: "conflict" };
+
+/** The Result dialog as a doc: overview (verdict, conclusion), the report's fields, then the worktree's changes. */
+export function resultDoc(c, text, older = [], diff = null) {
+  const v = text == null || String(text).length > MARKDOWN_LIMIT ? null : parseJSON(text);
+  const check = { ok: ["passes the schema", "ok"], bad: ["fails the schema", "bad"], missing: ["no report file", "bad"] }[c.report]
+    ?? ["not checked yet (hd_dispatch.py collect checks it)", "muted"];
+  const over = { id: "overview", title: "Overview", blocks: [], children: [] };
+  const obj = v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  const verdictKey = obj && VERDICT_KEYS.find((k) => typeof obj[k] === "string");
+  if (verdictKey) { over.blocks.push({ t: "lead", label: label(verdictKey), text: obj[verdictKey], tone: wordTone(obj[verdictKey]) ?? "accent", short: true }); over.tone = wordTone(obj[verdictKey]); }
+  for (const k of LEAD_KEYS) if (obj && typeof obj[k] === "string" && obj[k]) over.blocks.push({ t: "lead", label: label(k), text: obj[k], tone: over.tone ?? "accent" });
+  if (obj?.recommendation && typeof obj.recommendation === "object") {
+    const r = obj.recommendation, key = itemTitle(r) ?? Object.keys(r).find((k) => typeof r[k] === "string");
+    if (key) over.blocks.push({ t: "lead", label: "recommendation", text: r[key], tone: "accent" });
+  }
+  over.blocks.push({ t: "kv", rows: [
+    { k: "schema check", v: check[0], tone: check[1] },
+    { k: "report", v: c.reportPath || "—", mono: true },
+    { k: "schema", v: c.schema || "—", mono: true },
+    ...(older.length ? [{ k: "earlier rounds", v: older.map(baseName).join(", "), mono: true }] : []),
+  ] });
+  if (!over.tone && check[1] === "bad") over.tone = "bad";
+  const nodes = [over];
+  if (text == null) over.blocks.push({ t: "kv", rows: [{ k: "report", v: "not written yet", tone: "warn" }] });
+  else if (!obj) over.blocks.push({ t: v === null ? "code" : "md", label: "report", text: v === null ? String(text) : listMd(v, 0).join("\n") });
+  else {
+    const skip = new Set([verdictKey, ...LEAD_KEYS.filter((k) => typeof obj[k] === "string")]);
+    Object.entries(obj).forEach(([k, x], i) => { if (!skip.has(k)) nodes.push(fieldNode(k, x, `f${i}`)); });
+  }
+  if (diff != null) {
+    const d = parseDiff(diff), counts = {};
+    for (const f of d.files) counts[f.kind] = (counts[f.kind] ?? 0) + 1;
+    const changes = { id: "changes", title: "Changes in the worktree", badge: String(d.files.length), tone: d.files.some((f) => f.kind === "conflict") ? "bad" : "info", blocks: [], children: [] };
+    if (d.head) changes.blocks.push({ t: "kv", rows: [{ k: "branch @ dir", v: d.head, mono: true }] });
+    if (d.note) changes.blocks.push({ t: "code", text: d.note });
+    if (d.files.length) changes.children.push({ id: "changes.files", title: "Files", depth: 0,
+      badge: Object.entries(counts).map(([k, n]) => `${n} ${KIND_WORD[k]}`).join(" · "), blocks: [{ t: "files", rows: d.files }], children: [] });
+    if (d.stat.length) changes.children.push({ id: "changes.stat", title: "Lines changed", depth: 0, badge: d.total ?? "", blocks: [{ t: "stat", rows: d.stat, total: d.total }], children: [] });
+    if (!d.files.length && !d.stat.length && !d.note) changes.blocks.push({ t: "kv", rows: [{ k: "changes", v: "none", tone: "muted" }] });
+    nodes.push(changes);
+  }
+  return { nodes };
+}
+
+/** A markdown file split at its headings (outside code fences): { preface, sections: [{ title, level, body }] }. */
+export function splitHeadings(md) {
+  const sections = [], pre = [];
+  let cur = null, inFence = false;
+  for (const line of String(md ?? "").split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    const m = !inFence && /^(#{1,3})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (m) { sections.push(cur = { title: m[2], level: m[1].length, body: [] }); continue; }
+    (cur ? cur.body : pre).push(line);
+  }
+  const trim = (ls) => ls.join("\n").replace(/^\s+|\s+$/g, "");
+  return { preface: trim(pre), sections: sections.map((x) => ({ title: x.title, level: x.level, body: trim(x.body) })) };
+}
+
+/** An event's tone in the timeline. */
+export function eventTone(e) {
+  if (e.sent === false) return "bad";
+  switch (e.ev) {
+    case "dispatch": case "send": case "resume": case "adopt": case "handover": case "recover": return "accent";
+    // exited after a good report is how a helper ends; blocked waits on someone
+    case "settle": return e.report === "bad" || e.report === "missing" || (e.failure && !["exited", "blocked"].includes(e.failure)) ? "bad"
+      : e.failure === "blocked" ? "warn" : e.report === "ok" ? "ok" : null;
+    case "lost": case "stop": return "bad";
+    case "retry": case "offline": case "stall": case "pause": case "freeze": return "warn";
+    case "codex": case "cleanup": return "muted";
+    default: return null;
+  }
+}
+
+const plain = (md) => String(md).replace(/\*\*|`/g, "");
+
+/** The Task dialog as a doc: an overview of the call, then each round (newest first) with its events and its task file. */
+export function taskDoc(c, eventsText, tasks = {}) {
+  const evs = String(eventsText ?? "").split("\n").map((l) => l.trim() && parseJSON(l)).filter((e) => e && e.ev);
+  const rounds = Math.max(c.round ?? 1, ...evs.map((e) => e.round ?? 1), ...Object.keys(tasks).map(Number));
+  const first = evs.find((e) => e.ev === "dispatch");
+  const how = (k, mine) => mine.find((e) => e.ev === "handover") ? "handed over" : k === 1 ? "dispatched" : "rework";
+  const over = { id: "overview", title: "Overview", blocks: [], children: [] };
+  over.blocks.push({ t: "kv", rows: [
+    { k: "call", v: c.call, mono: true },
+    first?.title || c.title ? { k: "title", v: first?.title || c.title } : null,
+    { k: "mode · effort", v: [c.mode || first?.mode, c.effort || first?.effort].filter(Boolean).join(" · ") || "—", mono: true },
+    { k: "agent", v: c.agent || "codex", tone: c.agent && c.agent !== "codex" ? "warn" : null },
+    { k: "round", v: `${c.round ?? 1} of ${rounds}`, mono: true },
+    { k: "report", v: c.report ?? "not checked", tone: wordTone(c.report) ?? "muted" },
+    c.failure ? { k: "failure", v: c.failure, tone: c.failure === "exited" ? "muted" : c.failure === "blocked" ? "warn" : "bad" } : null,
+    c.dir ? { k: "worktree", v: c.dir, mono: true } : null,
+  ].filter(Boolean) });
+  const summary = [];
+  for (let k = 1; k <= rounds; k++) {
+    const mine = evs.filter((e) => (e.round ?? 1) === k), settle = [...mine].reverse().find((e) => e.ev === "settle");
+    const start = mine.find((e) => e.ev === "dispatch" || e.ev === "send" || e.ev === "handover");
+    summary.push({ k: `round ${k}`, v: [how(k, mine), start && clock(start.t), settle ? plain(eventWords(settle)) : k === (c.round ?? 1) ? "in progress" : null].filter(Boolean).join(" · "),
+      tone: settle ? eventTone(settle) : k === (c.round ?? 1) ? "accent" : "muted" });
+  }
+  over.blocks.push({ t: "kv", label: "rounds", rows: summary });
+  const nodes = [over];
+  for (let k = rounds; k >= 1; k--) {
+    const mine = evs.filter((e) => (e.round ?? 1) === k), settle = [...mine].reverse().find((e) => e.ev === "settle");
+    const node = { id: `r${k}`, title: `Round ${k} · ${how(k, mine)}`, badge: k === (c.round ?? 1) ? "current" : "",
+      tone: settle ? eventTone(settle) : k === (c.round ?? 1) ? "accent" : "muted", blocks: [], children: [] };
+    const timeline = { id: `r${k}.events`, title: "Timeline", depth: 0, badge: String(mine.length), blocks: [], children: [] };
+    timeline.blocks.push(mine.length ? { t: "events", rows: mine.map((e) => ({ time: clock(e.t), text: plain(eventWords(e)), tone: eventTone(e) })) }
+      : { t: "kv", rows: [{ k: "events", v: evs.length ? "none in this round" : "none recorded (dispatched before hd_dispatch.py kept events.jsonl)", tone: "muted" }] });
+    node.children.push(timeline);
+    const task = tasks[k];
+    if (task == null) node.children.push({ id: `r${k}.task`, title: `task-${k}.md`, depth: 0, tone: "muted", blocks: [{ t: "kv", rows: [{ k: "task file", v: "missing", tone: "muted" }] }], children: [] });
+    else {
+      const { preface, sections } = splitHeadings(task);
+      const top = Math.min(3, ...sections.map((x) => x.level));
+      node.children.push({ id: `r${k}.task`, title: `task-${k}.md`, depth: 0, badge: sections.length ? String(sections.length) : "",
+        blocks: preface ? [{ t: "md", text: preface }] : [], children: [], head: true });
+      sections.forEach((x, i) => node.children.push({ id: `r${k}.s${i}`, title: x.title, depth: 1 + x.level - top,
+        blocks: x.body ? [{ t: "md", text: demote(x.body, 2) }] : [], children: [] }));
+    }
+    nodes.push(node);
+  }
+  return { nodes };
+}
+
 // ---- Spaces ----
 
 const under = (path, folder) => Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/+$/, "")}/`));
@@ -605,9 +842,27 @@ export function quotaAgent(name) {
 }
 
 /**
+ * Runs still going: a helper's terminal lives, or it is paused, or it is the newest run of a main agent
+ * whose terminal lives (its helpers may all have ended while it works on); never a stopped one.
+ * → Set of run dirs. buildRuns sets each run's `live` from it.
+ */
+/**
  * The subscription a run's main agent uses right now: what its terminal runs (herdr's program key, else
  * its argv), else what hd_dispatch.py recorded at dispatch or adopt. null when it is neither.
  */
+export function activeRuns(runs, terminals) {
+  const live = new Set((terminals ?? []).filter((t) => t.state === "live").map((t) => t.address));
+  const out = new Set(), newest = new Map();
+  for (const r of runs ?? []) {
+    const state = r.control?.state;
+    if (state === "stopped" || state === "stopping") continue;
+    if ((r.helpersLive ?? r.live) || state === "paused") out.add(r.dir);
+    if (r.parent && live.has(r.parent) && (newest.get(r.parent)?.lastAt ?? -1) < (r.lastAt || 0)) newest.set(r.parent, r);
+  }
+  for (const r of newest.values()) out.add(r.dir);
+  return out;
+}
+
 export function runQuotaAgent(r, terminals) {
   const term = r?.parent ? (terminals ?? []).find((x) => x.address === r.parent && x.state === "live") : null;
   return quotaAgent(term?.program?.key) ?? quotaAgent(term?.foreground?.argv?.[0] ?? term?.argv?.[0]) ?? quotaAgent(r?.mainAgent);
