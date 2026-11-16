@@ -9,6 +9,6 @@ cc-herdr-dispatch-review 的 SKILL.md"Codex 不可用时"一节的 FAILURE 表�
 
 分诊、补强、终止条件都不变。把降级的阶段记入 `state.json.degraded_stages`。
 
-**暂停**：把 `state.json` 写完整，告诉用户之后执行 `/cc-herdr-dispatch-review .cc-dispatch/review-$RUN` 续跑。
+**暂停**：把 `state.json` 写完整，告诉用户之后执行 `/cc-herdr-dispatch-review .cc-dispatch/review-$RUN`（或在新会话里说"用 cc-herdr-dispatch-review 接着之前的运行"） 续跑。
 
-**续跑与恢复**：参数指向一个已有的 `review-*` 目录时，先读 `state.json`，从中断的阶段继续。先运行 `hd_dispatch.py probe`：返回 `none` 时把 `codex` 改回 `available`。如果有降级过的阶段，问用户是否用 Codex 把这些阶段重跑一遍，补回不同模型的视角。
+**续跑与恢复**：参数指向一个已有的 `review-*` 目录、或用户要你接着之前的运行时，先按 shared/herdr.md"接手运行"做完 `takeover`（你本来就是它的主 agent 时输出 `TAKEOVER=self`，照样往下）。然后读 `state.json`，从中断的阶段继续。先运行 `hd_dispatch.py probe`：返回 `none` 时把 `codex` 改回 `available`。如果有降级过的阶段，问用户是否用 Codex 把这些阶段重跑一遍，补回不同模型的视角。

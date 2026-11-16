@@ -24,7 +24,7 @@
 ```
 shared/herdr.md              共用约定：分工、派发与回报、失败处理、守则
 shared/survey.md             代码摸底的做法
-shared/scripts/hd_dispatch.py  派发脚本：probe / run / send / wait / collect / status / diagnose / cleanup
+shared/scripts/hd_dispatch.py  派发脚本：probe / run / send / wait / collect / status / diagnose / cleanup，以及 pause / resume / stop / handoff / adopt / recover / takeover / runs
 shared/scripts/hd_check.py   按 schema 检查回报 JSON
 shared/scripts/hd_handoff.py 交接包：子 agent 移交（handover）和主 agent 交接（handoff / adopt）用的材料
 shared/scripts/hd_usage.py   主 agent 的账号额度：优先从 magpie 读，面板运行卡片上显示，超过阈值时提示主 agent 先问你要不要交接
@@ -42,6 +42,7 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
+- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（report ok / merged / done / parked / ended，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「n archived · show」里能看到并取消归档；之后再向这个运行派发会自动取消归档。
 - 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的 Claude：`parent`（终端）、`space`（herdr space）、`session`（Claude Code 会话，面板据此读它的后台任务）、`claude_cwd`。
 
 ## Herdr 面板
@@ -73,6 +74,16 @@ Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"�
 ## 意外中断后恢复
 
 herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面板上标为"已中断"（`lost`），面板只提示，不自动处理。经你同意后主 agent 运行 `hd_dispatch.py recover`：子 agent 能续上原会话就续上，续不上就开新会话读原任务卡接着做；恢复后运行先处于暂停，主 agent 收一遍现状、你确认后再 `resume`。主 agent 自己也没了时，`recover` 会给出续上原主 agent 会话的命令，以及交给新主 agent 的交接包和提示词。
+
+## 新会话接手没做完的运行
+
+主 agent 的会话不在了（终端被关、程序退出、herdr 重启），运行还没做完时，开一个新会话接着做，不用记命令：
+
+- **面板**：这样的运行卡片头下有一行「The main agent (…) is gone」和 **Copy resume prompt** 按钮。在 herdr 里新开终端，启动 Claude Code 或 Codex（Codex 用 `codex --sandbox danger-full-access`），粘贴复制的提示词。
+- **直接说**：在新会话里说"用 cc-herdr-dispatch-dev 接着之前的运行"（research、review 同理）。skill 运行 `hd_dispatch.py runs` 列出本仓库没做完的运行，问你接哪个。
+- 新主 agent 运行 `hd_dispatch.py takeover --run <dir>`：一步完成恢复中断的子 agent 和接手（`recover` + `adopt`），运行先处于暂停；再向你复述现状，你确认后才继续派发。原主 agent 还开着时会拒绝，除非你明确让它接手（`--force`）。
+- 新旧主 agent 是什么程序都可以（Claude Code、Codex，之后的 Antigravity 等）。主 agent 程序登记在 `hd_dispatch.py` 的 `MAIN_AGENTS` 里（会话变量、续上原会话的命令）；没登记的程序照样能接手，只是不给续上原会话的命令。
+- 主 agent 给出最终结论后会在 `state.json` 写 `finished`，这样的运行不再出现在 `runs` 和面板的接手提示里。
 
 ## 子 agent 的权限
 

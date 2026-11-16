@@ -4,6 +4,8 @@ import {
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
   summary, callDetail, runSpace, splitBySpace, callStage, runStage, stageSummary, groupByStage, SETTLED, cardCounts, ago, handoffAsk, handoffText, prettyReport, taskPath, timelineMarkdown, eventWords,
   CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, activeRuns, callTags,
+  ARCHIVE_SEP, parseArchived, canArchive, archivedAway, cardView, parkedWhy, handoffAsks,
+  agentIn, mainLive, needsTakeover, takeoverPrompt, takeoverBanner, skillOf,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
@@ -423,4 +425,111 @@ test("buildRuns: a run whose helpers all ended stays live while its main agent w
   assert.equal(r.helpersLive, false);
   assert.equal(r.live, true);
   assert.equal(buildRuns(entries, [{ address: "t9", state: "finished" }])[0].live, false);
+});
+
+test("parseArchived reads the markers ahead of control.json and meta.json", () => {
+  const out = `\n${ARCHIVE_SEP}/r/.cc-dispatch/dev-a/archived\n1700000000\n\n${CONTROL_SEP}/r/.cc-dispatch/dev-b/control.json\n{"state":"stopped"}\n${SEP}/r/.cc-dispatch/dev-a/agents/x/meta.json\n{}`;
+  assert.deepEqual(parseArchived(out), { "/r/.cc-dispatch/dev-a": 1700000000000 });
+  assert.deepEqual(Object.keys(parseControls(out)), ["/r/.cc-dispatch/dev-b"]);
+});
+
+test("canArchive: every helper settled, whatever is still open", () => {
+  const ok = { call: "a", state: "live", status: "done", report: "ok" };   // reported fine, terminal still open
+  const run = (calls, extra = {}) => ({ live: true, control: null, calls, ...extra });
+  assert.equal(canArchive(run([ok, { call: "b", state: "gone", report: "ok" }])), true);
+  assert.equal(canArchive(run([ok, { call: "b", state: "live", status: "working" }])), false);
+  assert.equal(canArchive(run([ok]), { a: "running" }), false);          // dev card not reviewed yet
+  assert.equal(canArchive(run([ok]), { a: "merged" }), true);
+  assert.equal(canArchive(run([{ call: "a", state: "live", status: "done", report: "bad" }])), false);
+  for (const state of ["paused", "stopping", "handoff"]) assert.equal(canArchive(run([ok], { control: { state } })), false);
+  assert.equal(canArchive(run([ok], { control: { state: "stopped" } })), true);
+  assert.equal(canArchive(run([])), false);
+  assert.equal(archivedAway(run([ok], { archived: 5 })), true);
+  assert.equal(archivedAway(run([{ call: "a", state: "live", status: "working" }], { archived: 5 })), false);
+});
+
+test("buildRuns marks archived runs", () => {
+  const entries = [{ path: `${RUN}/agents/a/meta.json`, meta: meta("a") }];
+  const [r] = buildRuns(entries, [], {}, { [RUN]: 5 });
+  assert.equal(r.archived, 5);
+  assert.equal(buildRuns(entries, [])[0].archived, null);
+});
+
+test("cardView: merged out of the cards meant to be merged; cards with no helper, queued last", () => {
+  const run = { checks: 2, cards: {
+    T1: { status: "merged" }, T2: { status: "parked" }, T3: { status: "running" },
+    T4: { status: "pending", depends_on: ["T1", "T3", "T2"] }, T5: { status: "accepting", note: "main agent runs it" } } };
+  const v = cardView(run, ["T1", "T2", "T3"]);
+  assert.deepEqual([v.merged, v.goal, v.parked, v.total, v.checks], [1, 4, 1, 5, 2]);
+  assert.deepEqual(v.undispatched.map((k) => [k.id, k.waits]), [["T5", []], ["T4", ["T3", "T2"]]]);
+  assert.equal(cardView({ status: { A: "merged" } }).goal, 1);  // status-only (older stats cache)
+});
+
+test("parkedWhy: state.json's reason, else read from the note, else the person decides", () => {
+  assert.equal(parkedWhy({ status: "merged" }), null);
+  assert.equal(parkedWhy({ status: "parked", parked_why: "dropped" }), "dropped");
+  assert.equal(parkedWhy({ status: "parked", note: "superseded by WF (log 2026-11-13)" }), "superseded");
+  assert.equal(parkedWhy({ status: "parked", note: "3 rounds failed" }), "user");
+});
+
+test("handoffAsks: review a good report on an unreviewed card; carry on or drop a card parked for you", () => {
+  const ok = { call: "T1", state: "gone", report: "ok" };
+  assert.deepEqual(handoffAsks(ok, { status: "running" }), ["accept"]);
+  assert.deepEqual(handoffAsks(ok, { status: "parked" }), ["resume", "drop"]);
+  assert.deepEqual(handoffAsks(ok, { status: "parked", parked_why: "superseded" }), []);
+  assert.deepEqual(handoffAsks(ok, { status: "merged" }), []);
+  assert.deepEqual(handoffAsks({ ...ok, report: "bad" }, { status: "accepting" }), ["bad"]);
+  assert.match(handoffText({ ...ok, runDir: "/r/.cc-dispatch/dev-1" }, "drop"), /parked_why=dropped/);
+});
+
+test("canArchive: a queued card keeps the run open", () => {
+  const ok = { call: "T1", state: "gone", report: "ok" };
+  assert.equal(canArchive({ calls: [ok] }, { T1: "merged", T2: "pending" }), false);
+  assert.equal(canArchive({ calls: [ok] }, { T1: "merged", T2: "parked" }), true);
+});
+
+test("agentIn: herdr's program key, else the program in front; a bare shell or a gone terminal is none", () => {
+  assert.equal(agentIn({ state: "live", program: { key: "codex" } }), "codex");
+  assert.equal(agentIn({ state: "live", foreground: { argv: ["/opt/bin/antigravity", "x"] } }), "antigravity");
+  assert.equal(agentIn({ state: "live", foreground: { argv: ["-zsh"] } }), null);
+  assert.equal(agentIn({ state: "live", program: { key: "zsh" }, foreground: { argv: ["zsh"] } }), null);
+  assert.equal(agentIn({ state: "finished", program: { key: "claude" } }), null);
+  assert.equal(agentIn(undefined), null);
+});
+
+test("needsTakeover: the main agent is gone and the run is not done", () => {
+  const terms = [{ address: "t1", state: "live", program: { key: "claude" } }];
+  const run = (calls, extra = {}) => ({ dir: "/r/.cc-dispatch/20260101-x", kind: "dev", parent: "t1", calls, control: null, hd: "/h/hd_dispatch.py", ...extra });
+  const settled = { call: "T1", state: "gone", report: "ok" };
+  const working = { call: "T2", state: "live", status: "working" };
+  assert.equal(needsTakeover(run([working]), terms, {}), false, "its main agent still runs");
+  assert.equal(needsTakeover(run([working]), [], {}), true, "a helper still at work");
+  assert.equal(needsTakeover(run([working]), [{ address: "t1", state: "live", foreground: { argv: ["zsh"] } }], {}), true, "back at the shell");
+  assert.equal(needsTakeover(run([settled]), [], { T1: "merged" }), false, "all done");
+  assert.equal(needsTakeover(run([settled]), [], { T1: "merged", T3: "pending" }), true, "a card left");
+  assert.equal(needsTakeover(run([settled]), [], { T1: "parked" }), false, "parked is settled");
+  assert.equal(needsTakeover(run([{ ...settled, report: null, lost: true }]), [], {}), true, "a lost helper");
+  assert.equal(needsTakeover(run([settled], { control: { state: "stopped" } }), [], {}), true, "stopped, waiting on the person");
+  assert.equal(needsTakeover(run([working], { control: { state: "handoff" } }), [], {}), false, "has its own prompt");
+  assert.equal(needsTakeover(run([working]), [], {}, true), false, "state.json says finished");
+});
+
+test("takeoverPrompt names the skill, the run and the takeover command, for any main agent", () => {
+  const r = { dir: "/r/.cc-dispatch/review-0107", kind: "review", hd: "/h/hd_dispatch.py", mainAgent: "codex" };
+  const p = takeoverPrompt(r);
+  assert.match(p, /cc-herdr-dispatch-review skill/);
+  assert.match(p, /`python3 \/h\/hd_dispatch\.py takeover --run \/r\/\.cc-dispatch\/review-0107`/);
+  assert.match(p, /确认之前/);
+  assert.equal(skillOf({ kind: "probe" }), "cc-herdr-dispatch-dev");
+  assert.equal(takeoverBanner(r), "The main agent (Codex) is gone · give a new one the prompt");
+  assert.equal(takeoverBanner({}), "The main agent is gone · give a new one the prompt");
+});
+
+test("buildRuns keeps only Claude Code main agents' sessions for background tasks", () => {
+  const runs = buildRuns([
+    { path: `${RUN}/agents/a/meta.json`, meta: meta("a", { session: "s-claude", dispatcher_agent: "claude", started_at: 100 }) },
+    { path: `${RUN}/agents/b/meta.json`, meta: meta("b", { session: "th-codex", dispatcher_agent: "codex", started_at: 200 }) },
+  ], []);
+  assert.deepEqual(runs[0].sessions, ["s-claude"]);
+  assert.equal(runs[0].session, "s-claude");
 });

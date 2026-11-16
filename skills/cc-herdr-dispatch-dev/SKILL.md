@@ -18,8 +18,12 @@ argument-hint: "<方案文件路径或需求描述> [--parent .cc-dispatch/<run>
 ```
 state.json        运行状态：base 分支与 sha、集成分支、checkpoints、codex（available/unavailable）、
                   tasks（以卡片编号为键，如 "T1": {...}）：每个任务的 title/status/owner/worktree/
-                  branch/NAME/返工轮数/degraded。status 只用 pending（未开始）/ running（子 agent 在做）/
-                  accepting（验收或返工中）/ merged（已合入集成分支）/ parked（搁置）
+                  branch/NAME/返工轮数/degraded/depends_on（依赖的卡片编号）/note（一句话现状）。
+                  status 只用 pending（未开始）/ running（子 agent 在做）/ accepting（验收或返工中）/
+                  merged（已合入集成分支）/ parked（搁置）。parked 的卡必须写 parked_why：user（交给用户
+                  决定，还没答复）/ superseded（被另一张卡取代，by 写那张卡的编号）/ dropped（用户决定不做），
+                  note 写原因。tasks 只放要合入的任务卡：复核（T<n>-check-r<k>）和摸底（survey）不是卡，
+                  不进 tasks，复核结论记在被复核卡的 checks（如 {"r1": "LGTM"}）和 log.md
 plan.md           采用的方案（输入方案的副本或你写的简版）
 survey.md         代码摸底结论（要改的位置、可参照的实现、测试命令、约定），任务卡的线索来源
 contracts.md      模块边界与接口契约
@@ -48,7 +52,7 @@ Worktree 放在仓库**外面**，避免被主仓库的测试和构建扫到：`
 
 ### 1. 读方案与代码摸底
 
-如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/<run>/` 目录，这是续跑：直接按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
+如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/<run>/` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
 
 **找输入**：$ARGUMENTS 指定的文件 → 对话中刚产出的方案（例如 cc-herdr-dispatch-research 的 `plan.md`、cc-herdr-dispatch-review 的结果）→ 都没有时，摸底之后根据需求和代码现状写一份简版方案。方案存为 `plan.md`。如果需求含糊到会影响拆分，先问用户。
 
@@ -95,16 +99,20 @@ python3 $HD run --run $RD --call T<n> --mode write --effort high \
   --dir "$WT_ROOT/T<n>" --schema "$SKILL_DIR/references/report.schema.json" --prompt $RD/tasks/T<n>-prompt.md \
   --title "<卡片标题的英文简写>"
 ```
-小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
+小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板会把它列在"no helper yet"下并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
 
-`wait` 每报回一张卡，按它的输出处理：`REPORT_OK` 进入验收；其他情况按 shared/herdr.md 处理，属于 `FAILURE=` 的再按"Codex 不可用时"处理。
+`wait` 每报回一张卡，按它的输出处理：`REPORT_OK` 先把卡改为 `accepting` 再验收（停在 running 的卡在面板上显示为 awaiting review，用户会来催）；其他情况按 shared/herdr.md 处理，属于 `FAILURE=` 的再按"Codex 不可用时"处理。
 
 **4.4 验收**：每个任务交回报后，按 [references/acceptance.md](references/acceptance.md) 验收，给出四种结论之一：**通过 / 小修 / 返工 / 搁置**，结论和理由记入 `log.md`。
 
 **4.5 修复路由**：
 - **小修**：只限小活（一个文件、约 20 行以内、修法已确定）。你直接在 worktree 里改，然后重新跑验收命令。
 - **返工**：在同一个 worktree 里 `send` 给这张卡的子 agent，提示格式见 acceptance.md，然后启动 `wait`。每张卡最多返工 3 轮。
-- **搁置**：3 轮后仍不通过、回报 `blocked`、或者问题出在契约本身。这时停止这张卡，说明原因和选项，交给用户决定。契约有错会影响其他卡，要先改 `contracts.md` 再处理受影响的卡。
+- **搁置**：3 轮后仍不通过、回报 `blocked`、或者问题出在契约本身。这时停止这张卡，写 `status: parked`、`parked_why: user`、`note`（原因），说明原因和选项，交给用户决定。契约有错会影响其他卡，要先改 `contracts.md` 再处理受影响的卡。被另一张卡取代的写 `parked_why: superseded`、`by`，不用问用户。
+
+**搁置之后**：用户的决定可能在对话里给，也可能来自面板（消息以 `[cc-dispatch 面板]` 开头，带 `run=` 和 `call=`）：
+- 继续做：卡改回 `pending`，`parked_why` 删掉、`note` 记下用户的决定；按你的判断在原 worktree 里返工（子 agent 还在用 `send`，已结束用 `run` 开新调用），或者需要改契约时先改 `contracts.md`、拿不准就先问用户。返工轮数重新计。
+- 不做了：写 `parked_why: dropped`、`note`，它的 worktree 和分支先问用户是否保留。依赖它的卡要么改依赖，要么一起搁置并说明。
 
 **4.6 入集成分支**：卡片通过后，`python3 $HD cleanup --run $RD --call T<n>` 结束它的子 agent，由你提交（子 agent 不提交），以一个提交压进集成分支，不产生合并提交。提交说明按通用守则"提交记录只写改动本身"来写，描述这张卡带来的行为变化，不写卡片编号：
 ```bash

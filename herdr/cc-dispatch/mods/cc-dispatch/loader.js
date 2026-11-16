@@ -1,6 +1,6 @@
 // What the panel reads from disk. Takes its I/O as arguments ({ sh, py, readText }) so
 // herdr/tests/loader.test.mjs can run it under node; main.js passes Herdr's exec/readTextFile.
-import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, buildRuns, runRoots, prettyReport, taskPath } from "./model.js";
+import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, parseArchived, ARCHIVE_SCRIPT, buildRuns, runRoots, prettyReport, taskPath } from "./model.js";
 import { STATS_PY, statsRequest } from "./stats.js";
 import { BG_PY, bgRequest, LIVE_SCRIPT, parseLive } from "./bg.js";
 
@@ -20,7 +20,13 @@ export async function loadRuns({ sh }, repo, terminals) {
   if (!roots.length) return { runs: [], error: null };
   const r = await sh(LIST_SCRIPT, roots);
   if (r.code !== 0 && !r.stdout) return { runs: [], error: (r.stderr ?? "").trim() || `exit ${r.code}` };
-  return { runs: buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout)), error: null };
+  return { runs: buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout)), error: null };
+}
+
+/** Archive or unarchive a run (op "archive" | "unarchive"): { ok, error }. */
+export async function archiveRun({ sh }, r, op) {
+  const x = await sh(ARCHIVE_SCRIPT, [op, r.dir]);
+  return { ok: x.code === 0, error: x.code === 0 ? null : (x.stderr ?? "").trim() || `exit ${x.code}` };
 }
 
 /** Where hd_dispatch.py keeps a copy of round k's report in the run folder (/tmp does not survive a reboot). */
@@ -97,11 +103,11 @@ export async function earlierReports({ sh }, c) {
  * { error } when the script could not run (no python3, a remote machine without it).
  */
 export async function loadStats({ py }, runs) {
-  if (!runs.length) return { calls: {}, runs: {} };
+  if (!runs.length) return { calls: {}, runs: {}, finished: {} };
   const r = await py(STATS_PY, [JSON.stringify(statsRequest(runs))]);
   const v = r.code === 0 ? parseJSON(r.stdout) : null;
   if (!v || typeof v !== "object") return { error: ((r.stderr ?? "").trim().split("\n").pop() || `exit ${r.code}`) };
-  return { calls: v.calls ?? {}, runs: v.runs ?? {} };
+  return { calls: v.calls ?? {}, runs: v.runs ?? {}, finished: v.finished ?? {} };
 }
 
 /**

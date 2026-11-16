@@ -11,10 +11,20 @@
 export const KINDS = ["research", "review", "dev", "fix", "test", "probe", "retro"];
 export const SEP = "@@cc-dispatch-meta ";
 export const CONTROL_SEP = "@@cc-dispatch-control ";
+// A run the user archived from the panel: <run>/archived holds when (epoch seconds). Listed before the
+// control.json files, so it never lands inside one of them.
+export const ARCHIVE_SEP = "@@cc-dispatch-archived ";
 
 // The shell script the loader runs: every run's control.json, each introduced by a CONTROL_SEP line
 // with its path, then every meta.json under the given run-parent folders, each introduced by a SEP line.
 export const LIST_SCRIPT = [
+  'for root in "$@"; do',
+  '  for f in "$root"/*/archived; do',
+  '    [ -f "$f" ] || continue',
+  `    printf '\\n${ARCHIVE_SEP}%s\\n' "$f"`,
+  '    cat "$f"',
+  '  done',
+  'done',
   'for root in "$@"; do',
   '  for f in "$root"/*/control.json; do',
   '    [ -f "$f" ] || continue',
@@ -61,6 +71,38 @@ export function parseControls(text) {
   }
   return out;
 }
+
+/** The archive markers in LIST_SCRIPT's output → { <run dir>: archived at (ms) }. */
+export function parseArchived(text) {
+  const out = {}, head = String(text ?? "").split(SEP)[0].split(CONTROL_SEP)[0];
+  for (const chunk of head.split(ARCHIVE_SEP).slice(1)) {
+    const [path, at] = chunk.split("\n");
+    if (path?.trim()) out[path.trim().replace(/\/archived$/, "")] = (Number(at) || 0) * 1000;
+  }
+  return out;
+}
+
+/** Archive (or take back out) an ended run: `sh -c ARCHIVE_SCRIPT _ archive|unarchive <run dir>`. */
+export const ARCHIVE_SCRIPT = 'case "$1" in archive) date +%s > "$2/archived" ;; unarchive) rm -f "$2/archived" ;; *) exit 2 ;; esac';
+
+/**
+ * Whether the panel offers to archive a run: once every helper is in a settled stage (report ok, merged,
+ * done, parked, ended: nothing left for anyone to do), no card is still queued, in progress or in review,
+ * and the run is not paused, stopping or handing off.
+ * Not whether it is `live`: a run whose helpers all reported fine is done even while their terminals are
+ * still open or its main agent still runs. `cards` is the run's card statuses (state.json), if any.
+ * An archived run stays hidden only while this holds: a helper that needs someone again brings it back,
+ * and hd_dispatch.py run / send remove the marker.
+ */
+export function canArchive(r, cards) {
+  const state = r?.control?.state ?? "running";
+  if (["paused", "stopping", "handoff"].includes(state) || !r?.calls?.length) return false;
+  if (Object.values(cards ?? {}).some((s) => !CARD_FINAL.has(s))) return false; // a card still to do (queued, …)
+  return r.calls.every((c) => SETTLED.has(callStage(c, cards?.[c.call])));
+}
+
+/** Archived and still settled: left out of the list (shown under "n archived"). */
+export const archivedAway = (r, cards) => Boolean(r?.archived) && canArchive(r, cards);
 
 /** <run>/agents/<call>/meta.json → <run>. */
 export const runDirOf = (metaPath) => metaPath.replace(/\/agents\/[^/]+\/meta\.json$/, "");
@@ -209,7 +251,10 @@ export function runParent(calls, terminals) {
   return (byNewest.find((c) => live.has(c.parent)) ?? byNewest[0])?.parent ?? null;
 }
 
-export function buildRuns(entries, terminals, controls = {}) {
+/** Whether a call's main agent is (or may be) Claude Code: recorded so, or not recorded at all. */
+const claudeMain = (c) => !c.mainAgent || /claude/i.test(c.mainAgent);
+
+export function buildRuns(entries, terminals, controls = {}, archived = {}) {
   const byRun = new Map();
   for (const { path, meta } of entries ?? []) {
     const dir = runDirOf(path);
@@ -225,13 +270,15 @@ export function buildRuns(entries, terminals, controls = {}) {
     const need = calls.map(callNeed).sort((a, b) => rank(a) - rank(b))[0] ?? "gone";
     return {
       dir, id: baseName(dir), kind: kindOf(dir), repo: repoOf(dir),
-      calls, counts, need, control,
+      calls, counts, need, control, archived: archived?.[dir] ?? null,
       hd: calls.find((c) => c.hd)?.hd ?? null,
       helpersLive: calls.some((c) => c.state === "live"),
       parent: runParent(calls, terminals),
-      // Every main agent session that dispatched here, newest first: a long run outlives its first one.
-      sessions: [...new Set([...calls].sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).map((c) => c.session).filter(Boolean))],
-      session: calls.find((c) => c.session)?.session ?? null,
+      // Every Claude Code main agent session that dispatched here, newest first (a long run outlives its
+      // first one): their transcripts list the background tasks. Other main agents' sessions (a Codex
+      // thread, …) have no such transcript.
+      sessions: [...new Set([...calls].filter(claudeMain).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).map((c) => c.session).filter(Boolean))],
+      session: calls.find((c) => c.session && claudeMain(c))?.session ?? null,
       lastAt: Math.max(0, ...calls.map((c) => c.startedAt || 0)),
       space: calls.find((c) => c.space)?.space ?? null,
       claudeCwd: calls.find((c) => c.claudeCwd)?.claudeCwd ?? null,
@@ -340,6 +387,39 @@ export function stageSummary(stages) {
 
 /** A dev run's cards by status, for the cards bar: [[status, n]] in a fixed order. */
 export const CARD_ORDER = ["merged", "done", "accepting", "running", "pending", "parked"];
+/** The words for card statuses, kept apart from the helpers' stages ("working" is a helper's terminal). */
+export const CARD_WORDS = { merged: "merged", done: "done", accepting: "reviewing", running: "in progress", pending: "queued", parked: "parked" };
+const CARD_FINAL = new Set(["merged", "done", "parked"]);
+
+/**
+ * The cards line: merged out of the cards still meant to be merged (parked ones are not), and the cards
+ * no helper of the run stands for (`calls`: the run's call ids), queued first, with the dependencies
+ * they still wait on. `run` is the stats script's {status, cards, checks}.
+ */
+export function cardView(run, calls = []) {
+  const cards = run?.cards ?? Object.fromEntries(Object.entries(run?.status ?? {}).map(([k, s]) => [k, { status: s }]));
+  const all = Object.entries(cards), n = (s) => all.filter(([, c]) => c.status === s).length;
+  const parked = n("parked"), merged = n("merged") + n("done");
+  const have = new Set(calls);
+  const undispatched = all.filter(([id, c]) => !have.has(id) && !CARD_FINAL.has(c.status))
+    .map(([id, c]) => ({ id, ...c, waits: (c.depends_on ?? []).filter((d) => !CARD_FINAL.has(cards[d]?.status) || cards[d]?.status === "parked") }))
+    .sort((a, b) => (a.status === "pending") - (b.status === "pending") || a.id.localeCompare(b.id));
+  return { total: all.length, goal: all.length - parked, merged, parked, checks: run?.checks ?? 0, undispatched };
+}
+
+/**
+ * Why a card is parked: "user" (waiting for the person to decide: carry on or drop it), "superseded" (another
+ * card took its place) or "dropped" (decided against). state.json's parked_why, else read from its note
+ * (older runs), else "user": the dev skill parks a card to hand it to the person.
+ */
+export function parkedWhy(card) {
+  if (!card || card.status !== "parked") return null;
+  if (["user", "superseded", "dropped"].includes(card.parked_why)) return card.parked_why;
+  const note = `${card.note ?? ""} ${card.result ?? ""}`;
+  if (/supersed|replaced by|取代|替代/i.test(note)) return "superseded";
+  if (/dropped|abandon|不做|放弃/i.test(note)) return "dropped";
+  return "user";
+}
 export function cardCounts(cards) {
   const n = {};
   for (const s of Object.values(cards?.status ?? {})) n[s] = (n[s] ?? 0) + 1;
@@ -380,15 +460,30 @@ export function handoffText(c, ask) {
     diagnose: `${c.call} 出错了（${c.failure ?? "error"}），请诊断`,
     blocked: `${c.call} 停在等人确认的地方，请看一下它卡在哪`,
     lost: `${c.call} 的终端意外消失了（第 ${c.round} 轮还没交合格回报），请先 collect 确认，再问我要不要 recover 恢复（按 herdr.md 里 lost 的做法）`,
+    accept: `${c.call} 的回报已合格，但 state.json 里这张卡还没进入验收，请按 dev 4.4 验收并更新卡片状态`,
+    resume: `搁置的卡 ${c.call} 我决定继续做：请按 dev 4.5「搁置之后」把它改回 pending，按你的判断返工或重新派发；要改契约或拿不准的先问我`,
+    drop: `搁置的卡 ${c.call} 我决定不做了：请按 dev 4.5「搁置之后」把它记为 parked_why=dropped，它的 worktree 和分支先问我是否保留`,
   }[ask] ?? `请看一下 ${c.call}`;
   return `[cc-dispatch 面板] ${what}。run=${c.runDir} call=${c.call}（${run}）`;
 }
 
-/** Which hand-off fits a call now, or null when it needs nothing. */
-export function handoffAsk(c) {
+/**
+ * Which messages to the main agent fit a call now: [] when it needs nothing. `card` is its dev card
+ * ({status, parked_why, note}), if any: a good report on a card still pending / running asks for review;
+ * a card parked for the person to decide offers both answers, carry on or drop it.
+ */
+export function handoffAsks(c, card) {
   const need = callNeed(c);
-  return { blocked: "blocked", lost: "lost", error: "diagnose", bad: "bad", review: "collect" }[need] ?? null;
+  const one = { blocked: "blocked", lost: "lost", error: "diagnose", bad: "bad", review: "collect" }[need];
+  if (one) return [one];
+  const stage = callStage(c, card?.status);
+  if (stage === "await") return ["accept"];
+  if (stage === "parked" && parkedWhy(card) === "user") return ["resume", "drop"];
+  return [];
 }
+
+/** The first of handoffAsks, or null. */
+export const handoffAsk = (c, card) => handoffAsks(c, card)[0] ?? null;
 
 /** Pretty JSON when it parses, the text otherwise. */
 export function prettyReport(text) {
@@ -911,6 +1006,53 @@ export const CONTROL_SCRIPT = [
   '  python3 "$HD" "$2" --run "$3"',
   'fi',
 ].join("\n");
+
+// ---- Taking a run over: a new main agent carries on a run whose main agent is gone ----
+
+const SHELLS = new Set(["zsh", "bash", "sh", "fish", "login", "nu", "dash", "tcsh", "csh", "ksh"]);
+
+/**
+ * The agent a terminal runs now: herdr's program key, else the program in front (claude, codex, or any
+ * other); null when the terminal is gone, finished or back at a bare shell. Not a fixed list, so a main
+ * agent of a kind the panel has never heard of still counts.
+ */
+export function agentIn(term) {
+  if (!term || term.state !== "live") return null;
+  const name = (x) => { const n = String(x ?? "").split("/").pop().replace(/^-/, ""); return n && !SHELLS.has(n.toLowerCase()) ? n : null; };
+  return name(term.program?.key) ?? name(term.foreground?.argv?.[0] ?? term.argv?.[0]);
+}
+
+/** Whether a run's main agent still runs: its parent terminal (the newest dispatcher or adopter) runs an agent. */
+export const mainLive = (r, terminals) => Boolean(r?.parent && agentIn((terminals ?? []).find((x) => x.address === r.parent)));
+
+/**
+ * Whether the panel offers a new main agent the run (Copy resume prompt): its main agent is gone and it
+ * is not done: paused, stopped (waiting on the person), a helper lost or not settled, or a card left.
+ * Never while it stops or is handed off (that has its own prompt), nor once state.json says it is finished.
+ */
+export function needsTakeover(r, terminals, cards, finished = false) {
+  const state = r?.control?.state ?? "running";
+  if (finished || !r?.calls?.length || state === "stopping" || state === "handoff") return false;
+  if (mainLive(r, terminals)) return false;
+  return state === "paused" || state === "stopped" || r.calls.some((c) => c.lost) || !canArchive(r, cards);
+}
+
+/** The skill a run belongs to. */
+export const skillOf = (r) => `cc-herdr-dispatch-${r?.kind && r.kind !== "probe" ? r.kind : "dev"}`;
+
+/**
+ * What the person gives a new main agent (Claude Code, Codex, any agent that loads the skills) to carry
+ * the run on: the skill, the run folder and the one command that takes it over (hd_dispatch.py takeover).
+ */
+export function takeoverPrompt(r) {
+  const hd = r?.hd ? `python3 ${r.hd}` : "python3 <cc-dispatcher>/shared/scripts/hd_dispatch.py";
+  return `用 ${skillOf(r)} skill 接手 herdr 里一次主 agent 已经不在的运行，运行目录 ${r.dir}。`
+    + `按 shared/herdr.md「接手运行」做：先运行 \`${hd} takeover --run ${r.dir}\`，照它的输出做，再向我复述现状。`
+    + "我确认之前，不要派发、发送、合并或清理。";
+}
+
+/** The line under the head of a run waiting for a new main agent. */
+export const takeoverBanner = (r) => `${mainAgentName(r).replace(/^the/, "The")} is gone · give a new one the prompt`;
 
 /** Which control buttons a run offers: pause and stop while it runs, resume and stop while paused. */
 export function controlOps(r) {

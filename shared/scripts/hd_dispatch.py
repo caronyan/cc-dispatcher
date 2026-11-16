@@ -20,6 +20,8 @@ usage:
   hd_dispatch.py handoff  --run DIR [--why manual|usage] [--no-notes]
   hd_dispatch.py adopt    --run DIR --from PACKAGE
   hd_dispatch.py recover  --run DIR [--call NAME] [--fresh]
+  hd_dispatch.py takeover --run DIR [--force]
+  hd_dispatch.py runs     [--repo DIR] [--all] [--json]
 
 freeze stops a helper and keeps what another agent needs: a progress note it is asked to write (to
 $CC_HD_HOME/<tag>/<call>/progress-r<k>.md, up to --ask s), its screen (agents/<call>/screen-r<k>.txt), a
@@ -48,6 +50,16 @@ read its task file, look at its folder and wait. The run is paused with them hel
 carry on. Output RECOVERED= FRESH= FAILED=. When the main agent's terminal is gone too, the run is handed off
 (why recover; prev = the paused state) and MAIN=gone HANDOFF= PROMPT= RESUME_MAIN= (how to reopen its own
 session) come with the prompt; whoever takes over runs adopt as after any handoff. Else MAIN=live.
+takeover is a new main agent's one step onto a run, whatever program either is: a run being handed off is
+adopted; else when the main agent is gone (its terminal closed, or back at a bare shell; herdr says what runs
+in it) the lost helpers are reopened as recover does, a package is left as handoff would (why takeover or
+recover) and adopted. While the old main agent still runs it refuses (MAIN=live), unless --force (the person
+said so). Output TAKEOVER=adopted|self|refused VIA= RECOVERED= FRESH= FAILED= RUN_CONTROL= READ=<handoff.md>
+and RESUME_MAIN= (the command that reopens the old one's own session, from MAIN_AGENTS).
+runs lists the repository's runs left to carry on (not finished, not archived; --all: every one), newest
+first: RUN= skill= state= main=live|gone|none(<agent>) helpers= cards= last= open=<why>. A run is finished
+when its state.json says so ("finished": <epoch s>) or nothing is open: no paused / stopped / handoff state,
+no lost helper, no card left (merged, done or parked other than for the user), no helper at work.
 
 --run is the skill's run directory (<repo>/.cc-dispatch/<kind>-<run>); each call keeps its state in
 <run>/agents/<call>/ (meta.json, task-<k>.md). Reports live under $CC_HD_HOME (default /tmp/cc-dispatch),
@@ -118,6 +130,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import socket
 import ssl
 import subprocess
@@ -227,6 +240,11 @@ def ensure_home():
 
 
 # ---- run state -------------------------------------------------------------------------------------
+
+def unarchive(run: Path):
+    """A run the user archived in the panel (<run>/archived) shows again once something is dispatched to it."""
+    (run / "archived").unlink(missing_ok=True)
+
 
 def run_tag(run: Path) -> str:
     f = run / "agents" / "tag"
@@ -596,26 +614,60 @@ def deliver(name: str, msg: str) -> bool:
     return False
 
 
+# The programs a main agent can be: its name, the environment variable that holds its session id, and how
+# the person reopens that session in a new herdr terminal ({session}; resume_any when the id is unknown).
+# Another main agent (Antigravity, …) is one entry. Without one it still works (dispatch, hand off, take
+# over); only RESUME_MAIN, the command to reopen its own session, is missing.
+MAIN_AGENTS = {
+    "claude": {"label": "Claude Code", "session_env": "CLAUDE_CODE_SESSION_ID",
+               "resume": "claude --resume {session}", "resume_any": "claude --continue"},
+    "codex": {"label": "Codex", "session_env": "CODEX_THREAD_ID",
+              "resume": "codex resume --sandbox danger-full-access {session}",
+              "resume_any": "codex resume --sandbox danger-full-access"},
+}
+SHELLS = {"zsh", "bash", "sh", "fish", "login", "nu", "dash", "tcsh", "csh", "ksh"}
+
+
+def main_key(program) -> str | None:
+    """MAIN_AGENTS' key for a program name, path or herdr app id (claude-code → claude), else None."""
+    name = Path(str(program or "")).name.lower()
+    return next((k for k in MAIN_AGENTS if k in name), None)
+
+
 def dispatcher():
-    """The Claude that dispatches: its terminal, its herdr space, and its Claude Code session (whose
-    transcript lists its background tasks), for the cc-dispatch panel."""
+    """The main agent that dispatches: its terminal, its herdr space, its program and its own session id
+    (Claude Code's session, whose transcript the panel reads for background tasks; Codex's thread; …)."""
     me = os.environ.get("HC_TERMINAL_ID")
     g = hc_json("get", me) if me else None
     g = g if isinstance(g, dict) else {}
+    agent = agent_on(g)
+    key = main_key(agent)
+    envs = [MAIN_AGENTS[key]["session_env"]] if key else [v["session_env"] for v in MAIN_AGENTS.values()]
     return {
         "parent": me,
         "space": (g.get("labels") or {}).get("herdr.space"),
-        "session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        "session": next((os.environ[e] for e in envs if os.environ.get(e)), None),
         "claude_cwd": (g.get("foreground") or {}).get("cwd") or os.getcwd(),
-        "dispatcher_agent": program_of(g),
+        "dispatcher_agent": agent,
     }
 
 
 def program_of(g: dict):
-    """The agent a terminal runs, from `hc get`: its foreground program's name (claude, codex, …), or None."""
+    """The program a terminal runs in front, from `hc get`: its name (claude, codex, …), or None for a shell."""
     argv = (g.get("foreground") or {}).get("argv") or g.get("argv") or []
     name = Path(str(argv[0])).name if argv else ""
-    return None if not name or name in ("zsh", "bash", "sh", "fish", "login") else name
+    return None if not name or name.lstrip("-") in SHELLS else name
+
+
+def agent_on(g) -> str | None:
+    """The agent a live terminal runs, from `hc get`/`hc ls`: its program in front or the app herdr recognised
+    in it (claude-code, codex, …), as MAIN_AGENTS' key when either is one (claude, codex), else as named; None
+    when it is a bare shell, gone or finished."""
+    if not isinstance(g, dict) or "error" in g or g.get("state") != "live":
+        return None
+    st = g.get("status") if isinstance(g.get("status"), dict) else {}
+    app, prog = st.get("app") or g.get("agent"), program_of(g)
+    return main_key(prog) or main_key(app) or app or prog or None
 
 
 # The agents a helper can run as. Fixed on purpose: each needs its own way to start, isolate and resume.
@@ -739,6 +791,7 @@ def cmd_run(a):
     need_env()
     run = Path(a.run).resolve()
     refuse_unless_running(run)
+    unarchive(run)
     tag = run_tag(run)
     agent_dir = run / "agents" / a.call
     if meta_path(run, a.call).exists():
@@ -778,6 +831,7 @@ def cmd_run(a):
 def cmd_send(a):
     run = Path(a.run).resolve()
     refuse_unless_running(run)
+    unarchive(run)
     meta = load(run, a.call)
     o = observe(meta)
     if o["state"] != "live":
@@ -1141,7 +1195,7 @@ def usage_check(run: Path):
     try:
         u = usage_lib()
         g = hc_json("get", me)
-        agent = u.agent_of(program_of(g if isinstance(g, dict) else {}))
+        agent = u.agent_of(agent_on(g))
         over = u.check(agent, me, slow=True)
     except Exception:  # the quota is a convenience: never let it break wait or collect
         return
@@ -1347,34 +1401,23 @@ RECOVER_FRESH_MSG = ("你接手的是一个被意外中断的子 agent 任务（
                      "然后回一句你看到的进度就停下，等负责人的下一条消息再开始，现在不要改动文件。")
 
 
-def cmd_recover(a):
-    """Reopen the helpers whose terminals vanished, in their own sessions when those can be found (else a new
-    one on the same task and folder), all idle, with the run paused and them held; if the main agent's terminal
-    is gone too, leave a package for whoever takes over (the main agent's own session reopened, or another)."""
-    run = Path(a.run).resolve()
-    if not run.is_dir():
-        fail(f"NO_RUN: {run}")
+def reopen_lost(run: Path, only=None, fresh=False):
+    """Reopen the lost calls (or `only`), idle, in their own sessions when found (else a new one on the same
+    task and folder); the run is paused with them held. → (reopened, fresh, failed) call names."""
     c = control(run)
-    if c["state"] in ("stopping", "stopped", "handoff"):
-        out(run_control=c["state"])
-        print(f"RUN_{c['state'].upper()}: recover only a running or paused run")
-        sys.exit(3)
-    ensure_home()
-    targets = [a.call] if a.call else calls(run)
     held = list(c.get("held") or []) if c["state"] == "paused" else []
     if c["state"] != "paused":
         set_control(run, state="paused", held=held)  # first, so no wait or retry acts on half-recovered calls
-    back, fresh, failed, parent = [], [], [], None
-    for call in targets:
+    back, new, failed = [], [], []
+    for call in [only] if only else calls(run):
         meta = load(run, call)
-        parent = parent or meta.get("parent")
         o = observe(meta)
         if not (meta.get("lost") or is_lost(meta, o)):
             continue
         for d in (meta["workdir"], Path(meta["report"]).parent):  # /tmp does not survive a reboot
             Path(d).mkdir(parents=True, exist_ok=True)
         agent = meta.get("agent") or "codex"
-        argv, session = (None, None) if a.fresh else resume_argv(meta)
+        argv, session = (None, None) if fresh else resume_argv(meta)
         how = "resume"
         if argv:
             r = hc(*head_for(run, meta, agent), "--", *argv)
@@ -1399,49 +1442,122 @@ def cmd_recover(a):
                                                      "at": int(time.time())})
             save(run, meta)
             event(meta, "recover", how=how, session=session)
-            (back if how == "resume" else fresh).append(call)
+            (back if how == "resume" else new).append(call)
             if call not in held:
                 held.append(call)
         else:
             failed.append(call)
     set_control(run, state="paused", held=held)
-    out(recovered=",".join(back) or "none", fresh=",".join(fresh) or "none", failed=",".join(failed) or "none",
-        run_control="paused")
-    # The main agent: still there, or gone with them?
-    owner = c.get("owner") or parent
-    g = hc_json("get", owner) if owner else None
-    if g and "error" not in g and g.get("state") == "live":
-        out(main="live")
-        return
-    any_meta = load(run, calls(run)[0]) if calls(run) else {}
-    frm = {"terminal": owner, "agent": any_meta.get("dispatcher_agent"), "session": any_meta.get("session"),
-           "space": any_meta.get("space")}
+    return back, new, failed
+
+
+def lost_calls(run: Path) -> list:
+    return [c for c in calls(run) if (lambda m: m.get("lost") or is_lost(m, observe(m)))(load(run, c))]
+
+
+def main_of(run: Path, c: dict = None) -> dict:
+    """The run's main agent: {terminal, agent, session, space, cwd} as the newest dispatch or adopt recorded
+    them, `live` (its terminal still runs an agent, not a bare shell) and `now` (what it runs)."""
+    c = c or control(run)
+    metas = [load(run, x) for x in calls(run)]
+    newest = max(metas, key=lambda m: max((m.get("adopted") or {}).get("at") or 0, m.get("started_at") or 0),
+                 default={})
+    term = c.get("owner") or newest.get("parent")
+    now = agent_on(hc_json("get", term)) if term else None
+    return {"terminal": term, "agent": newest.get("dispatcher_agent"), "session": newest.get("session"),
+            "space": newest.get("space"), "cwd": newest.get("claude_cwd") or str(run.parent.parent),
+            "live": bool(now), "now": now}
+
+
+def resume_main(m: dict):
+    """The command that reopens the main agent's own session in a new terminal, or None (unknown program)."""
+    spec = MAIN_AGENTS.get(main_key(m.get("agent")) or "")
+    if not spec:
+        return None
+    cmd = spec["resume"].format(session=shlex.quote(m["session"])) if m.get("session") else spec.get("resume_any")
+    return cmd and f"cd {shlex.quote(m['cwd'])} && {cmd}"
+
+
+def leave_package(run: Path, why: str, m: dict, prev: dict) -> Path:
+    """Put the run in handoff and write the next main agent's package (as handoff does, for a main agent
+    that cannot write one itself). → the package folder."""
     seq = 1 + max([int(p.name) for p in (run / "handoff").glob("*") if p.name.isdigit()] or [0])
     pkg = run / "handoff" / str(seq)
-    prev = control(run)
-    set_control(run, state="handoff", prev=prev, seq=seq, why="recover", by=None, package=str(pkg),
+    set_control(run, state="handoff", prev=prev, seq=seq, why=why, by=None, package=str(pkg),
                 prompt=str(pkg / "prompt.md"))
     try:
         children = json.loads((run / "state.json").read_text()).get("children") or []
     except (OSError, ValueError, AttributeError):
         children = []
     notes = run / "handoff-notes.md"
-    handoff_lib().dispatcher_package(run, pkg, "recover", frm, call_rows(run),
+    frm = {k: m.get(k) for k in ("terminal", "agent", "session", "space")}
+    handoff_lib().dispatcher_package(run, pkg, why, frm, call_rows(run),
                                      notes.read_text() if notes.exists() else None,
                                      str(Path(__file__).resolve()), prev, children)
-    out(main="gone", handoff=pkg, prompt=pkg / "prompt.md")
-    cwd = any_meta.get("claude_cwd") or str(run.parent.parent)
-    if frm["agent"] == "claude" and frm["session"]:
-        out(resume_main=f"cd {cwd} && claude --resume {frm['session']}")
-    elif frm["agent"] == "codex":
-        out(resume_main=f"cd {cwd} && codex resume")
+    return pkg
+
+
+def print_prompt(pkg: Path):
     print("----- prompt for the next main agent -----")
     print((pkg / "prompt.md").read_text().rstrip())
     print("----- end -----")
 
 
+def cmd_recover(a):
+    """Reopen the helpers whose terminals vanished, in their own sessions when those can be found (else a new
+    one on the same task and folder), all idle, with the run paused and them held; if the main agent's terminal
+    is gone too, leave a package for whoever takes over (the main agent's own session reopened, or another)."""
+    run = Path(a.run).resolve()
+    if not run.is_dir():
+        fail(f"NO_RUN: {run}")
+    c = control(run)
+    if c["state"] in ("stopping", "stopped", "handoff"):
+        out(run_control=c["state"])
+        print(f"RUN_{c['state'].upper()}: recover only a running or paused run")
+        sys.exit(3)
+    ensure_home()
+    back, fresh, failed = reopen_lost(run, a.call, a.fresh)
+    out(recovered=",".join(back) or "none", fresh=",".join(fresh) or "none", failed=",".join(failed) or "none",
+        run_control="paused")
+    m = main_of(run, c)
+    if m["live"]:
+        out(main="live")
+        return
+    pkg = leave_package(run, "recover", m, control(run))
+    out(main="gone", handoff=pkg, prompt=pkg / "prompt.md")
+    rm = resume_main(m)
+    if rm:
+        out(resume_main=rm)
+    print_prompt(pkg)
+
+
 ADOPT_NOTE_LIVE = ("herdr 仍把这些子 agent 的通知（<hc>…</hc>）发给原来的终端 {old}（终端的父级在启动时就定了），"
                    "所以你只靠 wait/collect 获知它们的状态。")
+
+
+def adopt_package(run: Path, data: dict, me: dict, c: dict) -> dict:
+    """Record this main agent as every call's parent and put the run back in its state before the handoff,
+    owned by this terminal. → what to print (KEY=value)."""
+    old = (data.get("from") or {}).get("terminal")
+    moved, live = [], []
+    for call in calls(run):
+        meta = load(run, call)
+        meta["adopted"] = {"from": meta.get("parent"), "by": me["parent"], "at": int(time.time()),
+                           "package": data["_dir"]}
+        meta.update(me)
+        save(run, meta)
+        event(meta, "adopt", frm=old, by=me["parent"], agent=me["dispatcher_agent"], package=data["_dir"])
+        moved.append(call)
+        if observe(meta)["state"] == "live":
+            live.append(call)
+    prev = c.get("prev") or {"state": "running"}
+    set_control(run, **{**prev, "owner": me["parent"], "adopted": {"from": old, "at": int(time.time()), "package": data["_dir"]},
+                        "at": prev.get("at") or int(time.time())})
+    if live and old and old != me["parent"]:
+        print(ADOPT_NOTE_LIVE.format(old=old))
+    return {"adopted": run.name, "calls": ",".join(moved) or "none", "live": ",".join(live) or "none",
+            "run_control": prev.get("state", "running"), "skill": data.get("skill"), "handoff": data["_dir"],
+            "agent": me["dispatcher_agent"] or "unknown"}
 
 
 def cmd_adopt(a):
@@ -1467,26 +1583,162 @@ def cmd_adopt(a):
         return
     if c.get("package") and Path(c["package"]).resolve() != Path(data["_dir"]).resolve():
         print(f"NOTE: the newest package is {c['package']}; read that one if it differs")
-    old = (data.get("from") or {}).get("terminal")
-    moved, live = [], []
-    for call in calls(run):
-        meta = load(run, call)
-        meta["adopted"] = {"from": meta.get("parent"), "by": me["parent"], "at": int(time.time()),
-                           "package": data["_dir"]}
-        meta.update(me)
-        save(run, meta)
-        event(meta, "adopt", frm=old, by=me["parent"], agent=me["dispatcher_agent"], package=data["_dir"])
-        moved.append(call)
-        if observe(meta)["state"] == "live":
-            live.append(call)
-    prev = c.get("prev") or {"state": "running"}
-    set_control(run, **{**prev, "owner": me["parent"], "adopted": {"from": old, "at": int(time.time()), "package": data["_dir"]},
-                        "at": prev.get("at") or int(time.time())})
-    out(adopted=run.name, calls=",".join(moved) or "none", live=",".join(live) or "none",
-        run_control=prev.get("state", "running"), skill=data.get("skill"), handoff=data["_dir"],
-        agent=me["dispatcher_agent"] or "unknown")
-    if live and old and old != me["parent"]:
-        print(ADOPT_NOTE_LIVE.format(old=old))
+    out(**adopt_package(run, data, me, c))
+
+
+# ---- taking a run over -----------------------------------------------------------------------------
+
+MAIN_LIVE = ("MAIN_LIVE: this run's main agent ({agent}, terminal {term}) is still running. Do not take the run "
+             "from it on your own. Tell the user and stop: they can tell that agent \"准备交接\" (it hands the run "
+             "off; then run takeover again), close it, or, if they say so, let you take over anyway with --force "
+             "(from then on the old one is refused).")
+
+
+def cmd_takeover(a):
+    """One step for a new main agent to carry on a run: adopt it when it is being handed off; else, when its
+    main agent is gone (or --force), reopen its lost helpers (recover), leave a package as handoff would and
+    adopt it. Refuses while the old main agent still runs, unless --force."""
+    run = Path(a.run).resolve()
+    if not run.is_dir() or not ((run / "agents").is_dir() or (run / "state.json").exists()):
+        fail(f"NO_RUN: {run} is not a cc-dispatch run folder (<repo>/.cc-dispatch/<run>)", code=2)
+    me = dispatcher()
+    if not me["parent"]:
+        fail("NOT_IN_HERDR: take over from the herdr terminal the new main agent runs in (HC_TERMINAL_ID is empty)", code=2)
+    ensure_home()
+    c = control(run)
+    skill = skill_of(run)
+    if c["state"] == "stopping":
+        print("RUN_STOPPING: the run is being stopped; take it over once that is done")
+        out(takeover="refused", run_control="stopping", skill=skill)
+        sys.exit(3)
+    if c["state"] == "handoff" and c.get("package"):
+        data = handoff_lib().read(c["package"])
+        out(takeover="adopted", via="handoff", **adopt_package(run, data, me, c))
+        out(read=f"{c['package']}/handoff.md")
+        print("Read it: the previous main agent's account (its adopt step is done).")
+        return
+    m = main_of(run, c)
+    mine = m["terminal"] == me["parent"]
+    if m["live"] and not mine and not a.force:
+        print(MAIN_LIVE.format(agent=m["now"], term=m["terminal"]))
+        out(takeover="refused", main="live", main_terminal=m["terminal"], main_agent=m["now"], skill=skill)
+        sys.exit(3)
+    lost = lost_calls(run) if c["state"] in ("running", "paused") else []
+    back, fresh, failed = reopen_lost(run) if lost else ([], [], [])
+    rec = {"recovered": ",".join(back) or "none", "fresh": ",".join(fresh) or "none", "failed": ",".join(failed) or "none"}
+    if mine:  # this terminal dispatched it (the main agent restarted in place): nothing to adopt
+        out(takeover="self", run_control=control(run)["state"], skill=skill, **rec)
+        return
+    why = "forced" if m["live"] else "recover" if lost else "takeover"
+    pkg = leave_package(run, why, m, control(run))
+    data = handoff_lib().read(pkg)
+    out(takeover="adopted", via=why, **rec, **adopt_package(run, data, me, control(run)))
+    rm = resume_main(m)
+    if rm and not m["live"]:
+        out(resume_main=rm)
+    out(read=pkg / "handoff.md", notes="yes" if (run / "handoff-notes.md").exists() else "no")
+    print("Read it: what is known of the run (its adopt step is done).")
+
+
+def skill_of(run: Path) -> str:
+    return f"cc-herdr-dispatch-{run_kind(run) if run_kind(run) != 'probe' else 'dev'}"
+
+
+CARD_DONE = {"merged", "done"}
+
+
+def parked_why(card: dict) -> str:
+    """user / superseded / dropped: the card's parked_why, else read from its note (as the panel's parkedWhy)."""
+    if card.get("parked_why") in ("user", "superseded", "dropped"):
+        return card["parked_why"]
+    note = f"{card.get('note') or ''} {card.get('result') or ''}"
+    if re.search(r"supersed|replaced by|取代|替代", note, re.I):
+        return "superseded"
+    if re.search(r"dropped|abandon|不做|放弃", note, re.I):
+        return "dropped"
+    return "user"
+
+
+def run_summary(run: Path, terms: dict) -> dict:
+    """What `runs` shows of one run; `terms` maps terminal addresses and names to `hc ls` entries."""
+    c = control(run)
+    try:
+        st = json.loads((run / "state.json").read_text())
+        st = st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        st = {}
+    metas = []
+    for x in calls(run):
+        try:
+            metas.append(load(run, x))
+        except SystemExit:
+            pass
+    live = lost = ok = 0
+    for meta in metas:
+        t = terms.get(meta.get("address")) or terms.get(meta.get("name"))
+        alive = bool(t) and t.get("state") == "live"
+        live += alive
+        ok += meta.get("report_check") == "ok"
+        lost += (not alive) and (bool(meta.get("lost")) or (meta.get("open") is True and meta.get("report_check") != "ok"))
+    newest = max(metas, key=lambda m: max((m.get("adopted") or {}).get("at") or 0, m.get("started_at") or 0), default={})
+    term = c.get("owner") or newest.get("parent")
+    main_now = agent_on(terms.get(term)) if term else None
+    tasks = {k: v for k, v in (st.get("tasks") or {}).items()
+             if isinstance(v, dict) and not re.search(r"-check-r\d+$", k) and k != "survey" and not v.get("check")}
+    cards = None
+    if tasks:
+        status = [str(v.get("status") or "") for v in tasks.values()]
+        parked = [v for v in tasks.values() if v.get("status") == "parked"]
+        cards = {"done": sum(s in CARD_DONE for s in status), "goal": len(status) - len(parked),
+                 "open": sum(s not in CARD_DONE | {"parked"} for s in status),
+                 "decide": sum(parked_why(v) == "user" for v in parked)}
+    why = []
+    if c["state"] in ("paused", "stopped", "handoff", "stopping"):
+        why.append(c["state"])
+    if lost:
+        why.append(f"{lost} lost")
+    if cards and cards["open"]:
+        why.append(f"{cards['open']} cards open")
+    if cards and cards["decide"]:
+        why.append(f"{cards['decide']} parked for you")
+    if not cards and live > ok and live:
+        why.append("helpers at work")
+    finished = bool(st.get("finished")) or not why
+    times = [p.stat().st_mtime for p in [run / "state.json", run / "control.json", *run.glob("agents/*/events.jsonl")] if p.exists()]
+    return {"run": str(run), "name": run.name, "skill": skill_of(run), "state": c["state"],
+            "main": "live" if main_now else "gone" if term else "none", "main_agent": main_now or newest.get("dispatcher_agent"),
+            "main_terminal": term, "calls": len(metas), "live": live, "lost": lost, "cards": cards,
+            "finished": finished, "why": why, "archived": (run / "archived").exists(),
+            "last": int(max(times)) if times else 0, "parent": st.get("parent")}
+
+
+def cmd_runs(a):
+    """The runs of a repository a new main agent might carry on, newest first."""
+    top = subprocess.run(["git", "-C", a.repo or ".", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    base = Path(top.stdout.strip() if top.returncode == 0 else (a.repo or ".")).resolve()
+    ls = hc_json("ls") or {}
+    terms = {}
+    for t in (ls.get("terminals") if isinstance(ls, dict) else ls) or []:
+        for k in (t.get("address"), t.get("name")):
+            if k:
+                terms[k] = t
+    rows = [run_summary(d, terms) for d in sorted((base / ".cc-dispatch").glob("*/"))
+            if (d / "agents").is_dir() or (d / "state.json").exists()]
+    if not a.all:
+        rows = [r for r in rows if not r["finished"] and not r["archived"]]
+    rows.sort(key=lambda r: r["last"], reverse=True)
+    if a.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+        return
+    out(repo=base, runs=len(rows))
+    for r in rows:
+        cards = f"{r['cards']['done']}/{r['cards']['goal']} merged" if r["cards"] else "-"
+        last = time.strftime("%m-%d %H:%M", time.localtime(r["last"])) if r["last"] else "-"
+        print("\t".join([f"RUN={r['run']}", f"skill={r['skill']}", f"state={r['state']}",
+                         f"main={r['main']}" + (f"({r['main_agent']})" if r["main_agent"] else ""),
+                         f"helpers={r['calls']} live={r['live']} lost={r['lost']}", f"cards={cards}",
+                         f"last={last}", "open=" + (", ".join(r["why"]) or ("finished" if r["finished"] else "-")),
+                         *([f"parent={r['parent']}"] if r["parent"] else [])]))
 
 
 # ---- run control commands --------------------------------------------------------------------------
@@ -1735,12 +1987,19 @@ def main():
     ad = sub.add_parser("adopt")
     ad.add_argument("--run", required=True)
     ad.add_argument("--from", dest="frm", required=True, help="the package: <run>/handoff/<seq>")
+    tk = sub.add_parser("takeover")
+    tk.add_argument("--run", required=True)
+    tk.add_argument("--force", action="store_true", help="even while the old main agent still runs (the user said so)")
+    rs = sub.add_parser("runs")
+    rs.add_argument("--repo", help="a folder in the repository (default: here)")
+    rs.add_argument("--all", action="store_true", help="also finished and archived runs")
+    rs.add_argument("--json", action="store_true")
     hf = sub.add_parser("handoff")
     hf.add_argument("--run", required=True)
     hf.add_argument("--why", default="manual", help="manual (the user asked) or usage (this agent is near its limit)")
     hf.add_argument("--no-notes", action="store_true", help="hand off without <run>/handoff-notes.md")
     a = p.parse_args()
-    {"recover": cmd_recover, "adopt": cmd_adopt, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
+    {"recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
      "status": cmd_status, "diagnose": cmd_diagnose, "cleanup": cmd_cleanup, "freeze": cmd_freeze,
      "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop}[a.cmd](a)
     if a.cmd in ("wait", "collect"):

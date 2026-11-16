@@ -38,7 +38,7 @@ agents/            hd_dispatch.py 的调用记录，调用名即线程 id（code
 
 按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 
-如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/research-*` 目录，这是续跑：按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
+如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/research-*` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
 
 ### 1. 立题
 

@@ -26,7 +26,7 @@ function fixture() {
   execFileSync("sqlite3", [db, `create table threads (id text, rollout_path text, created_at integer, first_user_message text);
     insert into threads values ('a', '${log}', 1, '<hc>…</hc>\n\n读取任务文件 ${run}/agents/T1/task-1.md，按其中要求完成。');
     insert into threads values ('b', '/nowhere.jsonl', 2, 'something else');`]);
-  writeFileSync(join(run, "state.json"), JSON.stringify({ tasks: { T1: { status: "merged" }, T2: { status: "running" }, T3: { status: "parked" } } }));
+  writeFileSync(join(run, "state.json"), JSON.stringify({ tasks: { T1: { status: "merged" }, T2: { status: "running" }, T3: { status: "parked", parked_why: "superseded", by: "T2", note: "n" }, "T2-check-r1": { status: "accepting" }, T4: { status: "pending", depends_on: ["T2"] } }, finished: 1790000000 }));
   const r = { dir: run, live: false, startedAt: Date.parse("2026-11-08T02:59:00Z"), calls: [{ key: `${run}#T1`, agentDir: `${run}/agents/T1` }] };
   return { home, log, run, r };
 }
@@ -44,7 +44,11 @@ test("stats script: finds the helper's thread by its task file and totals its lo
   assert.equal(s.commands, 1);
   assert.equal(s.files, 2);
   assert.equal(s.sessions, 1);
-  assert.deepEqual(out.runs[run], { total: 3, merged: 1, parked: 1, status: { T1: "merged", T2: "running", T3: "parked" } });
+  assert.deepEqual(out.runs[run].status, { T1: "merged", T2: "running", T3: "parked", T4: "pending" });
+  assert.equal(out.runs[run].checks, 1);
+  assert.deepEqual(out.runs[run].cards.T3, { status: "parked", parked_why: "superseded", by: "T2", note: "n" });
+  assert.deepEqual(out.runs[run].cards.T4.depends_on, ["T2"]);
+  assert.deepEqual(out.finished, { [run]: 1790000000 });
 });
 
 test("stats script: reads only what was appended, and a half-written line waits", () => {

@@ -35,7 +35,7 @@ agents/            hd_dispatch.py 的调用记录（reviewer、stress-r1、check
 
 先按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 
-如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/review-*` 目录，这是续跑：按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
+如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/review-*` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
 
 - **方案模式**：参数是文档路径，或对话中刚产出的方案（`~/.claude/plans/` 下最近的文件也算）。补强 = 原地修改方案文件。
 - **代码模式**：参数是 diff、分支、commit 范围或 PR 号，没有参数时默认审工作区相对 HEAD 的改动。冻结快照：`SNAP=$(git stash create); SNAP=${SNAP:-$(git rev-parse HEAD)}`（`git stash create` 不会改动工作区），后续子 agent 都审这个快照。补强 = 修复代码。

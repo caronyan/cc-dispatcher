@@ -265,10 +265,12 @@ except OSError:
 print(json.dumps(out))
 `;
 
-/** The script's request: each run's dispatching Claude, where to look for it, and when it began. */
+/** The script's request: each run's dispatching Claude Code session, where to look for it, and when it began. */
 export function bgRequest(runs) {
   return {
-    runs: runs.flatMap((r) => (r.sessions?.length ? r.sessions : [r.session || null])
+    // A run whose main agents were all something else (Codex, …) has no Claude transcript to look for.
+    runs: runs.filter((r) => r.sessions?.length || r.session || !r.mainAgent || /claude/i.test(r.mainAgent))
+      .flatMap((r) => (r.sessions?.length ? r.sessions : [r.session || null])
       .map((session) => ({ dir: r.dir, session, cwd: r.claudeCwd || r.repo || null, since: r.startedAt || 0 }))),
   };
 }

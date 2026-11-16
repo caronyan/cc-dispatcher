@@ -32,7 +32,7 @@
 
 ## 只读复核
 
-用于大 diff 的验收（第 4 步）和核心逻辑的小修。开新调用，不发给实现者，避免沿用它的思路。只读模式改不了 git 索引，派发前先由你 `git -C "$WT_ROOT/T<n>" add -N .`，让新文件出现在 `git diff` 里：
+用于大 diff 的验收（第 4 步）和核心逻辑的小修。开新调用，不发给实现者，避免沿用它的思路。复核调用不是卡片，不写进 `state.json.tasks`；结论记在被复核的卡的 `checks` 里（如 `{"r1": "ISSUES"}`）和 `log.md`。只读模式改不了 git 索引，派发前先由你 `git -C "$WT_ROOT/T<n>" add -N .`，让新文件出现在 `git diff` 里：
 
 ```bash
 python3 $HD run --run $RD --call T<n>-check-r<k> --mode read --effort medium \

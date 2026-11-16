@@ -83,7 +83,9 @@ def worktree(d, base=None, snap=None) -> dict:
 
 WHY = {"manual": "负责人决定移交", "context_limit": "它的会话上下文满了", "quota": "它所用 agent 的额度用完了",
        "usage": "负责人自己的用量快到上限", "lost": "它的终端意外断了",
-       "recover": "它的终端意外断了（herdr 重启、崩溃或终端被关），这次运行由 recover 恢复"}
+       "recover": "它的终端意外断了（herdr 重启、崩溃或终端被关），这次运行由 recover 恢复",
+       "takeover": "它的会话已经不在了（终端被关、程序退出或 herdr 重启），没来得及交接",
+       "forced": "用户让你接手（它还开着，但之后再操作这次运行会被拒绝）"}
 
 
 def why_words(why: str) -> str:
@@ -429,13 +431,15 @@ def dispatcher_package(run: Path, pkg: Path, why: str, frm: dict, calls: list, n
         f"上一位主 agent（{frm.get('agent') or '未知'}，终端 `{frm.get('terminal') or '?'}`）因为**{why_words(why)}**，"
         f"把 {skill} 这次运行的主 agent 工作交给你。" + (
             "中断的子 agent 已由 recover 在原会话（找不到时是新会话）里重开，运行处于暂停：它们停着，等你和用户确认后再继续。"
-            if why == "recover" else "子 agent 没有停：在干活的继续干，你接手后照常收它们的回报。"),
+            if why == "recover" else "上一位没来得及交接就离开了：下面若有交接说明，可能是更早写的，以 state.json、log 和各调用的回报为准。还在干活的子 agent 没有停，你接手后照常收它们的回报。"
+            if why == "takeover" else "子 agent 没有停：在干活的继续干，你接手后照常收它们的回报。"),
         "",
         "## 接手步骤",
         "",
         f"1. 加载 skill `{skill}`（读它的 SKILL.md 和其中引用的 herdr.md），按它的规则做主 agent。`$HD` 是 `{hd}`，`$RD` 是 `{run}`。",
         f"2. 读完下面上一位写的交接说明、子 agent 表和 state.json。",
-        f"3. 运行 `python3 {hd} adopt --run {run} --from {pkg}`：把子 agent 记到你的终端名下。",
+        f"3. 运行 `python3 {hd} adopt --run {run} --from {pkg}`：把子 agent 记到你的终端名下。"
+        "已经用 `takeover` 接手的（输出 `TAKEOVER=adopted`）跳过这步。",
         "4. 用几句话向用户复述：在做什么、做到哪、哪些子 agent 还在跑、你打算的下一步；用户确认之前不派发、不 `send`、不合并、不清理。",
         (f"5. 用户确认后，先运行一次 `collect`，再运行 `python3 {hd} resume --run {run}` 让暂停的子 agent 接着做，然后照常 `wait`。"
          if why == "recover" else "5. 用户确认后，先运行一次 `collect`，再照常 `wait`。"),

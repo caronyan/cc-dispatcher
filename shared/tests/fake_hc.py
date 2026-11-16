@@ -44,7 +44,9 @@ def main(argv):
                      "parent": t.get("parent"),
                      "foreground": {"argv": t.get("argv", ["codex"]), "cwd": t.get("cwd")}}
     elif cmd == "ls":
-        reply = {"terminals": [{"name": n, "address": t.get("address")} for n, t in st["terminals"].items()]}
+        reply = {"terminals": [{"name": n, "address": t.get("address"), "state": t.get("state", "live"),
+                                "agent": t.get("app", "codex"), "status": t.get("status", "idle")}
+                               for n, t in st["terminals"].items()]}
     elif cmd == "read":
         _, t = find(st, rest[0])
         sys.stdout.write((t or {}).get("screen", ""))

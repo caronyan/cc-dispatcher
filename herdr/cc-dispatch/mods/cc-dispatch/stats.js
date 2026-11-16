@@ -18,9 +18,13 @@
 
 // argv[1]: {"calls": [{"key", "needle", "events", "live", "claude": [session], "cwd"}], "runs": [dir, ...]}
 // stdout:  {"calls": {key: {tokens, model, commands, files, first, last}},
-//           "runs": {dir: {total, merged, parked, status: {card: status}}}}
+//           "runs": {dir: {status: {card: status}, cards: {card: {status, title, note, result, parked_why, by,
+//                       depends_on}}, checks: n}},
+//           "finished": {dir: epoch s}}   runs whose state.json the main agent marked "finished"
+// A dev run's cards come from its state.json tasks. Review calls (<card>-check-r<k>, "check": true) and the
+// survey are not cards to merge: they are counted in checks and left out, so they never sit in a stage.
 export const STATS_PY = String.raw`
-import glob, json, os, sqlite3, sys
+import glob, json, os, re, sqlite3, sys
 from datetime import datetime
 
 req = json.loads(sys.argv[1])
@@ -205,7 +209,7 @@ def scan_claude(path):
     logs[path] = e
     return e
 
-out = {"calls": {}, "runs": {}}
+out = {"calls": {}, "runs": {}, "finished": {}}
 snaps = {c["key"]: snapshot(c["events"]) for c in req.get("calls", []) if c.get("events")}
 known = {c["needle"]: [p for p in (snaps.get(c["key"]) or {}).get("rollouts") or [] if os.path.exists(p)] for c in req.get("calls", [])}
 req["calls_to_find"] = [c for c in req.get("calls", []) if not known.get(c["needle"])]
@@ -239,13 +243,28 @@ for c in req.get("calls", []):
 
 for d in req.get("runs", []):
     try:
-        tasks = json.load(open(os.path.join(d, "state.json"))).get("tasks")
+        state = json.load(open(os.path.join(d, "state.json")))
+        state = state if isinstance(state, dict) else {}
     except Exception:
-        tasks = None
+        state = {}
+    if state.get("finished"):  # the main agent marked the run done (herdr.md)
+        out["finished"][d] = state["finished"]
+    tasks = state.get("tasks")
     if isinstance(tasks, dict) and tasks:
-        status = {k: str(v.get("status") or "") for k, v in tasks.items() if isinstance(v, dict)}
-        st = list(status.values())
-        out["runs"][d] = {"total": len(st), "merged": st.count("merged"), "parked": st.count("parked"), "status": status}
+        cards, checks = {}, 0
+        for k, v in tasks.items():
+            if not isinstance(v, dict):
+                continue
+            if re.search(r"-check-r\d+$", k) or k == "survey" or v.get("check"):
+                checks += 1
+                continue
+            card = {f: v[f] for f in ("title", "note", "result", "parked_why", "by") if isinstance(v.get(f), str) and v[f]}
+            card["status"] = str(v.get("status") or "")
+            deps = v.get("depends_on")
+            if isinstance(deps, list):
+                card["depends_on"] = [str(x) for x in deps]
+            cards[k] = card
+        out["runs"][d] = {"status": {k: c["status"] for k, c in cards.items()}, "cards": cards, "checks": checks}
 
 # Keep the cache to the logs that still exist, newest first, at most 400.
 keep = sorted(((p, e) for p, e in logs.items() if os.path.exists(p)), key=lambda x: -(x[1].get("last") or 0))[:400]

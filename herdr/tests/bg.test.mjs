@@ -189,3 +189,9 @@ test("a run read by every main agent session that dispatched to it", () => {
   assert.deepEqual(out["/r"].map((t) => t.id).sort(), ["a", "b"]);
   assert.deepEqual(bgRequest([{ dir: "/x", startedAt: 0 }]).runs.map((x) => x.session), [null]);
 });
+
+test("bgRequest skips runs whose main agents were all something else than Claude Code", () => {
+  const got = bgRequest([{ dir: "/a", mainAgent: "codex", sessions: [] }, { dir: "/b", mainAgent: null, sessions: [] },
+    { dir: "/c", mainAgent: "codex", sessions: ["s1"] }]).runs.map((x) => x.dir);
+  assert.deepEqual(got, ["/b", "/c"]);
+});

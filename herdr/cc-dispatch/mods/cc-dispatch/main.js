@@ -9,8 +9,8 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsk, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, runQuotaAgent, quotaView } from "./model.js";
-import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota } from "./loader.js";
+import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView } from "./model.js";
+import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
 
@@ -69,7 +69,6 @@ function stageColor(t, stage) {
 }
 const CARD_COLORS = (t) => ({ merged: t.ansi2, done: t.ansi2, accepting: t.accent, running: t.working, pending: t.selected, parked: t.muted });
 // Short, so the key stays on one line in a 380px panel.
-const CARD_WORDS = { merged: "merged", done: "done", accepting: "review", running: "run", pending: "todo", parked: "parked" };
 
 // A run's dot: its most urgent stage, unless the person paused or stopped the run, which says more.
 const dot = (t, stage, control = null) => control?.state === "paused" ? icon("pause-dot", 10, t.ansi3)
@@ -92,8 +91,9 @@ const termDot = (t, c) => c.held && c.state === "live" && c.status !== "working"
     ? div().w(8).h(8).flex_none().rounded_full().bg(c.status === "blocked" ? t.blocked : t.foreground)
     : div().w(8).h(8).flex_none().rounded_full().border(1.5).border_color(t.muted);
 
-const stageTag = (t, stage) => h_flex().h(16).px(6).flex_none().items_center().rounded(4).border_1()
-  .border_color(stageColor(t, stage)).text_size(S().label).text_color(stageColor(t, stage)).child(STAGE_WORDS[stage]);
+const stageTagText = (t, text, color) => h_flex().h(16).px(6).flex_none().items_center().rounded(4).border_1()
+  .border_color(color).text_size(S().label).text_color(color).child(text);
+const stageTag = (t, stage) => stageTagText(t, STAGE_WORDS[stage], stageColor(t, stage));
 
 const pill = (t, text, color) => h_flex().h(18).px(7).flex_none().items_center().rounded(9).bg(t.selected)
   .text_size(S().label).text_color(color ?? t.muted).child(text);
@@ -247,8 +247,8 @@ export default class Dispatch extends View {
     }
     if (this.role !== "panel") return;
     this.runs = []; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.liveKey = null;
-    this.open = null; this.fold = new Map(); this.groupFold = new Map(); this.bgMore = new Map(); this.showOld = false; this.loading = false; this.token = 0; this.lastAgent = null;
-    this.stats = { calls: {}, runs: {} }; this.statsFor = new Set(); this.statsBusy = false;
+    this.open = null; this.fold = new Map(); this.groupFold = new Map(); this.bgMore = new Map(); this.showOld = false; this.showArchived = false; this.loading = false; this.token = 0; this.lastAgent = null;
+    this.stats = { calls: {}, runs: {}, finished: {} }; this.statsFor = new Set(); this.statsBusy = false;
     this.bg = { resolved: {}, sessions: {} };
     this.quota = {}; // agent -> { q, at, busy }
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
@@ -312,7 +312,7 @@ export default class Dispatch extends View {
         this.statsError = s.error ? `stats: ${s.error}` : b.error ? `tasks: ${b.error}` : null;
         if (!b.error) { Object.assign(this.bg.resolved, b.resolved); Object.assign(this.bg.sessions, b.sessions); }
         if (s.error) return;
-        Object.assign(this.stats.calls, s.calls); Object.assign(this.stats.runs, s.runs);
+        Object.assign(this.stats.calls, s.calls); Object.assign(this.stats.runs, s.runs); Object.assign(this.stats.finished, s.finished ?? {});
         for (const r of want) if (!r.live) this.statsFor.add(r.dir);
       } finally {
         this.statsBusy = false;
@@ -410,13 +410,22 @@ export default class Dispatch extends View {
         .child(note(t, "Runs appear here when a cc-herdr-dispatch skill dispatches helpers: /cc-herdr-dispatch-research, -review, -dev, -fix, -test.")));
       return this.renderOthers(t, body, others);
     }
-    const live = mine.filter((r) => r.live), ended = mine.filter((r) => !r.live);
+    // An archived run stays out of the list while all its helpers are settled (model.js archivedAway).
+    const away = (r) => archivedAway(r, this.stats.runs[r.dir]?.status);
+    const live = mine.filter((r) => r.live && !away(r)), ended = mine.filter((r) => !r.live && !away(r));
+    const archived = mine.filter(away).sort((a, b) => b.archived - a.archived);
     const old = this.showOld ? ended : ended.slice(0, HISTORY);
     body.children([...live, ...old].map((r) => this.renderRun(t, r)));
+    const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
+      .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
     if (ended.length > HISTORY) {
-      body.child(div().id("older").flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => { this.showOld = !this.showOld; cx.notify(); })
-        .child(this.showOld ? "Show fewer" : `Show ${ended.length - HISTORY} older`));
+      body.child(link("older", this.showOld ? "Show fewer" : `Show ${ended.length - HISTORY} older`,
+        (_e, cx) => { this.showOld = !this.showOld; cx.notify(); }));
+    }
+    if (archived.length) {
+      body.child(link("archived", this.showArchived ? "Hide archived" : `${archived.length} archived · show`,
+        (_e, cx) => { this.showArchived = !this.showArchived; cx.notify(); }));
+      if (this.showArchived) body.children(archived.map((r) => this.renderRun(t, r)));
     }
     return this.renderOthers(t, body, others);
   }
@@ -456,13 +465,16 @@ export default class Dispatch extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(S().body).font_semibold().text_color(r.live ? t.foreground : t.muted)
         .child(r.id.replace(`${r.kind}-`, "") || r.id))
       .when(Boolean(other), (el) => el.child(div().flex_none().max_w(90).truncate().text_size(S().label).text_color(t.muted).child(baseName(r.repo))))
-      .children(this.controlButtons(t, r));
+      .children(this.controlButtons(t, r))
+      .children(this.archiveButton(t, r));
     const paused = r.control?.state === "paused";
     const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : r.live ? t.input : t.border).bg(r.live || paused ? t.surface : t.background).overflow_hidden().child(head);
     const quota = this.renderQuota(t, r);
     if (quota) card.child(quota);
     const ctl = this.renderControl(t, r);
     if (ctl) card.child(ctl);
+    const take = this.renderTakeover(t, r);
+    if (take) card.child(take);
     if (!folded) {
       const totals = runTotals(r, this.stats.calls, this.stats.runs[r.dir]);
       if (totals.known || totals.cards) card.child(this.renderStats(t, r, totals));
@@ -492,6 +504,28 @@ export default class Dispatch extends View {
           .text_size(S().label).text_color(t.foreground).child(String(g.calls.length))));
       if (!folded) box.children(g.calls.map((c) => this.renderCall(t, c, false)));
     }
+    // Cards no helper stands for: queued ones waiting on their dependencies, and any the main agent
+    // works on itself. Otherwise they would only be a number in the cards line.
+    const away = cardView(cards, r.calls.map((c) => c.call)).undispatched;
+    if (away.length) {
+      const key = `${r.dir}|undispatched`, folded = this.groupFold.get(key) ?? false;
+      box.child(h_flex().id(`group-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
+        .border_t(1).border_color(t.border).bg(t.background).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
+        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+        .child(div().w(7).h(7).flex_none().rounded_full().border_1().border_color(t.muted))
+        .child(div().flex_1().min_w(0).truncate().text_size(S().label).font_semibold().text_color(t.muted).child("no helper yet"))
+        .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(t.selected)
+          .text_size(S().label).text_color(t.foreground).child(String(away.length))));
+      if (!folded) box.children(away.map((k) => v_flex().id(`card-${r.dir}|${k.id}`).flex_none().pl(28).pr(10).py(5).gap(2).bg(t.surface)
+        .child(h_flex().gap(7).items_center()
+          .child(div().w(7).h(7).flex_none().rounded_full().border_1().border_color(t.muted))
+          .child(div().flex_none().text_size(S().body).text_color(t.foreground).child(k.id))
+          .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
+          .child(stageTagText(t, CARD_WORDS[k.status] ?? k.status, k.status === "pending" ? t.muted : t.accent)))
+        .when(Boolean(k.waits.length || k.note), (el) => el.child(div().pl(14).text_size(S().label).text_color(t.muted)
+          .child(k.waits.length ? `waits on ${k.waits.join(", ")}` : k.note)))));
+    }
     return box;
   }
 
@@ -520,6 +554,29 @@ export default class Dispatch extends View {
     }))];
   }
 
+  // A settled run's Archive (hides it from the panel; its files stay), or an archived one's Unarchive.
+  // Writes or removes <run>/archived at once, no dialog: it is undone with one click.
+  archiveButton(t, r) {
+    const cards = this.stats.runs[r.dir]?.status;
+    const op = archivedAway(r, cards) ? "unarchive" : canArchive(r, cards) ? "archive" : null;
+    if (!op) return [];
+    const tip = op === "archive" ? "Archive: hide from the panel (files stay)" : "Unarchive: back in the list";
+    return [h_flex().id(`${op}-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(tip).on_mouse_down("left", stop)
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        const files = io(this.ctx?.on ?? null);
+        r.archived = op === "archive" ? Date.now() : null;
+        cx.notify();
+        cx.spawn(async (cx) => {
+          const res = await archiveRun(files, r, op);
+          if (!res.ok) this.error = `${op} ${r.id}: ${res.error}`;
+          later(cx, (cx) => this.refresh(cx));
+        });
+      })
+      .child(icon(op, 13, t.muted))];
+  }
+
   // Under the head (folded or not): the run's paused / stopping / stopped / handing-off line.
   renderControl(t, r) {
     const banner = controlBanner(r);
@@ -546,6 +603,23 @@ export default class Dispatch extends View {
             cx.timer.after(2000, (cx) => { if (this.copied === r.dir) { this.copied = null; cx.notify(); } });
           });
         }, { color: t.accent })));
+  }
+
+  // Under the head: a run whose main agent is gone and that is not done. Copy resume prompt puts the
+  // words for a new main agent (any program that loads the skills) on the clipboard: it runs
+  // hd_dispatch.py takeover, which recovers lost helpers and adopts the run in one step.
+  renderTakeover(t, r) {
+    const stats = this.stats.runs[r.dir];
+    if (!needsTakeover(r, terminals(), stats?.status, Boolean(this.stats.finished?.[r.dir]))) return null;
+    const key = `takeover|${r.dir}`;
+    return h_flex().flex_none().min_h(34).px(12).py(5).gap(8).items_center().border_t(1).border_color(t.border).bg(t.surface)
+      .child(icon("handover", 11, t.accent))
+      .child(div().flex_1().min_w(0).truncate().text_size(S().label).text_color(t.accent).child(takeoverBanner(r)))
+      .child(action(`takeover-${r.dir}`, this.copied === key ? "Copied" : "Copy resume prompt", "task", t, (_e, cx) => {
+        cx.write_to_clipboard(takeoverPrompt(r));
+        this.copied = key; cx.notify();
+        cx.timer.after(2000, (cx) => { if (this.copied === key) { this.copied = null; cx.notify(); } });
+      }, { color: t.accent }));
   }
 
   // The run's background tasks, all the main agent's: a lighter list between the spend and the helpers.
@@ -613,10 +687,12 @@ export default class Dispatch extends View {
     const box = v_flex().flex_none().px(12).pt(8).pb(10).gap(10).border_t(1).border_color(t.border);
     if (cells.length) box.child(h_flex().gap(8).children(cells));
     if (s.cards) {
-      const counts = cardCounts(s.cards), colors = CARD_COLORS(t);
+      // Merged out of the cards still meant to be merged: parked ones are left out of the count (they show
+      // in the key), review calls are not cards at all (stats.js).
+      const counts = cardCounts(s.cards), colors = CARD_COLORS(t), v = cardView(s.cards, r.calls.map((c) => c.call));
       box.child(v_flex().gap(5)
-        .child(line("cards", `${s.cards.merged}/${s.cards.total} merged`))
-        .child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), s.cards.total))
+        .child(line("cards", `${v.merged}/${v.goal} merged`))
+        .child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))
         .child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
           .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${n} ${CARD_WORDS[st] ?? st}`).flex_none()))));
     }
@@ -664,7 +740,8 @@ export default class Dispatch extends View {
 
   renderActions(t, c) {
     const on = this.ctx?.on ?? null, live = c.state === "live";
-    const ask = handoffAsk(c), to = ask ? this.receiver(c) : null;
+    const card = this.stats.runs[c.runDir]?.cards?.[c.call] ?? null;
+    const asks = handoffAsks(c, card), to = asks.length ? this.receiver(c) : null;
     // Two rows of separate outlined buttons, both ending in a 28px square column so their edges line up.
     // Row one: Result (its report and, for write and net helpers, the worktree's changes), Task (its
     // rounds: events and task files), Peek (live only), then Clean up as an icon in the square. Row two,
@@ -693,9 +770,11 @@ export default class Dispatch extends View {
     ], live && square(`kill-${c.key}`, "Clean up", "trash", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 440, height: 220,
       props: { role: "cleanup", address: c.address, call: c.call, name: c.name } }), t.ansi1));
-    const askIt = ask && to && cell(`ask-${c.key}`, "Ask", "send", () => openOverlay({
+    // Ask: a message to its main agent. A card parked for you offers your two answers instead.
+    const ASK_LABEL = { resume: "Carry on…", drop: "Drop…", accept: "Ask to review" };
+    const askCells = to ? asks.map((ask) => cell(`ask-${ask}-${c.key}`, ASK_LABEL[ask] ?? "Ask", ask === "drop" ? "trash" : "send", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 480, height: 300,
-      props: { role: "handoff", address: to.address, name: to.program?.name ?? to.address, text: handoffText(c, ask) } }), t.accent);
+      props: { role: "handoff", address: to.address, name: to.program?.name ?? to.address, text: handoffText(c, ask) } }), ask === "drop" ? t.ansi1 : t.accent)) : [];
     // Hand over: freeze it and start another agent (or a fresh session of the same one) on its task.
     const run = this.runs.find((r) => r.dir === c.runDir) ?? null;
     const parentLive = Boolean(c.parent && (terminals() ?? []).find((x) => x.address === c.parent && x.state === "live"));
@@ -704,16 +783,23 @@ export default class Dispatch extends View {
       props: { role: "handover", on, run: { dir: c.runDir, hd: run?.hd ?? c.hd, id: run?.id ?? baseName(c.runDir) },
         call: c.call, name: c.name, agent: c.agent, live, round: c.round, mode: c.mode, parentLive,
         log: `${c.agentDir}/handover.log` } }));
-    const second = [askIt, handIt].filter(Boolean);
+    const second = [...askCells, handIt].filter(Boolean).slice(0, 2);
     const terminal = second.length ? grid([...second, null].slice(0, 2)) : null;
     const spend = callSpend(this.stats.calls[c.key]);
     const who = c.lost ? "Interrupted: its terminal vanished before it handed in a good report. Nothing is done about it until its main agent (or you) decides."
       : c.offline ? "Waiting for the network: it carries on by itself once the network is back, using up no retry."
       : c.handingTo ? `Handing over to ${agentLabel(c.handingTo)}: it is writing its handoff note`
       : weakIsolation(c) ? `${agentLabel(c.agent)} · weak isolation: no sandbox, only its task file's rules keep it in its folder` : null;
+    // Its dev card, when it has one: what the main agent made of it, and why it is parked.
+    const why = parkedWhy(card);
+    const cardLine = card && (why || card.note || card.result || ["pending", "running"].includes(card.status))
+      ? [`card ${CARD_WORDS[card.status] ?? card.status}`,
+         why === "user" ? "waiting for your decision" : why === "superseded" ? `superseded${card.by ? ` by ${card.by}` : ""}` : why === "dropped" ? "dropped" : null,
+         card.note || card.result].filter(Boolean).join(" · ") : null;
     return v_flex().pl(28).pr(10).pt(2).pb(10).gap(6)
       .when(Boolean(spend), (el) => el.child(div().pb(2).text_size(S().label).text_color(t.muted).child(spend)))
       .when(Boolean(who), (el) => el.child(div().pb(2).text_size(S().label).text_color(c.lost ? t.ansi1 : c.handingTo ? t.accent : t.ansi3).child(who)))
+      .when(Boolean(cardLine), (el) => el.child(div().pb(2).text_size(S().label).text_color(why === "user" ? t.ansi3 : t.muted).child(cardLine)))
       .child(view)
       .when(Boolean(terminal), (el) => el.child(terminal));
   }
@@ -754,14 +840,14 @@ export default class Dispatch extends View {
   }
 
   renderFooter(t) {
-    const runs = this.split().mine;
+    const all = this.split().mine, runs = all.filter((r) => !archivedAway(r, this.stats.runs[r.dir]?.status)), archived = all.length - runs.length;
     const live = runs.filter((r) => r.live).length;
     const helpers = runs.reduce((n, r) => n + r.calls.filter((c) => c.state === "live").length, 0);
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
       .child(div().flex_1().truncate().child(runs.length
-        ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ${live} active · ${helpers} helper${helpers === 1 ? "" : "s"} live`
-        : "No runs"))
+        ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ${live} active · ${helpers} helper${helpers === 1 ? "" : "s"} live${archived ? ` · ${archived} archived` : ""}`
+        : archived ? `${archived} archived` : "No runs"))
       .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().text_color(t.ansi3).child(this.statsError)));
   }
 

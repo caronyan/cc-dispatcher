@@ -83,6 +83,15 @@ class Env:
         return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
 
+class Archive(unittest.TestCase):
+    def test_dispatching_again_takes_the_run_out_of_the_archive(self):
+        w = Env()
+        w.dispatch("a")
+        (w.run_dir / "archived").write_text("1\n")
+        w.dispatch("b")
+        self.assertFalse((w.run_dir / "archived").exists())
+
+
 class ReportBackup(unittest.TestCase):
     def test_collect_and_send_keep_a_copy_in_the_run_folder(self):
         w = Env()
@@ -502,6 +511,123 @@ class Recover(unittest.TestCase):
         w.dispatch("a")
         r = w.hd("recover", "--run", str(w.run_dir))
         self.assertEqual((w.kv(r)["RECOVERED"], w.kv(r)["FRESH"]), ("none", "none"))
+
+
+class Takeover(unittest.TestCase):
+    """A new main agent (any program) carries a run on with one command; runs lists the ones to carry on."""
+
+    def gone(self, w, name):
+        st = w.hc_state()
+        st["terminals"].pop(name)
+        w.state.write_text(json.dumps(st))
+
+    def newcomer(self, w, app="codex", argv=("codex",)):
+        w.set_terminals({"next": {"address": "t2", "status": "working", "app": app, "argv": list(argv), "labels": {}}})
+
+    def ctl(self, w):
+        return json.loads((w.run_dir / "control.json").read_text())
+
+    def test_main_agent_and_a_helper_gone_recovers_and_adopts_in_one_step(self):
+        w = Env()
+        p = w.root / "p.md"
+        p.write_text("x")
+        r = w.hd("run", "--run", str(w.run_dir), "--call", "a", "--mode", "write", "--effort", "high", "--dir",
+                 str(w.repo), "--prompt", str(p), "--schema", str(w.schema), CLAUDE_CODE_SESSION_ID="sess-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.gone(w, w.meta()["name"])
+        self.gone(w, "parent")
+        self.newcomer(w)
+        r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        kv = w.kv(r)
+        self.assertEqual((kv["TAKEOVER"], kv["VIA"], kv["FRESH"], kv["RUN_CONTROL"], kv["AGENT"]),
+                         ("adopted", "recover", "a", "paused", "codex"))
+        self.assertIn("claude --resume sess-1", kv["RESUME_MAIN"])
+        self.assertIn("handoff.md", kv["READ"])
+        ctl = self.ctl(w)
+        self.assertEqual((ctl["state"], ctl["owner"], ctl["held"]), ("paused", "t2", ["a"]))
+        self.assertEqual((w.meta()["parent"], w.meta()["dispatcher_agent"]), ("t2", "codex"))
+        r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
+        self.assertEqual(w.kv(r)["TAKEOVER"], "self")
+
+    def test_refused_while_the_old_main_agent_runs_unless_forced(self):
+        w = Env()
+        w.dispatch()
+        self.newcomer(w, app="claude-code", argv=("claude",))
+        r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
+        self.assertEqual(r.returncode, 3)
+        kv = w.kv(r)
+        self.assertEqual((kv["TAKEOVER"], kv["MAIN"], kv["MAIN_TERMINAL"]), ("refused", "live", "t1"))
+        self.assertIn("准备交接", r.stdout)
+        self.assertFalse((w.run_dir / "control.json").exists())
+        r = w.hd("takeover", "--run", str(w.run_dir), "--force", HC_TERMINAL_ID="t2")
+        kv = w.kv(r)
+        self.assertEqual((kv["TAKEOVER"], kv["VIA"], kv["RUN_CONTROL"], kv["AGENT"]), ("adopted", "forced", "running", "claude"))
+        self.assertNotIn("RESUME_MAIN", kv)
+        p = w.root / "p.md"
+        p.write_text("more")
+        r = w.hd("send", "--run", str(w.run_dir), "--call", "a", "--prompt", str(p))  # the old one, from t1
+        self.assertEqual(w.kv(r).get("RUN_CONTROL"), "adopted")
+
+    def test_a_terminal_back_at_its_shell_is_a_gone_main_agent(self):
+        w = Env()
+        w.dispatch()
+        w.patch("parent", argv=["-zsh"], app=None)
+        self.newcomer(w)
+        r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
+        kv = w.kv(r)
+        self.assertEqual((kv["TAKEOVER"], kv["VIA"], kv["RECOVERED"], kv["RUN_CONTROL"]), ("adopted", "takeover", "none", "running"))
+        self.assertIn("没来得及交接", (Path(kv["HANDOFF"]) / "handoff.md").read_text())
+
+    def test_a_run_being_handed_off_is_adopted(self):
+        w = Env()
+        w.dispatch()
+        w.hd("handoff", "--run", str(w.run_dir), "--no-notes")
+        self.newcomer(w)
+        r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
+        kv = w.kv(r)
+        self.assertEqual((kv["TAKEOVER"], kv["VIA"], kv["RUN_CONTROL"]), ("adopted", "handoff", "running"))
+        self.assertEqual(self.ctl(w)["owner"], "t2")
+
+    def test_a_codex_main_agent_is_reopened_by_its_thread(self):
+        w = Env()
+        w.patch("parent", argv=["/opt/bin/codex"], app="codex")
+        p = w.root / "p.md"
+        p.write_text("x")
+        w.hd("run", "--run", str(w.run_dir), "--call", "a", "--mode", "write", "--effort", "high", "--dir",
+             str(w.repo), "--prompt", str(p), "--schema", str(w.schema), CODEX_THREAD_ID="th-9", CLAUDE_CODE_SESSION_ID="")
+        self.assertEqual((w.meta()["dispatcher_agent"], w.meta()["session"]), ("codex", "th-9"))
+        self.gone(w, "parent")
+        self.newcomer(w, app="claude-code", argv=("claude",))
+        kv = w.kv(w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2"))
+        self.assertIn("codex resume --sandbox danger-full-access th-9", kv["RESUME_MAIN"])
+
+    def test_runs_lists_what_is_left_to_carry_on(self):
+        w = Env()
+        w.dispatch()
+        (w.run_dir / "state.json").write_text(json.dumps({"tasks": {
+            "a": {"status": "running"}, "b": {"status": "merged"}, "c": {"status": "parked", "note": "superseded by b"},
+            "d": {"status": "parked", "parked_why": "user"}, "a-check-r1": {"status": "merged"}}}))
+        done = w.repo / ".cc-dispatch" / "test-y"
+        done.mkdir()
+        (done / "state.json").write_text(json.dumps({"finished": 1}))
+        hidden = w.repo / ".cc-dispatch" / "review-z"
+        hidden.mkdir()
+        (hidden / "state.json").write_text("{}")
+        (hidden / "control.json").write_text(json.dumps({"state": "paused"}))
+        (hidden / "archived").write_text("1")
+        r = w.hd("runs", "--repo", str(w.repo))
+        kv = w.kv(r)
+        self.assertEqual(kv["RUNS"], "1")
+        line = [l for l in r.stdout.splitlines() if l.startswith("RUN=")][0]
+        self.assertIn("skill=cc-herdr-dispatch-dev", line)
+        self.assertIn("main=live(claude)", line)
+        self.assertIn("cards=1/2 merged", line)  # parked ones are not meant to be merged
+        self.assertIn("open=1 cards open, 1 parked for you", line)
+        rows = json.loads(w.hd("runs", "--repo", str(w.repo), "--all", "--json").stdout)
+        self.assertEqual(sorted(r["name"] for r in rows), ["dev-x", "review-z", "test-y"])
+        self.gone(w, "parent")
+        self.assertIn("main=gone(claude)", w.hd("runs", "--repo", str(w.repo)).stdout)
 
 
 class Digest(unittest.TestCase):
