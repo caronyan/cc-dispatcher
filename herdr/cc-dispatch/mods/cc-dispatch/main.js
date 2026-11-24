@@ -15,7 +15,6 @@ const HISTORY = 6;                 // ended runs shown before "Show n older"
 const LIVE_POLL = 2000;            // a running background task's dialog re-reads its processes
 const QUOTA_POLL = 30000;          // the main agents' quota (hd_usage.py keeps magpie's answer 60 s)
 const TASK_KINDS = ["research", "review", "dev", "fix", "test", "retro"];
-const GROUP_WORDS = { you: "等你", active: "进行中", queued: "待分发", done: "已完成" };
 const outputValue = (out, key) => (out ?? "").split("\n").find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
 const commandError = (out) => (out || "hd_dispatch.py 运行失败").split("\n").filter((line) => line && !line.startsWith("FAILURE=")).slice(-2).join(" ");
 
@@ -90,9 +89,26 @@ const termDot = (t, c) => c.held && c.state === "live" && c.status !== "working"
     ? div().w(8).h(8).flex_none().rounded_full().bg(c.status === "blocked" ? t.blocked : t.foreground)
     : div().w(8).h(8).flex_none().rounded_full().border(1.5).border_color(t.muted);
 
-const stageTagText = (t, text, color) => h_flex().h(16).px(6).flex_none().items_center().rounded(4).border_1()
-  .border_color(color).text_size(S().label).text_color(color).child(text);
-const stageTag = (t, stage) => stageTagText(t, STAGE_WORDS[stage], stageColor(t, stage));
+
+// A status as a small icon right after a title: a tick once the work landed, a cross when it failed or was
+// stopped, nothing while it works (the dot in front already spins), and a mark of its own for each state
+// between. The word shows on hover.
+const MARKS = {
+  done: ["check", "done"], merged: ["check", "ansi2"], ok: ["check", "done"],
+  failed: ["close", "ansi1"], lost: ["close", "ansi1"], bad: ["close", "ansi3"], stopped: ["close", "muted"],
+  blocked: ["question", "ansi3"], paused: ["pause", "ansi3"], parked: ["pause", "muted"], offline: ["wifi-off", "ansi3"],
+  retrying: ["refresh", "ansi3"], await: ["eye", "accent"], collect: ["eye", "accent"], review: ["eye", "accent"],
+  handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["pencil", "muted"],
+  pending: ["hourglass", "muted"], accepting: ["eye", "accent"],
+};
+const MARK_WORDS = { ...STAGE_WORDS, ...CARD_WORDS, done: "已完成", stopped: "已终止", stopping: "终止中", handoff: "交接中",
+  delivered: "已送达", queued: "已排队", draft: "草稿" };
+const statusMark = (t, id, stage) => {
+  const glyph = stage === "stopping" ? icon("ring", 11, t.ansi1).spin(900)
+    : stage === "running" ? icon("ring", 11, t.working).spin(900)
+    : MARKS[stage] ? icon(MARKS[stage][0], 12, t[MARKS[stage][1]] ?? t.muted) : null;
+  return glyph ? h_flex().id(id).flex_none().size(16).justify_center().items_center().tooltip(MARK_WORDS[stage] ?? stage).child(glyph) : null;
+};
 
 const pill = (t, text, color) => h_flex().h(18).px(7).flex_none().items_center().rounded(9).bg(t.selected)
   .text_size(S().label).text_color(color ?? t.muted).child(text);
@@ -601,7 +617,7 @@ export default class Dispatch extends View {
     const active = this.topicActive(topic);
     // Open by default while something is running, waiting on you, or drafted and not yet dispatched.
     const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
-    const groups = groupTasks(topic), waiting = groups.some((g) => g.group === "you");
+    const waiting = topic.tasks.some((task) => taskGroup(task, topic) === "you");
     const paused = Boolean(topic.pausedAt);
     const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
@@ -618,9 +634,7 @@ export default class Dispatch extends View {
       .children(this.topicControlButtons(t, topic))
       .children(this.archiveButton(t, topic));
     const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : active ? t.input : t.border)
-      .bg(active ? t.surface : t.background).overflow_hidden().child(head)
-      .child(h_flex().pl(30).pr(10).pb(6).gap(8).flex_wrap().text_size(S().label).text_color(t.muted)
-        .children(groups.map((g) => div().flex_none().text_color(g.group === "you" ? t.ansi3 : t.muted).child(`${GROUP_WORDS[g.group]} ${g.tasks.length}`))));
+      .bg(active ? t.surface : t.background).overflow_hidden().child(head);
     const quotaAgents = new Set();
     for (const r of topic.runs) {
       const agent = runQuotaAgent(r, terminals() ?? []);
@@ -637,26 +651,31 @@ export default class Dispatch extends View {
     if (asks) card.child(asks);
     if (!folded) {
       const totals = topicTotals(this.stats, topic);
-      if (totals.known || totals.cards) card.child(this.renderStats(t, topic, totals));
+      if (totals.known || totals.cards || topic.tasks.length) card.child(this.renderStats(t, topic, totals));
       const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
       const mainLive = topic.runs.some((r) => this.mainAgentOf(r));
       const bg = bgView(topicTasks(assigned, topic), mainLive, this.bgMore.get(topic.id) ?? 0);
       if (bg.running.length || bg.ended.length) card.child(this.renderBg(t, topic, bg));
-      for (const g of groups) {
-        const key = `${topic.id}|${g.group}`, folded = this.groupFold.get(key) ?? g.group === "done";
-        card.child(h_flex().id(`tasks-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
-          .border_t(1).border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
-          .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
-          .child(div().flex_1().text_size(S().label).font_semibold().text_color(g.group === "you" ? t.ansi3 : t.muted).child(GROUP_WORDS[g.group]))
-          .child(pill(t, String(g.tasks.length))));
-        if (!folded) card.children(g.tasks.map((task) => this.renderTask(t, topic, task)));
-      }
+      // Most urgent first (waiting on you, running, drafted, done); each Task's status is the mark after its title.
+      card.children(groupTasks(topic).flatMap((g) => g.tasks).map((task) => this.renderTask(t, topic, task)));
       if (!topic.implicit && !topic.archived && !topic.deleting) card.child(h_flex().px(12).py(8)
         .child(action(`add-task-${topic.id}`, "+ Task", "task", t, () => this.openForm("task", topic), { color: t.accent })));
       if (!topic.implicit) card.child(this.renderBacklog(t, topic));
     }
     return card;
+  }
+
+  /** A Task's status, as a statusMark key. */
+  taskStage(topic, task) {
+    const r = task.run, group = taskGroup(task, topic), state = r?.control?.state, request = requestState(task);
+    if (state === "paused" || state === "stopping" || state === "handoff") return state;
+    if (state === "stopped" || r?.control?.retired) return "stopped";
+    if (group === "done") return "done";
+    if (group === "queued") return request === "delivered" ? "delivered" : request ? "queued" : "draft";
+    if (group === "you") return "blocked";
+    const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
+    const top = stages.length ? runStage(stages) : "working";
+    return top === "ended" ? "working" : top;
   }
 
   renderExecutor(t, key) {
@@ -670,26 +689,25 @@ export default class Dispatch extends View {
 
   renderTask(t, topic, task) {
     const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
-    const folded = this.fold.get(key) ?? true, inset = 46;
+    const folded = this.fold.get(key) ?? !(group === "active" || group === "you"), inset = 42;
     const queued = group === "queued", request = requestState(task);
-    const terminated = r?.control?.state === "stopped" || r?.control?.retired;
-    const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
-    const stage = r?.control?.state === "paused" ? "已暂停" : r?.control?.state === "stopping" ? "终止中"
-      : r?.control?.state === "handoff" ? "交接中" : terminated ? "已终止"
-      : group === "done" ? "已完成" : queued ? request === "delivered" ? "已送达" : request ? "已排队" : "草稿"
-      : group === "you" ? GROUP_WORDS.you : stages.length && runStage(stages) !== "ended" ? STAGE_WORDS[runStage(stages)] : "进行中";
+    const stage = this.taskStage(topic, task);
     const working = request === "queued" && task.request?.target === "owner" && topic.owner?.terminal
       ? this.topics.flatMap((p) => p.owner?.terminal === topic.owner.terminal
         ? p.tasks.filter((x) => x.runDir && !x.finishedAt && !this.states[x.runDir]?.finished && x.run?.control?.state !== "stopped" && !x.run?.control?.retired) : []) : [];
     const executor = this.renderExecutor(t, task.agent ?? task.request?.agent ?? (task.request?.target === "owner" ? topic.owner?.agent : null));
+    // The main agent's terminal dot, as on a card: it spins while that agent works.
+    const main = r && group !== "done" ? this.mainAgentOf(r) : null;
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface);
-    box.child(h_flex().id(`task-${key}`).min_h(32).pl(28).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+    box.child(h_flex().id(`task-${key}`).min_h(32).pl(12).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+      .when(Boolean(r) && group !== "done", (el) => el.child(termDot(t, { state: main ? "live" : "gone", status: main?.status ?? null })))
       .when(Boolean(executor), (el) => el.child(executor))
       .child(pill(t, task.kind))
-      .child(div().flex_1().min_w(0).truncate().text_size(S().small).font_semibold().child(task.title))
-      .child(stageTagText(t, stage, group === "you" ? t.ansi3 : group === "done" ? t.done : t.muted))
+      .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().small).font_semibold().child(task.title))
+      .children([statusMark(t, `mark-${key}`, stage)].filter(Boolean))
+      .child(div().flex_1())
       .children(r ? this.controlButtons(t, r, topic) : []));
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
@@ -717,7 +735,7 @@ export default class Dispatch extends View {
         .children(away.map((k) => h_flex().id(`card-${r.dir}|${k.id}`).gap(7).items_center()
           .child(div().flex_none().text_size(S().label).child(k.id))
           .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
-          .child(stageTagText(t, CARD_WORDS[k.status] ?? k.status, t.muted))
+          .children([statusMark(t, `mark-${r.dir}|${k.id}`, k.status)].filter(Boolean))
           .tooltip(k.waits.length ? `等 ${k.waits.join("、")}` : k.note ?? ""))));
     }
     if (task.summaryLine) box.child(note(t, task.summaryLine, t.done).pl(inset).pr(10).py(5));
@@ -1008,16 +1026,28 @@ export default class Dispatch extends View {
     ].filter(Boolean);
     const box = v_flex().flex_none().px(12).pt(8).pb(10).gap(10).border_t(1).border_color(t.border);
     if (cells.length) box.child(h_flex().gap(8).children(cells));
-    if (s.cards) {
-      // Merged out of the cards still meant to be merged: parked ones are left out of the count (they show
-      // in the key), review calls are not cards at all (stats.js).
-      const counts = cardCounts(s.cards), colors = CARD_COLORS(t);
-      const v = cardView(s.cards, topic.runs.flatMap((r) => r.calls.map((c) => `${r.dir}#${c.call}`)));
+    if (topic.tasks.length) {
+      // One row per Task: its status, role and title, then one block per card it owns, coloured by the
+      // card's status. Merged counts leave parked cards out (they show in the key); review calls are not cards.
+      const colors = CARD_COLORS(t), done = topic.tasks.filter((task) => taskGroup(task, topic) === "done").length;
+      const v = s.cards ? cardView(s.cards, topic.runs.flatMap((r) => r.calls.map((c) => `${r.dir}#${c.call}`))) : null;
+      const rows = groupTasks(topic).flatMap((g) => g.tasks).map((task) => {
+        const run = task.runDir ? this.stats.runs[task.runDir] : null, status = run?.status ?? {};
+        const ids = Object.keys(status).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+        const own = ids.length ? cardView(run) : null, stage = this.taskStage(topic, task);
+        return h_flex().gap(6).items_center().h(18)
+          .child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div()))
+          .child(div().min_w(0).flex_1().truncate().text_size(z.small).child(task.title))
+          .when(ids.length > 0, (el) => el
+            .child(h_flex().w(84).flex_none().h(6).gap(2).children(ids.map((id) => div().flex_1().h_full().rounded(2).bg(colors[status[id]] ?? t.muted))))
+            .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${own.merged}/${own.goal}`)));
+      });
+      const counts = s.cards ? cardCounts(s.cards) : [];
       box.child(v_flex().gap(5)
-        .child(line("卡片", `已合并 ${v.merged}/${v.goal}`))
-        .child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))
-        .child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
-          .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${CARD_WORDS[st] ?? st} ${n}`).flex_none()))));
+        .child(line("Task", [`完成 ${done}/${topic.tasks.length}`, v && `卡片合并 ${v.merged}/${v.goal}`].filter(Boolean).join(" · ")))
+        .children(rows)
+        .when(counts.length > 0, (el) => el.child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
+          .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${CARD_WORDS[st] ?? st} ${n}`).flex_none())))));
     }
     if (s.tokens) {
       const k = s.tokens;
@@ -1032,7 +1062,7 @@ export default class Dispatch extends View {
     return box;
   }
 
-  // `tagged`: show the stage tag (rows inside a stage group leave it to the group's header).
+  // `tagged`: show the status mark (rows inside a stage group leave it to the group's header).
   renderCall(t, c, tagged = true, inset = 28) {
     const open = this.open === c.key, spent = this.stats.calls[c.key];
     const raw = callStage(c, this.stats.runs[c.runDir]?.status?.[c.call]);
@@ -1052,19 +1082,19 @@ export default class Dispatch extends View {
       .child(termDot(t, c))
       .children([this.renderExecutor(t, c.agent ?? "codex")].filter(Boolean))
       .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().body).text_color(live ? t.foreground : t.muted).child(callLabel(c)))
+      .when(tagged, (el) => el.children([statusMark(t, `mark-${c.key}`, stage)].filter(Boolean)))
       .children(callTags(c).map((x) => tag(x)))
       .when(Boolean(agentTag(c)?.weak), (el) => el.child(tag("弱隔离", t.ansi3)))
       .when(Boolean(c.handingTo), (el) => el.child(tag(`→ ${c.handingTo}`, t.accent)))
       .when(Boolean(c.failure && c.failure !== "exited" && c.failure !== "blocked"), (el) => el.child(tag(failureWord(c.failure), t.ansi1)))
       .when(Boolean(c.retry), (el) => el.child(tag(c.retry.split(" ").pop(), t.ansi3)))
-      .when(tagged, (el) => el.child(stageTag(t, stage)))
       .child(div().flex_1())
       .when(Boolean(spent?.tokens), (el) => el.child(div().flex_none().text_size(S().label).text_color(t.muted).child(fmtTok(spent.tokens.input + spent.tokens.output))));
     if (!open) return row;
-    return v_flex().flex_none().bg(t.raised).child(row).child(this.renderActions(t, c));
+    return v_flex().flex_none().bg(t.raised).child(row).child(this.renderActions(t, c, inset));
   }
 
-  renderActions(t, c) {
+  renderActions(t, c, inset = 28) {
     const on = this.ctx?.on ?? null, live = c.state === "live";
     const card = this.stats.runs[c.runDir]?.cards?.[c.call] ?? null;
     const asks = handoffAsks(c, card), to = asks.length && !asks.includes("decide") ? this.receiver(c) : null;
@@ -1125,7 +1155,7 @@ export default class Dispatch extends View {
       ? [`卡片${CARD_WORDS[card.status] ?? card.status}`,
          why === "user" ? "等你决定" : why === "superseded" ? `已被${card.by ? ` ${card.by} ` : ""}取代` : why === "dropped" ? "已放弃" : null,
          card.note || card.result].filter(Boolean).join(" · ") : null;
-    return v_flex().pl(28).pr(10).pt(2).pb(10).gap(6)
+    return v_flex().pl(inset).pr(10).pt(2).pb(10).gap(6)
       .when(Boolean(spend), (el) => el.child(div().pb(2).text_size(S().label).text_color(t.muted).child(spend)))
       .when(Boolean(who), (el) => el.child(div().pb(2).text_size(S().label).text_color(c.lost ? t.ansi1 : c.handingTo ? t.accent : t.ansi3).child(who)))
       .when(Boolean(cardLine), (el) => el.child(div().pb(2).text_size(S().label).text_color(why === "user" ? t.ansi3 : t.muted).child(cardLine)))

@@ -104,3 +104,13 @@ test("a Task is one row: agent icon before the name, no id or extra caption", as
   assert.match(main, /\.when\(Boolean\(executor\), \(el\) => el\.child\(executor\)\)\s*\.child\(pill\(t, task\.kind\)\)/, "主 agent 图标放在 Task 名称前面");
   assert.match(main, /\.child\(termDot\(t, c\)\)\s*\.children\(\[this\.renderExecutor\(t, c\.agent/, "卡片的 agent 图标放在卡片名称前面");
 });
+
+test("Task status is an icon after the title; no group bars or status words under the Topic", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  // 状态用图标紧跟标题（勾、叉、中间态各有图标），不再用文字标签；Topic 下不再有“已完成 1”和分组状态栏。
+  assert.doesNotMatch(main, /stageTagText|GROUP_WORDS|id\(`tasks-\$\{key\}`\)/, "去掉了文字状态标签、Topic 下的状态汇总和分组状态栏");
+  assert.match(main, /\.child\(task\.title\)\)\s*\.children\(\[statusMark\(/, "Task 状态图标紧跟标题");
+  assert.match(main, /\.child\(callLabel\(c\)\)\)\s*\.when\(tagged, \(el\) => el\.children\(\[statusMark\(/, "卡片状态图标紧跟名称");
+  assert.match(main, /renderActions\(t, c, inset\)/, "卡片展开后的内容和卡片行同一缩进");
+});
