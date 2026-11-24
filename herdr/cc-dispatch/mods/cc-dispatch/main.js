@@ -1048,7 +1048,9 @@ export default class Dispatch extends View {
           .child("Tasks").child(div().font_semibold().text_color(t.foreground).child(`${done}/${topic.tasks.length}`)))
         .children(rows)
         // All cards of the Topic: one bar by status, then the key with counts.
-        .when(counts.length > 0, (el) => el.child(div().pt(3).child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))))
+        .when(counts.length > 0, (el) => el.child(h_flex().pt(3).gap(6).items_center()
+          .child(div().flex_1().min_w(0).child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total)))
+          .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${v.merged}/${v.goal}`))))
         .when(counts.length > 0, (el) => el.child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
           .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${CARD_WORDS[st] ?? st} ${n}`).flex_none())))));
     }

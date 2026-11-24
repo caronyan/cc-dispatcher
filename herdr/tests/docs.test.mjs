@@ -122,4 +122,5 @@ test("Topic stats: Tasks x/y, a progress bar per Task, the card bar above its ke
   assert.match(main, /\.child\("Tasks"\)/);
   assert.doesNotMatch(main, /卡片合并 \$\{|ids\.map\(\(id\) => div\(\)/, "不写长状态文案，不按卡片切小格");
   assert.match(main, /bar\(cardCounts\(\{ status \}\)/, "每个 Task 一条进度条");
+  assert.match(main, /v\.total\)\)\)\s*\.child\(div\(\)\.w\(30\)[^\n]*\$\{v\.merged\}\/\$\{v\.goal\}/, "总卡片进度条右侧和 Task 行一样写全 Topic 的 x/y");
 });
