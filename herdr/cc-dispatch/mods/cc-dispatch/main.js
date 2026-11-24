@@ -15,6 +15,15 @@ const HISTORY = 6;                 // ended runs shown before "Show n older"
 const LIVE_POLL = 2000;            // a running background task's dialog re-reads its processes
 const QUOTA_POLL = 30000;          // the main agents' quota (hd_usage.py keeps magpie's answer 60 s)
 const TASK_KINDS = ["research", "review", "dev", "fix", "test", "retro"];
+/** What each Task kind is for, what it may do, its limits and what its detail should say, shown under the kind picker. */
+const KIND_GUIDE = {
+  research: { use: "调研一个问题，或出一份能直接拿去实现的方案。", can: "读代码、查资料、做小实验，交回结论和证据；要方案时另给方案对比和实施步骤。", limit: "只读，不改你的代码。", hint: "写要回答的问题或要做的决定、背景约束、已排除的选项" },
+  review: { use: "审查一份方案或一段代码改动。", can: "多方各自审查后合并结论，再找反例验证；默认把确认的问题修掉。", limit: "修复留在工作区、不提交；需要重新设计的列为后续任务，先问你。", hint: "写审查对象（方案文件、提交范围或分支）和需求背景；只要报告就写“只审不修”" },
+  dev: { use: "按方案实现一项较大的改动。", can: "拆成任务卡并行写代码，逐张验收、合并、跑全量测试。", limit: "开工前会请你确认拆分；小改动和单个 bug 不必用它。", hint: "写方案或需求、验收标准、不能动的地方" },
+  fix: { use: "修复已经确认、修法明确的问题。", can: "改代码并补回归测试，测试通过后放进工作区。", limit: "不提交；需要重新设计的问题交给 dev。", hint: "写问题现象、复现方法、期望的行为" },
+  test: { use: "跑测试或补测试，查清失败原因。", can: "运行指定范围的测试，把失败分成产品问题、测试问题和环境问题。", limit: "只出报告，不修产品代码。", hint: "写测试范围（文件、提交范围，或全部）" },
+  retro: { use: "复盘已经结束的运行，改进做法。", can: "读运行记录，修改 skill 规则或项目文档。", limit: "不改产品代码，不调用其他职责。", hint: "写要复盘的运行或 Topic，以及你关心的问题" },
+};
 const outputValue = (out, key) => (out ?? "").split("\n").find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
 const commandError = (out) => (out || "hd_dispatch.py 运行失败").split("\n").filter((line) => line && !line.startsWith("FAILURE=")).slice(-2).join(" ");
 
@@ -536,7 +545,7 @@ export default class Dispatch extends View {
 
   openForm(role, topic, extra = {}) {
     const ownerLive = Boolean(topic?.owner?.terminal) && (agents() ?? []).some((a) => a.address === topic.owner.terminal);
-    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 560, height: role === "dispatch" ? 660 : role === "task" ? 540 : 430,
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 560, height: role === "dispatch" ? 760 : role === "task" ? 640 : 430,
       props: { role, topic: this.topicProps(topic), repo: this.topicRepo(topic), hd: this.topicHD(topic),
         on: this.ctx?.on ?? null, space: (spaces() ?? []).find((s) => s.active)?.id,
         ownerLive, programs: this.programs, ...extra } });
@@ -1358,7 +1367,14 @@ export default class Dispatch extends View {
       .child(h_flex().gap(5).flex_wrap().children(TASK_KINDS.map((kind) => h_flex().id(`kind-${kind}`).h(26).px(9).items_center().rounded(5)
         .border_1().border_color(this.kind === kind ? t.accent : t.border).bg(this.kind === kind ? t.selected : t.background)
         .text_size(S().small).text_color(this.kind === kind ? t.accent : t.muted).cursor_pointer()
-        .on_click((_e, cx) => { this.kind = kind; cx.notify(); }).child(kind))));
+        .on_click((_e, cx) => { this.kind = kind; cx.notify(); }).child(kind))))
+      .when(Boolean(KIND_GUIDE[this.kind]), (el) => {
+        const g = KIND_GUIDE[this.kind], line = (label, text) => h_flex().gap(8).items_start()
+          .child(div().w(28).flex_none().text_size(S().small).text_color(t.muted).child(label))
+          .child(div().flex_1().min_w(0).text_size(S().small).text_color(t.foreground).child(text));
+        return el.child(v_flex().gap(4).px(10).py(8).rounded(6).bg(t.hover)
+          .child(line("作用", g.use)).child(line("能做", g.can)).child(line("限制", g.limit)).child(line("要写", g.hint)));
+      });
     const choice = (key, label, subtitle) => h_flex().id(`executor-${key}`).flex_none().px(10).py(7).gap(8).items_center().rounded(6).border_1()
       .border_color(picked === key ? t.accent : t.border).bg(picked === key ? t.selected : t.background).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.pick = key; cx.notify(); })
