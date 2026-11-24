@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_PY, bgRequest, assignTasks, bgView, bgSummary, LIVE_SCRIPT, parseLive, liveMarkdown } from "../cc-dispatch/mods/cc-dispatch/bg.js";
+import { BG_PY, bgRequest, assignTasks, topicTasks, bgView, bgSummary, LIVE_SCRIPT, parseLive, liveMarkdown } from "../cc-dispatch/mods/cc-dispatch/bg.js";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 const ts = (s) => `2026-11-08T03:${s}Z`;
@@ -80,6 +80,21 @@ test("assignTasks: a task whose command names a run folder goes to that run", ()
   const got = assignTasks(runs, { [runs[0].dir]: ["s"], [runs[1].dir]: ["s"] }, sessions);
   assert.deepEqual(got[runs[0].dir].map((t) => t.id), ["w"]);
   assert.deepEqual(got[runs[1].dir].map((t) => t.id), ["w2", "x"]);
+});
+
+test("topicTasks merges assigned runs, deduplicating session plus task id while retaining different sessions", () => {
+  const runs = [{ dir: "/a", startedAt: 1000 }, { dir: "/b", startedAt: 900000 }, { dir: "/other", startedAt: 1000 }];
+  const sessions = {
+    s1: [{ id: "same", started: 2000 }, { id: "b", started: 1000000 }, { id: "b", started: 1000000 }],
+    s2: [{ id: "same", started: 2000 }],
+    s3: [{ id: "unrelated", started: 2000 }],
+  };
+  const assigned = assignTasks(runs, { "/a": ["s1", "s2"], "/b": ["s1"], "/other": ["s3"] }, sessions);
+  const merged = topicTasks(assigned, { runs: [runs[0], runs[1], runs[0]] });
+  assert.deepEqual(merged.map((t) => [t.session, t.id]), [["s1", "same"], ["s2", "same"], ["s1", "b"]]);
+  assert.deepEqual(topicTasks(assigned, { runs: [] }), []);
+  assert.deepEqual(topicTasks({}, { runs }), []);
+  assert.equal(sessions.s1[0].session, undefined);
 });
 
 test("bgView: wait hidden but noted, running first, a few ended, lost when Claude is gone", () => {

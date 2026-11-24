@@ -522,7 +522,21 @@ export function assignTasks(runs, found, sessions) {
       const cmd = t.command ?? "";
       const named = list.filter((r) => r.dir && cmd.includes(r.dir)).sort((a, b) => b.dir.length - a.dir.length)[0];
       const owner = named ?? [...list].reverse().find((r) => (t.started || 0) >= (r.startedAt || 0) - BG_GRACE);
-      if (owner) (out[owner.dir] ??= []).push(t);
+      if (owner) (out[owner.dir] ??= []).push({ ...t, session: sid });
+    }
+  }
+  return out;
+}
+
+/** Merge assignTasks' run map for a Topic; task ids are unique only within their main session. */
+export function topicTasks(bg, topic) {
+  const seen = new Set(), out = [];
+  for (const run of topic?.runs ?? []) {
+    for (const task of bg?.[run.dir] ?? []) {
+      const key = JSON.stringify([task.session ?? null, task.id]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(task);
     }
   }
   return out;

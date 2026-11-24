@@ -18,6 +18,9 @@ export const ARCHIVE_SEP = "@@cc-dispatch-archived ";
 // from the panel (<run>/answers.jsonl, its last 50 lines). Listed first of all.
 export const ASKS_SEP = "@@cc-dispatch-asks ";
 export const ANSWERS_SEP = "@@cc-dispatch-answers ";
+export const TOPIC_SEP = "@@cc-dispatch-topic ";
+export const BACKLOG_SEP = "@@cc-dispatch-backlog ";
+export const STATE_SEP = "@@cc-dispatch-state ";
 
 // The shell script the loader runs: every run's control.json, each introduced by a CONTROL_SEP line
 // with its path, then every meta.json under the given run-parent folders, each introduced by a SEP line.
@@ -55,6 +58,25 @@ export const LIST_SCRIPT = [
   '    cat "$f"',
   '  done',
   'done',
+  'for root in "$@"; do',
+  '  for f in "$root"/topics/*/topic.json; do',
+  '    [ -f "$f" ] || continue',
+  `    printf '\\n${TOPIC_SEP}%s\\n' "$f"`,
+  '    cat "$f"',
+  '    b="${f%/topic.json}/backlog.json"',
+  '    if [ -f "$b" ]; then',
+  `      printf '\\n${BACKLOG_SEP}%s\\n' "$b"`,
+  '      cat "$b"',
+  '    fi',
+  '  done',
+  'done',
+  'for root in "$@"; do',
+  '  for f in "$root"/*/state.json; do',
+  '    [ -f "$f" ] || continue',
+  `    printf '\\n${STATE_SEP}%s\\n' "$f"`,
+  '    cat "$f"',
+  '  done',
+  'done',
 ].join("\n");
 
 // Paths that exist, one per line, from the arguments.
@@ -64,10 +86,17 @@ export function parseJSON(text) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+const objectJSON = (v) => v && typeof v === "object" && !Array.isArray(v);
+const beforeSections = (text, separators) => {
+  const all = String(text ?? "");
+  const ends = separators.map((s) => all.indexOf(s)).filter((i) => i >= 0);
+  return ends.length ? all.slice(0, Math.min(...ends)) : all;
+};
+
 /** The SEP-separated dump of meta.json files → [{ path, meta }], skipping unreadable ones. */
 export function parseMetaDump(text) {
   const out = [];
-  for (const chunk of String(text ?? "").split(SEP).slice(1)) {
+  for (const chunk of beforeSections(text, [TOPIC_SEP, STATE_SEP]).split(SEP).slice(1)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), meta = parseJSON(chunk.slice(nl + 1));
@@ -78,7 +107,7 @@ export function parseMetaDump(text) {
 
 /** The control.json files at the head of the dump → { <run dir>: { state, at, held, report } }. */
 export function parseControls(text) {
-  const out = {}, head = String(text ?? "").split(SEP)[0];
+  const out = {}, head = beforeSections(text, [SEP, TOPIC_SEP, STATE_SEP]);
   for (const chunk of head.split(CONTROL_SEP).slice(1)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
@@ -90,7 +119,7 @@ export function parseControls(text) {
 
 /** The archive markers in LIST_SCRIPT's output → { <run dir>: archived at (ms) }. */
 export function parseArchived(text) {
-  const out = {}, head = String(text ?? "").split(SEP)[0].split(CONTROL_SEP)[0];
+  const out = {}, head = beforeSections(text, [SEP, CONTROL_SEP, TOPIC_SEP, STATE_SEP]);
   for (const chunk of head.split(ARCHIVE_SEP).slice(1)) {
     const [path, at] = chunk.split("\n");
     if (path?.trim()) out[path.trim().replace(/\/archived$/, "")] = (Number(at) || 0) * 1000;
@@ -100,9 +129,7 @@ export function parseArchived(text) {
 
 /** The asks and answers at the head of LIST_SCRIPT's output → { <run dir>: { asks: {id: item}, answers: [answer] } }. */
 export function parseAsks(text) {
-  const all = String(text ?? "");
-  const ends = [ARCHIVE_SEP, CONTROL_SEP, SEP].map((x) => all.indexOf(x)).filter((i) => i >= 0);
-  const head = ends.length ? all.slice(0, Math.min(...ends)) : all;
+  const head = beforeSections(text, [ARCHIVE_SEP, CONTROL_SEP, SEP, TOPIC_SEP, STATE_SEP]);
   const out = {};
   const at = (dir) => (out[dir] ??= { asks: {}, answers: [] });
   for (const part of head.split(ASKS_SEP).slice(1)) {
@@ -120,6 +147,43 @@ export function parseAsks(text) {
     if (path) at(path.replace(/\/answers\.jsonl$/, "")).answers = list;
   }
   return out;
+}
+
+// Keep source paths and grouping context without adding fields to the public Topic / Task shapes.
+const topicDirs = new WeakMap(), taskContexts = new WeakMap(), runTerminals = new WeakMap();
+
+/** Topic JSON and its optional backlog, following the existing run sections. */
+export function parseTopics(text) {
+  const out = {};
+  for (const part of beforeSections(text, [STATE_SEP]).split(TOPIC_SEP).slice(1)) {
+    const [chunk, back] = part.split(BACKLOG_SEP), nl = chunk.indexOf("\n");
+    if (nl < 0) continue;
+    const path = chunk.slice(0, nl).trim(), topic = parseJSON(chunk.slice(nl + 1));
+    if (!path || !objectJSON(topic) || typeof topic.id !== "string" || !topic.id) continue;
+    const backlog = back ? parseJSON(back.slice(back.indexOf("\n") + 1)) : null;
+    out[topic.id] = { topic, backlog: objectJSON(backlog) ? backlog : { items: [] } };
+    topicDirs.set(topic, path.replace(/\/topic\.json$/, ""));
+  }
+  return out;
+}
+
+/** Every run's state.json; keys are absolute run directories, as in parseControls. */
+export function parseStates(text) {
+  const out = {};
+  for (const chunk of String(text ?? "").split(STATE_SEP).slice(1)) {
+    const nl = chunk.indexOf("\n");
+    if (nl < 0) continue;
+    const path = chunk.slice(0, nl).trim(), state = parseJSON(chunk.slice(nl + 1));
+    if (path && objectJSON(state)) out[path.replace(/\/state\.json$/, "")] = state;
+  }
+  return out;
+}
+
+/** The scanned Topic directory, with a fallback for Topics constructed outside the scanner. */
+export function topicDir(topic) {
+  if (topic?.implicit) return topic.runs?.[0]?.dir ?? null;
+  const repo = topic?.repo ?? topic?.runs?.[0]?.repo ?? (topic?.runs?.[0]?.dir ? repoOf(topic.runs[0].dir) : null);
+  return topicDirs.get(topic) ?? topic?.dir ?? (repo ? `${repo}/.cc-dispatch/topics/${topic.id}` : null);
 }
 
 /** Archive (or take back out) an ended run: `sh -c ARCHIVE_SCRIPT _ archive|unarchive <run dir>`. */
@@ -327,16 +391,17 @@ export function runMains(calls) {
   return out;
 }
 
-export function buildRuns(entries, terminals, controls = {}, archived = {}, asks = {}) {
+export function buildRuns(entries, terminals, controls = {}, archived = {}, asks = {}, states = {}) {
   const byRun = new Map();
   for (const { path, meta } of entries ?? []) {
     const dir = runDirOf(path);
     if (!byRun.has(dir)) byRun.set(dir, []);
     byRun.get(dir).push(buildCall(meta, dir, terminals));
   }
+  for (const dir of Object.keys(states ?? {})) if (!byRun.has(dir)) byRun.set(dir, []);
   const runs = [...byRun].map(([dir, calls]) => {
     calls.sort((a, b) => a.call.localeCompare(b.call));
-    const control = controls?.[dir] && controls[dir].state !== "running" ? controls[dir] : null;
+    const control = controls?.[dir] && (controls[dir].state !== "running" || controls[dir].retired) ? controls[dir] : null;
     if (control?.state === "paused") for (const c of calls) c.held = (control.held ?? []).includes(c.call);
     const counts = {};
     for (const c of calls) { const n = callNeed(c); counts[n] = (counts[n] ?? 0) + 1; }
@@ -364,9 +429,110 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}, asks
   // looks). Not just "a helper's terminal lives": between dispatches all may have ended while the main
   // agent works on (runs shells, reviews, merges).
   const active = activeRuns(runs, terminals);
-  for (const r of runs) r.live = active.has(r.dir);
+  for (const r of runs) { r.live = active.has(r.dir); runTerminals.set(r, terminals ?? []); }
   return runs.sort((a, b) => (b.live - a.live) || (b.startedAt - a.startedAt) || b.id.localeCompare(a.id));
 }
+
+const epochMs = (at) => at == null ? null : (Number(at) || 0) * 1000;
+const requestView = (r) => objectJSON(r) ? {
+  id: r.id, type: r.type, target: r.target, agent: r.agent ?? null,
+  at: epochMs(r.at) ?? 0, deliveredAt: epochMs(r.delivered_at),
+} : null;
+
+/** Explicit Topics and historical, single-run Topics share the same panel shape. */
+export function buildTopics(runs, topics = {}, states = {}) {
+  const list = [], claimed = new Set(), allRuns = runs ?? [];
+  for (const { topic: raw, backlog } of Object.values(topics ?? {})) {
+    if (!objectJSON(raw) || !raw.id) continue;
+    const topic = {
+      id: raw.id, title: raw.title ?? raw.id, implicit: false, archived: epochMs(raw.archived),
+      pausedAt: epochMs(raw.paused_at), deleting: Boolean(raw.deleting), owner: raw.owner ?? null,
+      createdAt: epochMs(raw.created_at) ?? 0, tasks: [], backlog: [], runs: [], updatedAt: 0,
+    };
+    const dir = topicDirs.get(raw);
+    if (dir) topicDirs.set(topic, dir);
+    for (const [id, t] of Object.entries(raw.tasks ?? {})) {
+      if (!objectJSON(t)) continue;
+      const run = allRuns.find((r) => (states[r.dir]?.topic === raw.id)
+        && baseName(r.dir) === t.run && (!dir || parentOf(r.dir) === parentOf(parentOf(dir)))) ?? null;
+      const task = {
+        id, title: t.title ?? id, kind: t.kind ?? run?.kind ?? "dev", detail: t.detail ?? "",
+        dependsOn: Array.isArray(t.depends_on) ? [...t.depends_on] : [], parentTask: t.parent_task ?? null,
+        fromBacklog: t.from_backlog ?? null, run,
+        runDir: run?.dir ?? (t.run && dir ? `${parentOf(parentOf(dir))}/${t.run}` : t.run ?? null), agent: t.agent ?? null,
+        request: requestView(t.request), summaryLine: t.summary_line ?? null, artifact: t.artifact ?? null,
+        createdAt: epochMs(t.created_at) ?? 0, startedAt: epochMs(t.started_at), finishedAt: epochMs(t.finished_at),
+        group: "queued",
+      };
+      taskContexts.set(task, { state: run ? states[run.dir] ?? {} : {}, runs: allRuns });
+      topic.tasks.push(task);
+      if (run) {
+        claimed.add(run.dir);
+        if (!topic.runs.includes(run)) topic.runs.push(run);
+      }
+    }
+    topic.backlog = (Array.isArray(backlog?.items) ? backlog.items : []).filter(objectJSON).map((b) => ({
+      id: b.id, text: b.text ?? "", status: b.status ?? "open", request: requestView(b.request),
+      taskIds: Array.isArray(b.task_ids) ? [...b.task_ids] : [],
+      createdAt: epochMs(b.created_at) ?? 0, updatedAt: epochMs(b.updated_at) ?? 0,
+    }));
+    list.push(topic);
+  }
+  for (const run of allRuns) {
+    if (claimed.has(run.dir)) continue;
+    const task = {
+      id: "k1", title: run.id ?? baseName(run.dir), kind: run.kind, detail: "", dependsOn: [],
+      parentTask: null, fromBacklog: null, run, runDir: run.dir, agent: run.mainAgent ?? null,
+      request: null, summaryLine: null, artifact: null, createdAt: run.startedAt || 0,
+      startedAt: run.startedAt || null, finishedAt: null, group: "active",
+    };
+    taskContexts.set(task, { state: states[run.dir] ?? {}, runs: allRuns });
+    list.push({
+      id: `run:${baseName(run.dir)}`, title: baseName(run.dir), implicit: true,
+      archived: run.archived ?? null, pausedAt: run.control?.state === "paused" ? epochMs(run.control.at) : null,
+      deleting: false, owner: null, createdAt: run.startedAt || 0, tasks: [task], backlog: [], runs: [run], updatedAt: 0,
+    });
+  }
+  for (const topic of list) {
+    for (const task of topic.tasks) task.group = taskGroup(task, topic);
+    topic.updatedAt = Math.max(topic.createdAt, topic.archived || 0, topic.pausedAt || 0,
+      ...topic.tasks.flatMap((t) => [t.createdAt, t.startedAt || 0, t.finishedAt || 0, t.request?.at || 0, t.request?.deliveredAt || 0]),
+      ...topic.backlog.flatMap((b) => [b.updatedAt, b.request?.at || 0, b.request?.deliveredAt || 0]),
+      ...topic.runs.map((r) => r.lastAt || r.startedAt || 0));
+  }
+  return list.sort((a, b) => (b.updatedAt - a.updatedAt) || b.id.localeCompare(a.id));
+}
+
+/** A Task needs the person before it can be considered done, even after helpers have reported. */
+export function taskGroup(task, topic) {
+  const run = task?.run;
+  if (!run && !task?.runDir) return "queued";
+  if (!run) return task.finishedAt ? "done" : "active";
+  const context = taskContexts.get(task), state = context?.state ?? run.state ?? {};
+  const cards = Object.fromEntries(Object.entries(state.tasks ?? {}).filter(([id, c]) => objectJSON(c)
+    && !c.check && id !== "survey" && !/-check-r\d+$/.test(id)));
+  const statuses = Object.fromEntries(Object.entries(cards).map(([id, c]) => [id, c.status]));
+  const control = run.control?.state ?? "running";
+  const unanswered = pendingItems(run, cards, state.pending_decisions).some((x) => !x.answer);
+  if (unanswered || ["paused", "handoff"].includes(control)
+    || (run.calls ?? []).some((c) => ["blocked", "lost", "failed", "bad"].includes(callStage(c, statuses[c.call])))) return "you";
+  const finished = Boolean(task.finishedAt || state.finished || control === "stopped" || run.control?.retired);
+  if (finished) return "done";
+  if (needsTakeover(run, runTerminals.get(run) ?? [], statuses)) return "you";
+  const children = Array.isArray(state.children) ? state.children : [];
+  const childLive = (context?.runs ?? []).some((r) => r.live && children.some((child) => child === r.dir || child === baseName(r.dir)));
+  if (topic?.implicit && !run.live && !childLive && control !== "stopping" && canArchive(run, statuses)) return "done";
+  return "active";
+}
+
+/** Groups stay in urgency order; task order inside each group comes from topic.json. */
+export function groupTasks(topic) {
+  return ["you", "active", "queued", "done"].map((group) => ({
+    group, tasks: (topic?.tasks ?? []).filter((t) => taskGroup(t, topic) === group),
+  })).filter((g) => g.tasks.length);
+}
+
+export const requestState = (task) => task?.request ? (task.request.deliveredAt == null ? "queued" : "delivered") : null;
 
 /** "2 working · 1 report bad · 3 done" in urgency order. */
 export function summary(counts) {
@@ -1139,7 +1305,7 @@ export function activeRuns(runs, terminals) {
   const out = new Set(), newest = new Map();
   for (const r of runs ?? []) {
     const state = r.control?.state;
-    if (state === "stopped" || state === "stopping") continue;
+    if (state === "stopped" || state === "stopping" || r.control?.retired) continue;
     if ((r.helpersLive ?? r.live) || state === "paused") out.add(r.dir);
     if (r.parent && live.has(r.parent) && (newest.get(r.parent)?.lastAt ?? -1) < (r.lastAt || 0)) newest.set(r.parent, r);
   }
@@ -1193,6 +1359,20 @@ export const CONTROL_SCRIPT = [
   '  echo HANDOVER_STARTED=1',
   'else',
   '  python3 "$HD" "$2" --run "$3"',
+  'fi',
+].join("\n");
+
+/** Topic commands keep every argument separate; stop returns while hd_dispatch.py winds runs down. */
+export const TOPIC_SCRIPT = [
+  'PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH',
+  'HD="$1"; shift',
+  '[ -f "$HD" ] || HD=$(ls "$HOME"/.claude/skills/cc-herdr-dispatch-*/shared/scripts/hd_dispatch.py 2>/dev/null | head -n 1)',
+  '[ -f "$HD" ] || { echo "找不到 hd_dispatch.py" >&2; exit 127; }',
+  'if [ "$1" = topic ] && [ "$2" = stop ]; then',
+  '  nohup python3 "$HD" "$@" >/dev/null 2>&1 </dev/null &',
+  '  echo STOP_STARTED=1',
+  'else',
+  '  python3 "$HD" "$@"',
   'fi',
 ].join("\n");
 

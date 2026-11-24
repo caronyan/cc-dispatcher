@@ -324,6 +324,49 @@ export function runTotals(run, callStats, cards, now = Date.now()) {
   };
 }
 
+/** Topic totals count each call once and merge overlapping run intervals instead of adding them. */
+export function topicTotals(stats, topic) {
+  const seenRuns = new Set(), seenCalls = new Set(), intervals = [], now = Date.now();
+  const out = { tokens: null, commands: 0, files: 0, elapsed: null, cards: null, known: false };
+  for (const run of topic?.runs ?? []) {
+    if (seenRuns.has(run.dir)) continue;
+    seenRuns.add(run.dir);
+    const calls = run.calls.filter((c) => {
+      if (seenCalls.has(c.key)) return false;
+      seenCalls.add(c.key);
+      return true;
+    });
+    const totals = runTotals({ ...run, calls }, stats?.calls, stats?.runs?.[run.dir], now);
+    out.known ||= totals.known;
+    out.commands += totals.commands;
+    out.files += totals.files;
+    if (totals.tokens) {
+      out.tokens ??= { cached: 0, fresh: 0, output: 0, total: 0 };
+      for (const key of Object.keys(out.tokens)) out.tokens[key] += totals.tokens[key];
+    }
+    if (totals.cards) {
+      out.cards ??= { status: {}, cards: {}, checks: 0 };
+      for (const [id, status] of Object.entries(totals.cards.status ?? {})) out.cards.status[`${run.dir}#${id}`] = status;
+      for (const [id, card] of Object.entries(totals.cards.cards ?? {})) out.cards.cards[`${run.dir}#${id}`] = card;
+      out.cards.checks += totals.cards.checks || 0;
+    }
+    // Use all of a run's calls for its interval even if another run already counted their spend.
+    const interval = runTotals(run, stats?.calls, null, now);
+    if (interval.elapsed != null) {
+      const lasts = run.calls.map((c) => stats?.calls?.[c.key]?.last).filter(Boolean);
+      const end = run.live ? now : Math.max(...lasts);
+      intervals.push([end - interval.elapsed, end]);
+    }
+  }
+  intervals.sort((a, b) => a[0] - b[0]);
+  let end = 0;
+  for (const [start, last] of intervals) {
+    out.elapsed = (out.elapsed ?? 0) + Math.max(0, last - Math.max(start, end));
+    end = Math.max(end, last);
+  }
+  return out;
+}
+
 /** 144.6M, 9.4K, 812. */
 export function fmtTok(n) {
   if (n == null) return "";

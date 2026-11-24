@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { STATS_PY, statsRequest, runTotals, fmtTok, fmtDur, callSpend } from "../cc-dispatch/mods/cc-dispatch/stats.js";
+import { STATS_PY, statsRequest, runTotals, topicTotals, fmtTok, fmtDur, callSpend } from "../cc-dispatch/mods/cc-dispatch/stats.js";
 
 const line = (ts, type, payload) => JSON.stringify({ timestamp: ts, type, payload }) + "\n";
 const tokens = (input, cached, output) => ({ type: "token_count", info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, cache_write_input_tokens: 0, output_tokens: output } } });
@@ -141,6 +141,43 @@ test("runTotals: split tokens, totals, elapsed", () => {
   assert.deepEqual(t.cards, { total: 3, merged: 1, parked: 0 });
   assert.equal(runTotals({ ...run, live: true }, calls, null, 31_000).elapsed, 30_000);
   assert.equal(runTotals(run, {}, null).known, false);
+});
+
+test("topicTotals deduplicates calls and runs, merges card identities and unions overlapping intervals", () => {
+  const a = { dir: "/a", live: false, startedAt: 1000, calls: [{ key: "shared" }, { key: "a" }] };
+  const b = { dir: "/b", live: false, startedAt: 4000, calls: [{ key: "shared" }, { key: "b" }] };
+  const c = { dir: "/c", live: false, startedAt: 12000, calls: [{ key: "c" }] };
+  const stats = {
+    calls: {
+      shared: { tokens: { input: 100, cached: 50, cache_write: 0, output: 5 }, commands: 2, files: 1, last: 5000 },
+      a: { commands: 3, files: 2, last: 6000 },
+      b: { tokens: { input: 20, cached: 5, cache_write: 0, output: 2 }, commands: 1, files: 1, last: 9000 },
+      c: { commands: 4, files: 1, last: 15000 },
+    },
+    runs: {
+      "/a": { status: { T1: "merged" }, cards: { T1: { status: "merged" } }, checks: 1 },
+      "/b": { status: { T1: "pending" }, cards: { T1: { status: "pending" } }, checks: 2 },
+    },
+  };
+  const totals = topicTotals(stats, { runs: [a, b, a, c] });
+  assert.deepEqual(totals.tokens, { cached: 55, fresh: 65, output: 7, total: 127 });
+  assert.deepEqual([totals.commands, totals.files, totals.known, totals.elapsed], [10, 5, true, 11000]);
+  assert.deepEqual(totals.cards.status, { "/a#T1": "merged", "/b#T1": "pending" });
+  assert.equal(totals.cards.cards["/b#T1"].status, "pending");
+  assert.equal(totals.cards.checks, 3);
+  assert.equal(a.calls.length, 2);
+});
+
+test("topicTotals handles a draft, unknown statistics, contained intervals and live runs", () => {
+  const empty = { tokens: null, commands: 0, files: 0, elapsed: null, cards: null, known: false };
+  assert.deepEqual(topicTotals({}, { runs: [] }), empty);
+  assert.deepEqual(topicTotals({}, { runs: [{ dir: "/a", calls: [] }] }), empty);
+  const stats = { calls: { a: { first: 1000, last: 10000 }, b: { first: 3000, last: 4000 } } };
+  assert.equal(topicTotals(stats, { runs: [
+    { dir: "/a", calls: [{ key: "a" }] }, { dir: "/b", calls: [{ key: "b" }] },
+  ] }).elapsed, 9000);
+  const before = Date.now(), live = topicTotals({}, { runs: [{ dir: "/live", calls: [], live: true, startedAt: before - 1000 }] });
+  assert.ok(live.elapsed >= 1000 && live.elapsed <= Date.now() - before + 1000);
 });
 
 test("formatting", () => {

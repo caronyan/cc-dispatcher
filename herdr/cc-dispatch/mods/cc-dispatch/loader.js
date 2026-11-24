@@ -1,6 +1,6 @@
 // What the panel reads from disk. Takes its I/O as arguments ({ sh, py, readText }) so
 // herdr/tests/loader.test.mjs can run it under node; main.js passes Herdr's exec/readTextFile.
-import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, parseArchived, parseAsks, ANSWER_SCRIPT, ARCHIVE_SCRIPT, buildRuns, runRoots, prettyReport, taskPath } from "./model.js";
+import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, TOPIC_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, parseArchived, parseAsks, parseTopics, parseStates, ANSWER_SCRIPT, ARCHIVE_SCRIPT, buildRuns, buildTopics, topicDir, runRoots, prettyReport, taskPath } from "./model.js";
 import { STATS_PY, statsRequest } from "./stats.js";
 import { BG_PY, bgRequest, LIVE_SCRIPT, parseLive } from "./bg.js";
 
@@ -13,14 +13,16 @@ export async function findRepo({ sh }, folder) {
 
 /**
  * Runs under the shown repo and under every live helper's run folder, merged with the live
- * terminals. Returns { runs, error }.
+ * terminals. Returns { runs, topics, states, error }; Topics include drafts without helpers.
  */
 export async function loadRuns({ sh }, repo, terminals) {
   const roots = runRoots(repo, terminals);
-  if (!roots.length) return { runs: [], error: null };
+  if (!roots.length) return { runs: [], topics: [], states: {}, error: null };
   const r = await sh(LIST_SCRIPT, roots);
-  if (r.code !== 0 && !r.stdout) return { runs: [], error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };
-  return { runs: buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout)), error: null };
+  if (r.code !== 0 && !r.stdout) return { runs: [], topics: [], states: {}, error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };
+  const states = parseStates(r.stdout);
+  const runs = buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout), states);
+  return { runs, topics: buildTopics(runs, parseTopics(r.stdout), states), states, error: null };
 }
 
 /** Archive or unarchive a run (op "archive" | "unarchive"): { ok, error }. */
@@ -52,6 +54,23 @@ export async function controlRun({ sh }, r, op) {
   const res = await sh(CONTROL_SCRIPT, [r.hd ?? "", op, r.dir]);
   const text = [res.stdout, res.stderr].filter(Boolean).join("\n").trim();
   return { ok: res.code === 0, text };
+}
+
+/** Invoke hd_dispatch.py with literal argv, including the leading "topic" command. */
+export async function topicCmd({ sh }, hd, args) {
+  const res = await sh(TOPIC_SCRIPT, [hd ?? "", ...args]);
+  return { ok: res.code === 0, out: [res.stdout, res.stderr].filter(Boolean).join("\n").trim(), code: res.code };
+}
+
+/** Explicit Topic summaries, or the first existing conclusion document for a historical run. */
+export async function loadSummary({ readText }, topic) {
+  const dir = topicDir(topic);
+  if (!dir) return null;
+  for (const name of topic.implicit ? ["research.md", "result.md", "log.md"] : ["summary.md"]) {
+    const text = await readText(`${dir}/${name}`);
+    if (text != null) return text;
+  }
+  return null;
 }
 
 /**

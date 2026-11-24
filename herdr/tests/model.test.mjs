@@ -7,12 +7,175 @@ import {
   ARCHIVE_SEP, parseArchived, canArchive, archivedAway, cardView, parkedWhy, handoffAsks,
   agentIn, mainLive, needsTakeover, takeoverPrompt, takeoverBanner, skillOf,
   ASKS_SEP, ANSWERS_SEP, parseAsks, pendingItems, itemLine, answerRecord, answerText, LIST_SCRIPT,
+  TOPIC_SEP, BACKLOG_SEP, STATE_SEP, parseTopics, parseStates, buildTopics, taskGroup, groupTasks, requestState,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
 const meta = (call, extra = {}) => ({ call, name: `review-${call}`, mode: "read", effort: "high", dir: "/r", round: 1,
   report: `/tmp/cc-dispatch/h1/${call}/report.json`, schema: "/s.json", agent_dir: `${RUN}/agents/${call}`, started_at: 100, ...extra });
 const dump = (...pairs) => pairs.map(([p, m]) => `\n${SEP}${p}\n${JSON.stringify(m)}`).join("");
+const section = (sep, path, value) => `\n${sep}${path}\n${JSON.stringify(value)}`;
+const topicRecord = (tasks = {}, extra = {}) => ({
+  topic: { id: "topic-a", title: "Topic", created_at: 10, tasks, ...extra },
+  backlog: { items: [] },
+});
+
+test("Topic and state sections preserve the existing parsers, including when old sections are absent", () => {
+  const { topic } = topicRecord();
+  const topics = section(TOPIC_SEP, "/r/.cc-dispatch/topics/topic-a/topic.json", topic)
+    + section(BACKLOG_SEP, "/r/.cc-dispatch/topics/topic-a/backlog.json", { items: [{ id: "b1", text: "idea" }] })
+    + `\n${TOPIC_SEP}/r/.cc-dispatch/topics/broken/topic.json\n{broken`
+    + section(STATE_SEP, `${RUN}/state.json`, { topic: topic.id, task: "k1" })
+    + `\n${STATE_SEP}/r/.cc-dispatch/broken/state.json\n{broken`
+    + section(STATE_SEP, "/r/.cc-dispatch/array/state.json", []);
+  const old = section(ASKS_SEP, `${RUN}/asks.json`, { q: { kind: "question", title: "Pick" } })
+    + section(ANSWERS_SEP, `${RUN}/answers.jsonl`, { id: "q", at: 5, text: "yes" })
+    + `\n${ARCHIVE_SEP}${RUN}/archived\n12`
+    + section(CONTROL_SEP, `${RUN}/control.json`, { state: "paused" })
+    + dump([`${RUN}/agents/a/meta.json`, meta("a")]);
+  for (const parse of [parseAsks, parseArchived, parseControls, parseMetaDump]) {
+    assert.deepEqual(parse(old + topics), parse(old));
+    assert.deepEqual(parse(topics), parse(""));
+  }
+  assert.deepEqual(parseTopics(topics), { [topic.id]: { topic, backlog: { items: [{ id: "b1", text: "idea" }] } } });
+  assert.deepEqual(parseStates(topics), { [RUN]: { topic: topic.id, task: "k1" } });
+  const onlyAsk = section(ASKS_SEP, `${RUN}/asks.json`, { q: { kind: "question", title: "Pick" } });
+  assert.deepEqual(parseAsks(onlyAsk + topics), parseAsks(onlyAsk));
+  const onlyControl = section(CONTROL_SEP, `${RUN}/control.json`, { state: "paused" });
+  assert.deepEqual(parseControls(onlyControl + topics), parseControls(onlyControl));
+});
+
+test("buildTopics binds parent and child runs to independent Tasks, preserves drafts and wraps history", () => {
+  const child = "/r/.cc-dispatch/test-child", old = "/r/.cc-dispatch/fix-old", stale = "/r/.cc-dispatch/dev-stale";
+  const states = {
+    [RUN]: { topic: "topic-a", task: "wrong-hint" }, [child]: { topic: "topic-a", task: "k2" },
+    [old]: {}, [stale]: { topic: "missing", task: "k1" },
+  };
+  const runs = buildRuns([], [], {}, { [old]: 4000 }, {}, states);
+  const request = { id: "r123456", type: "dispatch", target: "owner", agent: "codex", at: 11, delivered_at: 12 };
+  const input = topicRecord({
+    k1: { title: "Parent", kind: "dev", run: "review-0107", created_at: 10, started_at: 11 },
+    k2: { title: "Child", kind: "test", run: "test-child", parent_task: "k1", created_at: 12 },
+    k3: { title: "Draft", kind: "research", detail: "lines\nhere", depends_on: ["k2"], from_backlog: "b1", request, created_at: 13 },
+  }, { archived: 30, paused_at: 25, deleting: 26, owner: { terminal: "t1" } });
+  input.backlog.items.push({ id: "b1", text: "Idea", status: "refining", request, task_ids: ["k3"], created_at: 9, updated_at: 14 });
+  const topics = buildTopics(runs, { "topic-a": input, empty: topicRecord({}, { id: "empty", title: "No runs" }) }, states);
+  const topic = topics.find((t) => t.id === "topic-a");
+  assert.equal(topic.implicit, false);
+  assert.deepEqual(topic.runs.map((r) => r.dir), [RUN, child]);
+  assert.equal(topic.tasks[0].run, runs.find((r) => r.dir === RUN));
+  assert.equal(topic.tasks[0].runDir, RUN);
+  assert.equal(topic.tasks[1].parentTask, "k1");
+  assert.equal(topic.tasks[2].group, "queued");
+  assert.deepEqual(topic.tasks[2].dependsOn, ["k2"]);
+  assert.equal(topic.tasks[2].fromBacklog, "b1");
+  assert.equal(topic.tasks[2].detail, "lines\nhere");
+  assert.equal(topic.tasks[0].startedAt, 11000);
+  assert.deepEqual(topic.tasks[2].request, { id: "r123456", type: "dispatch", target: "owner", agent: "codex", at: 11000, deliveredAt: 12000 });
+  assert.equal(topic.backlog[0].updatedAt, 14000);
+  assert.deepEqual(topic.backlog[0].taskIds, ["k3"]);
+  assert.deepEqual([topic.archived, topic.pausedAt, topic.deleting, topic.updatedAt], [30000, 25000, true, 30000]);
+  assert.deepEqual(topics.find((t) => t.id === "empty").runs, []);
+  const history = topics.find((t) => t.id === "run:fix-old");
+  assert.deepEqual([history.implicit, history.archived, history.tasks[0].id, history.tasks[0].kind], [true, 4000, "k1", "fix"]);
+  assert.deepEqual(history.backlog, []);
+  assert.ok(topics.some((t) => t.id === "run:dev-stale"));
+  assert.equal(topics.length, 4);
+});
+
+test("a state Topic hint cannot claim a run bound to another directory in topic.json", () => {
+  const runs = buildRuns([], [], {}, {}, {}, { [RUN]: {} });
+  const topics = buildTopics(runs, { a: topicRecord({ k1: { run: "other", kind: "dev" } }) }, { [RUN]: { topic: "topic-a" } });
+  assert.equal(topics.find((t) => t.id === "topic-a").tasks[0].run, null);
+  assert.ok(topics.some((t) => t.id === "run:review-0107"));
+});
+
+function groupedTask({ state = {}, control = null, call = {}, terms = [], task = {}, asks = {}, answers = [], implicit = false } = {}) {
+  const entries = [{ path: `${RUN}/agents/a/meta.json`, meta: meta("a", { parent: "t-main", report_check: "ok", ...call }) }];
+  const runs = buildRuns(entries, terms, control ? { [RUN]: control } : {}, {}, { [RUN]: { asks, answers } });
+  const topics = buildTopics(runs, implicit ? {} : { a: topicRecord({ k1: { run: "review-0107", kind: "dev", ...task } }) },
+    { [RUN]: { ...state, ...(implicit ? {} : { topic: "topic-a" }) } });
+  return { topic: topics[0], task: topics[0].tasks[0] };
+}
+
+test("taskGroup keeps explicit Tasks active until finish, and infers completion only for inactive history", () => {
+  const explicit = groupedTask();
+  assert.equal(explicit.task.group, "active");
+  assert.equal(taskGroup(explicit.task, explicit.topic), "active");
+  assert.equal(groupedTask({ implicit: true }).task.group, "done");
+  const terms = [{ address: "t-main", state: "live", program: { key: "claude-code" } }];
+  assert.equal(groupedTask({ implicit: true, terms }).task.group, "active");
+  for (const options of [{ task: { finished_at: 15 } }, { state: { finished: 16 } },
+    { control: { state: "stopped" } }, { control: { state: "running", retired: 17 } }]) {
+    assert.equal(groupedTask(options).task.group, "done", JSON.stringify(options));
+  }
+  assert.equal(taskGroup({ run: null, runDir: null }, {}), "queued");
+});
+
+test("taskGroup puts unanswered questions, helper trouble, pauses, handoffs and takeover in you", () => {
+  const asks = { q: { kind: "question", title: "Choose", asked: 10 } };
+  assert.equal(groupedTask({ asks, task: { finished_at: 20 } }).task.group, "you");
+  assert.equal(groupedTask({ asks, answers: [{ id: "q", at: 9, text: "old" }] }).task.group, "you");
+  assert.equal(groupedTask({ asks, answers: [{ id: "q", at: 11, text: "yes" }] }).task.group, "active");
+  for (const control of [{ state: "paused", held: [] }, { state: "handoff" }]) {
+    assert.equal(groupedTask({ control }).task.group, "you");
+  }
+  for (const call of [
+    { address: "t-helper", report_check: null },
+    { open: true, report_check: null },
+    { failure: "quota" },
+    { report_check: "bad" },
+  ]) {
+    assert.equal(groupedTask({ call, terms: [{ address: "t-helper", state: "live", status: "blocked" }] }).task.group, "you");
+  }
+  assert.equal(groupedTask({ state: { pending_decisions: { api: "Pick API" } } }).task.group, "you");
+  assert.equal(groupedTask({ state: { tasks: { T2: { status: "parked", parked_why: "user" } } } }).task.group, "you");
+  assert.equal(groupedTask({ state: { tasks: { T2: { status: "pending" } } } }).task.group, "you");
+  const working = { address: "t-helper", report_check: null };
+  const helper = { address: "t-helper", state: "live", status: "working" };
+  assert.equal(groupedTask({ call: working, terms: [helper] }).task.group, "you");
+  assert.equal(groupedTask({ call: working, terms: [helper, { address: "t-main", state: "live", program: { key: "codex" } }] }).task.group, "active");
+});
+
+test("Task grouping ignores survey and review-check entries, and retired runs cannot stay live", () => {
+  const tasks = {
+    survey: { status: "parked" },
+    "T1-check-r1": { status: "parked" },
+    marked: { status: "parked", check: true },
+  };
+  assert.equal(groupedTask({ state: { tasks } }).task.group, "active");
+  assert.equal(groupedTask({ state: { tasks }, implicit: true }).task.group, "done");
+  const result = groupedTask({
+    control: { state: "running", retired: 15 },
+    terms: [{ address: "t-main", state: "live", program: { key: "codex" } }],
+  });
+  assert.equal(result.task.group, "done");
+  assert.equal(result.task.run.live, false);
+});
+
+test("an implicit parent stays active while a nested child run is live", () => {
+  const child = "/r/.cc-dispatch/test-child";
+  const runs = buildRuns([
+    { path: `${RUN}/agents/a/meta.json`, meta: meta("a", { report_check: "ok" }) },
+    { path: `${child}/agents/test/meta.json`, meta: meta("test", { address: "t-child", parent: "t-main" }) },
+  ], [{ address: "t-child", state: "live", status: "working" }, { address: "t-main", state: "live", program: { key: "codex" } }]);
+  const topics = buildTopics(runs, {}, { [RUN]: { children: ["test-child"] } });
+  assert.equal(topics.find((t) => t.id === "run:review-0107").tasks[0].group, "active");
+});
+
+test("groupTasks orders nonempty groups and requestState distinguishes queued from delivered", () => {
+  const active = groupedTask().task, done = groupedTask({ task: { finished_at: 11 } }).task;
+  const you = groupedTask({ control: { state: "paused" } }).task;
+  const queued = { id: "draft", run: null, runDir: null, request: { id: "r1", deliveredAt: null } };
+  const topic = { implicit: false, tasks: [done, queued, active, you] };
+  assert.deepEqual(groupTasks(topic).map((g) => g.group), ["you", "active", "queued", "done"]);
+  assert.deepEqual(groupTasks({ tasks: [queued] }), [{ group: "queued", tasks: [queued] }]);
+  assert.deepEqual(groupTasks({ tasks: [] }), []);
+  assert.equal(requestState(active), null);
+  assert.equal(requestState(queued), "queued");
+  assert.equal(requestState({ request: { deliveredAt: 0 } }), "delivered");
+  assert.equal(requestState({ request: { deliveredAt: 12000 } }), "delivered");
+});
 
 test("parseMetaDump keeps readable metas and skips broken ones", () => {
   const text = dump([`${RUN}/agents/a/meta.json`, meta("a")]) + `\n${SEP}${RUN}/agents/b/meta.json\n{broken`;
