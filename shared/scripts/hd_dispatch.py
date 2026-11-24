@@ -303,6 +303,31 @@ def unarchive(run: Path):
             write_json(run / "state.json", st)
 
 
+def activate_run(run: Path):
+    """Check the authoritative Topic binding before reopening a run and its Task."""
+    topic = read_json(run / "state.json", {}).get("topic")
+    if not topic:
+        unarchive(run)
+        return
+    repo = repo_of_run(run)
+    with topic_lock(repo, topic):
+        data = load_topic(repo, topic)
+        state = read_json(run / "state.json", {})
+        if data.get("deleting") is not None:
+            fail(f"topic is being deleted: {topic}", failure="TOPIC_DELETING", code=3)
+        if data.get("paused_at") is not None:
+            fail(f"topic is paused: {topic}", failure="TOPIC_PAUSED", code=3)
+        task = data.get("tasks", {}).get(state.get("task")) or {}
+        if state.get("topic") != topic or task.get("run") != run.name:
+            fail("task belongs to another run", failure="TASK_TAKEN", code=3)
+        data["archived"] = None
+        task["finished_at"] = None
+        unarchive(run)
+        state.pop("finished", None)
+        save_topic(repo, topic, data)
+        write_json(run / "state.json", state)
+
+
 def run_tag(run: Path) -> str:
     f = run / "agents" / "tag"
     if not f.exists():
@@ -408,6 +433,19 @@ ADOPTED = ("RUN_ADOPTED: another main agent ({owner}) took this run over; leave 
 
 
 def refuse_unless_running(run: Path):
+    topic = read_json(run / "state.json", {}).get("topic")
+    if topic:
+        repo = repo_of_run(run)
+        with topic_lock(repo, topic):
+            data = load_topic(repo, topic)
+            state = read_json(run / "state.json", {})
+            if data.get("deleting") is not None:
+                fail(f"topic is being deleted: {topic}", failure="TOPIC_DELETING", code=3)
+            if data.get("paused_at") is not None:
+                fail(f"topic is paused: {topic}", failure="TOPIC_PAUSED", code=3)
+            task = data.get("tasks", {}).get(state.get("task")) or {}
+            if state.get("topic") != topic or task.get("run") != run.name:
+                fail("task belongs to another run", failure="TASK_TAKEN", code=3)
     c = control(run)
     st = c["state"]
     if not_mine(c):
@@ -951,10 +989,10 @@ def agy_ready(model: str) -> str | None:
 
 
 def cmd_run(a):
-    need_env()
     run = Path(a.run).resolve()
     refuse_unless_running(run)
-    unarchive(run)
+    activate_run(run)
+    need_env()
     tag = run_tag(run)
     agent_dir = run / "agents" / a.call
     if meta_path(run, a.call).exists():
@@ -992,6 +1030,10 @@ def cmd_run(a):
                                        text=True).stdout.strip() or None)
     meta["title"] = a.title
     meta.update(dispatcher())
+    state = read_json(run / "state.json", {})
+    for key in ("topic", "task"):
+        if key in state:
+            meta[key] = state[key]
     Path(meta["report"]).unlink(missing_ok=True)
     task = compose(meta, Path(a.prompt).read_text(), 1)
     sent = launch(run, meta, agent, task)
@@ -1012,7 +1054,7 @@ def cmd_run(a):
 def cmd_send(a):
     run = Path(a.run).resolve()
     refuse_unless_running(run)
-    unarchive(run)
+    activate_run(run)
     meta = load(run, a.call)
     o = observe(meta)
     if o["state"] != "live":
@@ -1510,6 +1552,7 @@ def cmd_handover(a):
     as the call's next round, its first message the package's prompt."""
     run = Path(a.run).resolve()
     refuse_unless_running(run)
+    activate_run(run)
     if a.to not in AGENTS:
         fail(f"UNKNOWN_AGENT: {a.to} (one of {', '.join(AGENTS)})")
     meta = load(run, a.call)
@@ -1768,6 +1811,17 @@ def adopt_package(run: Path, data: dict, me: dict, c: dict) -> dict:
     """Record this main agent as every call's parent and put the run back in its state before the handoff,
     owned by this terminal. → what to print (KEY=value)."""
     old = (data.get("from") or {}).get("terminal")
+    topic = read_json(run / "state.json", {}).get("topic")
+    if topic:
+        repo = repo_of_run(run)
+        with topic_lock(repo, topic):
+            topic_data = load_topic(repo, topic)
+            if (topic_data.get("owner") or {}).get("terminal") == old:
+                topic_data["owner"] = {
+                    "terminal": me["parent"], "agent": me["dispatcher_agent"], "session": me["session"],
+                    "space": me["space"], "cwd": me["claude_cwd"],
+                }
+                save_topic(repo, topic, topic_data)
     moved, live = [], []
     for call in calls(run):
         meta = load(run, call)
@@ -2801,6 +2855,7 @@ def cmd_pause(a):
 
 def cmd_resume(a):
     run = Path(a.run).resolve()
+    activate_run(run)
     c = control(run)
     if c["state"] == "stopping":
         print("RUN_STOPPING: the run is being stopped; wait for it to finish")
