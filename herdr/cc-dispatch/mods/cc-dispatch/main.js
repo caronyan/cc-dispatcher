@@ -1039,13 +1039,16 @@ export default class Dispatch extends View {
           .child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div()))
           .child(div().min_w(0).flex_1().truncate().text_size(z.small).child(task.title))
           .when(ids.length > 0, (el) => el
-            .child(h_flex().w(84).flex_none().h(6).gap(2).children(ids.map((id) => div().flex_1().h_full().rounded(2).bg(colors[status[id]] ?? t.muted))))
+            .child(div().w(84).flex_none().child(bar(cardCounts({ status }).map(([st, n]) => [n, colors[st] ?? t.muted]), ids.length)))
             .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${own.merged}/${own.goal}`)));
       });
       const counts = s.cards ? cardCounts(s.cards) : [];
       box.child(v_flex().gap(5)
-        .child(line("Task", [`完成 ${done}/${topic.tasks.length}`, v && `卡片合并 ${v.merged}/${v.goal}`].filter(Boolean).join(" · ")))
+        .child(h_flex().gap(6).items_center().text_size(z.label).text_color(t.muted)
+          .child("Tasks").child(div().font_semibold().text_color(t.foreground).child(`${done}/${topic.tasks.length}`)))
         .children(rows)
+        // All cards of the Topic: one bar by status, then the key with counts.
+        .when(counts.length > 0, (el) => el.child(div().pt(3).child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))))
         .when(counts.length > 0, (el) => el.child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
           .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${CARD_WORDS[st] ?? st} ${n}`).flex_none())))));
     }

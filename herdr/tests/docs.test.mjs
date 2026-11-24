@@ -114,3 +114,12 @@ test("Task status is an icon after the title; no group bars or status words unde
   assert.match(main, /\.child\(callLabel\(c\)\)\)\s*\.when\(tagged, \(el\) => el\.children\(\[statusMark\(/, "卡片状态图标紧跟名称");
   assert.match(main, /renderActions\(t, c, inset\)/, "卡片展开后的内容和卡片行同一缩进");
 });
+
+test("Topic stats: Tasks x/y, a progress bar per Task, the card bar above its key", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  // 统计区标题写 Tasks x/y；每个 Task 右侧是进度条加 x/y，不按卡片切小格；总卡片进度条在图例上方。
+  assert.match(main, /\.child\("Tasks"\)/);
+  assert.doesNotMatch(main, /卡片合并 \$\{|ids\.map\(\(id\) => div\(\)/, "不写长状态文案，不按卡片切小格");
+  assert.match(main, /bar\(cardCounts\(\{ status \}\)/, "每个 Task 一条进度条");
+});
