@@ -31,7 +31,7 @@ test("resultDoc leads with the verdict, then a node per field, then the worktree
   assert.equal(over.blocks[1].text, "two problems");
   assert.equal(findings.children.length, 2);
   assert.equal(findings.tone, "bad");
-  assert.equal(changes.title, "工作树里的改动");
+  assert.equal(changes.title, "worktree 里的改动");
   assert.equal(changes.children[0].badge, "未跟踪 1");
 });
 
@@ -68,4 +68,15 @@ test("taskDoc groups events and task files by round, newest first", () => {
   assert.equal(r2.badge, "当前");
   assert.equal(r2.children[0].blocks[0].rows.length, 1);
   assert.deepEqual(r1.children.slice(2).map((x) => [x.title, x.depth]), [["Task", 1], ["Goal", 2], ["Detail", 3]]);
+});
+
+test("panel text keeps technical nouns in English", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = new URL("../cc-dispatch/mods/cc-dispatch/", import.meta.url);
+  // 面板文案里这些技术名词保留英文：worktree、session。新加的翻译名词也写进这里。
+  const banned = { "工作树": "worktree", "会话": "session" };
+  const hits = readdirSync(dir).filter((f) => f.endsWith(".js")).flatMap((f) =>
+    readFileSync(new URL(f, dir), "utf8").split("\n").flatMap((line, i) =>
+      Object.keys(banned).filter((w) => line.includes(w)).map((w) => `${f}:${i + 1} 用了「${w}」，改写成 ${banned[w]}`)));
+  assert.deepEqual(hits, []);
 });

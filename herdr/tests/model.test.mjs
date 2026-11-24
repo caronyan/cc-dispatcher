@@ -266,8 +266,8 @@ test("timelineMarkdown: events.jsonl in words, oldest first", () => {
   assert.match(timelineMarkdown(null), /没有事件记录/);
   assert.equal(eventWords({ ev: "settle", state: "gone", report: "missing", failure: "exited" }), "停下：已关闭，回报缺失，**已退出**");
   assert.match(eventWords({ ev: "lost" }), /已中断/);
-  assert.match(eventWords({ ev: "recover", how: "resume" }), /重新打开了原会话/);
-  assert.match(eventWords({ ev: "recover", how: "fresh" }), /新会话读了任务/);
+  assert.match(eventWords({ ev: "recover", how: "resume" }), /重新打开了原 session/);
+  assert.match(eventWords({ ev: "recover", how: "fresh" }), /新 session 读了任务/);
 });
 
 test("a paused run: control.json from the dump, held helpers, the paused stage, its buttons and line", () => {
@@ -322,10 +322,10 @@ import { resultMarkdown, roundsMarkdown } from "../cc-dispatch/mods/cc-dispatch/
 test("resultMarkdown: the report first, then the worktree's changes for a writing helper", () => {
   const c = { report: "ok", reportPath: "/tmp/r.json", schema: "/s.json" };
   const md = resultMarkdown(c, '{"status":"done"}', [], "## main @ /w\n M a.js\n a.js | 2 +-");
-  assert.ok(md.indexOf("通过 schema 检查") < md.indexOf("## 工作树里的改动"));
-  assert.match(md, /## 工作树里的改动\n\n`main @ \/w`/);
+  assert.ok(md.indexOf("通过 schema 检查") < md.indexOf("## worktree 里的改动"));
+  assert.match(md, /## worktree 里的改动\n\n`main @ \/w`/);
   assert.match(md, / M a\.js/);
-  assert.doesNotMatch(resultMarkdown(c, '{"status":"done"}', [], null), /工作树里的改动/);
+  assert.doesNotMatch(resultMarkdown(c, '{"status":"done"}', [], null), /worktree 里的改动/);
 });
 
 test("roundsMarkdown: newest round first, each with its events and task file", () => {
@@ -340,7 +340,7 @@ test("roundsMarkdown: newest round first, each with its events and task file", (
   assert.ok(md.indexOf("## 第 2 轮 · 当前 · 已移交") < md.indexOf("## 第 1 轮 · 首次派发"));
   assert.match(md, /已移交\*\* codex → claude（context_limit），弱隔离/);
   assert.match(md, /\*\*已接手\*\*：t7 里的主 agent（codex），原来是 t1/);
-  assert.match(md, /\*\*已冻结\*\*（context_limit），已保存工作树 `abcdef1234`/);
+  assert.match(md, /\*\*已冻结\*\*（context_limit），已保存 worktree `abcdef1234`/);
   assert.match(md, /### 任务文件 `task-2\.md`\n\n#### 任务 a（第 2 轮）/);
   assert.match(roundsMarkdown({ round: 1 }, null, { 1: null }), /没有事件记录[\s\S]*第 1 轮没有任务文件/);
 });

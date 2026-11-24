@@ -1145,7 +1145,7 @@ export default class Dispatch extends View {
       const choice = (a) => h_flex().id(`to-${a}`).h(26).px(12).items_center().rounded(5).text_size(S().small)
         .bg(pick === a ? t.raised : t.popover).text_color(pick === a ? t.foreground : t.muted).cursor_pointer()
         .on_click((_e, cx) => { this.pick = a; cx.notify(); })
-        .child(agentLabel(a) + (a === p.agent ? "（新会话）" : ""));
+        .child(agentLabel(a) + (a === p.agent ? "（新 session）" : ""));
       const picker = h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border).children(Object.keys(AGENTS).map(choice));
       const go = (_e, cx) => {
         if (this.sending) return;
@@ -1160,8 +1160,8 @@ export default class Dispatch extends View {
       return dialogFrame(t, "handover", `移交 ${p.name}？`, [
         h_flex().gap(10).items_center().text_size(S().body).text_color(t.foreground).child("交给").child(picker),
         note(t, p.live
-          ? `停下 ${p.name}：给它最多 3 分钟写交接说明，然后关掉它的终端。${p.mode !== "read" ? "先给它的工作树存一个快照，里面的改动不会撤销。" : ""}`
-          : `${p.name} 的终端已关闭；把它留下的东西（会话日志、屏幕、回报${p.mode !== "read" ? "、工作树快照" : ""}）打包。`, t.foreground),
+          ? `停下 ${p.name}：给它最多 3 分钟写交接说明，然后关掉它的终端。${p.mode !== "read" ? "先给它的 worktree 存一个快照，里面的改动不会撤销。" : ""}`
+          : `${p.name} 的终端已关闭；把它留下的东西（session 日志、屏幕、回报${p.mode !== "read" ? "、worktree 快照" : ""}）打包。`, t.foreground),
         note(t, `然后 ${label} 在同一个目录里接着做同一个任务、写同一份回报，算第 ${(p.round ?? 1) + 1} 轮，开始前先读交接包。`, t.foreground),
         weak && note(t, `${label} 在这里没有沙箱：只靠任务文件里的规定让它待在自己的目录里。`, t.ansi3),
         note(t, p.parentLive ? "会通知主 agent，它照常收回报。"
@@ -1185,9 +1185,9 @@ export default class Dispatch extends View {
         });
       };
       return dialogFrame(t, "delete", `删除 ${run.id}？`, [
-        note(t, `删掉运行目录（${p.helpers} 个子 agent 的 meta.json、事件、任务文件、屏幕、保留的回报、提问和回答、交接包），$CC_HD_HOME 下的回报和进度说明，它的工作树快照（refs/cc-dispatch/${baseName(run.dir)}/*），面板给它存的花费和任务缓存，以及复盘台账里它的那一条。`, t.foreground),
+        note(t, `删掉运行目录（${p.helpers} 个子 agent 的 meta.json、事件、任务文件、屏幕、保留的回报、提问和回答、交接包），$CC_HD_HOME 下的回报和进度说明，它的 worktree 快照（refs/cc-dispatch/${baseName(run.dir)}/*），面板给它存的花费和任务缓存，以及复盘台账里它的那一条。`, t.foreground),
         p.open?.length ? note(t, `关掉还开着的终端：${p.open.join("、")}。`, t.foreground) : null,
-        note(t, "代码保留：不动工作树和 cc/<run>/* 分支，也不动 Codex 和 Claude Code 自己的会话日志。"),
+        note(t, "代码保留：不动 worktree 和 cc/<run>/* 分支，也不动 Codex 和 Claude Code 自己的session 日志。"),
         note(t, "删了就没法恢复。", t.ansi1),
         this.failed && note(t, this.failed, t.ansi1),
       ], [dialogButton("cancel", "取消", t, close),
@@ -1198,7 +1198,7 @@ export default class Dispatch extends View {
       const list = (names) => names?.length ? names.join("、") : "无";
       const text = {
         pause: [
-          `给正在干活的子 agent（${list(p.working)}）按下停止键。它们的 Codex 会话会保留，继续时从停下的地方接着做。`,
+          `给正在干活的子 agent（${list(p.working)}）按下停止键。它们的 Codex session 会保留，继续时从停下的地方接着做。`,
           "已经做完这一轮的子 agent 保持原样。继续之前，主 agent 不能派发或发消息，它的等待也不会报回任何东西。",
         ],
         resume: [
@@ -1206,11 +1206,11 @@ export default class Dispatch extends View {
         ],
         retire: [
           `彻底结束 ${run.id}：不再有人接手它的交接包。${p.open?.length ? `关掉还开着的子 agent 终端（${list(p.open)}），回报保留。` : "没有开着的子 agent 终端。"}`,
-          "在 state.json 里标记为已结束并归档。交接包、回报和工作树都保留；取消归档就能再看到它，再往里派发就会接着做。",
+          "在 state.json 里标记为已结束并归档。交接包、回报和 worktree 都保留；取消归档就能再看到它，再往里派发就会接着做。",
           p.working?.length ? `${list(p.working)} 还在干活：等它们停下才能收尾。` : "不会通知主 agent。",
         ],
         stop: [
-          `让所有还没交出合格回报的子 agent（${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}）停下，把已经做完的写进回报，最多给 3 分钟，然后关掉它们的终端。工作树和运行目录都保留。`,
+          `让所有还没交出合格回报的子 agent（${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}）停下，把已经做完的写进回报，最多给 3 分钟，然后关掉它们的终端。worktree 和运行目录都保留。`,
           p.parentLive ? "然后主 agent 拿到 stop.md，总结哪些做完了、哪些没做完，再问你下一步怎么办。你决定之前它不会派发任何东西。"
             : "主 agent 不在运行，不会通知任何人；总结在 stop.md 里。",
         ],

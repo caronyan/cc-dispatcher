@@ -530,7 +530,7 @@ export const taskPath = (c) => `${c.agentDir}/task-${c.round}.md`;
 /** The script for a write-mode helper's changes: stat and short status of its worktree. */
 export const DIFF_SCRIPT = [
   'cd "$1" || exit 1',
-  'git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "不是 git 工作树：$1"; exit 0; }',
+  'git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "不是 git 仓库：$1"; exit 0; }',
   'echo "## $(git rev-parse --abbrev-ref HEAD 2>/dev/null) @ $1"',
   'git status --short | head -200',
   'echo',
@@ -770,9 +770,9 @@ export function eventWords(e) {
     case "resume": return `已继续：让它接着做${unsent}`;
     case "stop": return e.asked ? "**运行已终止**：已让它交代做到哪了" : "**运行已终止**";
     case "freeze": return [`**已冻结**（${e.why === "manual" || !e.why ? "手动" : e.why}）`, e.progress ? "写了进度说明" : e.asked ? "要过进度说明，没有交" : null,
-      e.snapshot && `已保存工作树 \`${String(e.snapshot).slice(0, 10)}\``].filter(Boolean).join("，");
+      e.snapshot && `已保存 worktree \`${String(e.snapshot).slice(0, 10)}\``].filter(Boolean).join("，");
     case "lost": return "**已中断**：交回报之前终端消失了";
-    case "recover": return `**已恢复**：${e.how === "resume" ? "重新打开了原会话" : "新会话读了任务"}，等继续`;
+    case "recover": return `**已恢复**：${e.how === "resume" ? "重新打开了原 session" : "新 session 读了任务"}，等继续`;
     case "adopt": return `**已接手**：${e.by ?? "?"} 里的主 agent${e.agent ? `（${e.agent}）` : ""}${e.frm ? `，原来是 ${e.frm}` : ""}`;
     case "handover": return `**已移交** ${e.frm ?? "?"} → ${e.to}${e.why ? `（${e.why === "manual" ? "手动" : e.why}）` : ""}${e.isolation === "weak" ? "，弱隔离" : ""}${unsent}`;
     default: return e.ev;
@@ -792,7 +792,7 @@ export function timelineMarkdown(text) {
  */
 export function resultMarkdown(c, text, older = [], diff = null) {
   const parts = [reportMarkdown(c, text, older)];
-  if (diff != null) parts.push(`## 工作树里的改动\n\n${diffMarkdown(diff).replace(/^### /, "")}`);
+  if (diff != null) parts.push(`## worktree 里的改动\n\n${diffMarkdown(diff).replace(/^### /, "")}`);
   return parts.join("\n\n---\n\n");
 }
 
@@ -982,7 +982,7 @@ export function resultDoc(c, text, older = [], diff = null) {
   if (diff != null) {
     const d = parseDiff(diff), counts = {};
     for (const f of d.files) counts[f.kind] = (counts[f.kind] ?? 0) + 1;
-    const changes = { id: "changes", title: "工作树里的改动", badge: String(d.files.length), tone: d.files.some((f) => f.kind === "conflict") ? "bad" : "info", blocks: [], children: [] };
+    const changes = { id: "changes", title: "worktree 里的改动", badge: String(d.files.length), tone: d.files.some((f) => f.kind === "conflict") ? "bad" : "info", blocks: [], children: [] };
     if (d.head) changes.blocks.push({ t: "kv", rows: [{ k: "分支 @ 目录", v: d.head, mono: true }] });
     if (d.note) changes.blocks.push({ t: "code", text: d.note });
     if (d.files.length) changes.children.push({ id: "changes.files", title: "文件", depth: 0,
@@ -1040,7 +1040,7 @@ export function taskDoc(c, eventsText, tasks = {}) {
     { k: "轮次", v: `${c.round ?? 1} / ${rounds}`, mono: true },
     { k: "回报", v: { ok: "合格", bad: "不合格", missing: "缺失" }[c.report] ?? "还没检查", tone: wordTone(c.report) ?? "muted" },
     c.failure ? { k: "失败", v: failureWord(c.failure), tone: c.failure === "exited" ? "muted" : c.failure === "blocked" ? "warn" : "bad" } : null,
-    c.dir ? { k: "工作树", v: c.dir, mono: true } : null,
+    c.dir ? { k: "worktree", v: c.dir, mono: true } : null,
   ].filter(Boolean) });
   const summary = [];
   for (let k = 1; k <= rounds; k++) {
