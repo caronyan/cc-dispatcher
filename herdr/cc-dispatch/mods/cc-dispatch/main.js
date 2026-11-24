@@ -307,8 +307,14 @@ export default class Dispatch extends View {
       if (!this.topicActive(topic)) continue;
       const g = runSplit.others.find((g) => g.runs.some((r) => topic.runs.includes(r)));
       const id = g?.id ?? topic.owner?.space ?? null;
-      const key = id ?? `repo:${repo}`;
-      if (!others.has(key)) others.set(key, { id, name: g?.name ?? allSpaces.find((s) => s.id === id)?.name ?? baseName(repo), topics: [] });
+      const name = g?.name ?? allSpaces.find((s) => s.id === id)?.name ?? baseName(repo);
+      // A Topic whose space is unknown joins the row of the same name, so one space never shows twice.
+      const key = id ?? [...others.keys()].find((k) => others.get(k).name === name) ?? `repo:${repo}`;
+      if (!others.has(key)) others.set(key, { id, name, topics: [] });
+      if (id && others.has(`repo:${repo}`) && others.get(`repo:${repo}`).name === name) {
+        others.get(key).topics.push(...others.get(`repo:${repo}`).topics);
+        others.delete(`repo:${repo}`);
+      }
       others.get(key).topics.push(topic);
     }
     return { mine, others: [...others.values()] };
@@ -592,7 +598,9 @@ export default class Dispatch extends View {
   }
 
   renderTopic(t, topic) {
-    const active = this.topicActive(topic), folded = this.fold.get(topic.id) ?? !active;
+    const active = this.topicActive(topic);
+    // Open by default while something is running, waiting on you, or drafted and not yet dispatched.
+    const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
     const groups = groupTasks(topic), waiting = groups.some((g) => g.group === "you");
     const paused = Boolean(topic.pausedAt);
     const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
