@@ -2434,7 +2434,7 @@ def cmd_probe(_):
     prompt = run / "probe.md"
     prompt.write_text('这是一次可用性探测。不读其他文件、不运行其他命令，只把 {"status": "ok"} 写进回报文件。\n')
     ns = argparse.Namespace(run=str(run), call="probe", mode="read", effort="medium", dir=str(run), title=None,
-                            prompt=str(prompt), schema=str(schema))
+                            prompt=str(prompt), schema=str(schema), agent="codex", model=None, fallback="none")
     import contextlib
     import io
     buf = io.StringIO()
