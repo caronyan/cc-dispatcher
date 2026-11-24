@@ -304,6 +304,16 @@ class TopicControl(unittest.TestCase):
         self.assertEqual(self.hd.control(independent), before)
         self.assertEqual(self.command("resume", "--topic", self.topic)["RESUMED"], "")
 
+    def test_pause_and_resume_leave_finished_tasks_finished(self):
+        done_task = self.task()
+        done = self.start(done_task, run=self.w.run_dir.parent / "dev-done")
+        self.command("finish", "--run", done, "--line", "Done")
+        live = self.start(self.task())
+        result = self.command("pause", "--topic", self.topic)
+        self.assertEqual(result["PAUSED"], live.name)
+        self.command("resume", "--topic", self.topic)
+        self.assertIsNotNone(self.data()["tasks"][done_task]["finished_at"])
+
     def test_pause_blocks_start_and_queued_requests_deliver_after_resume(self):
         task = self.task()
         request = self.request(task=task)["REQUEST"]

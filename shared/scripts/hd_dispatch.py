@@ -2417,7 +2417,9 @@ def cmd_topic_pause(a):
         save_topic(repo, a.topic, data)
         paused = data.setdefault("paused_runs", [])
         for run in topic_runs(repo, data):
-            if not run.is_dir() or control(run)["state"] != "running":
+            if not run.is_dir() or control(run)["state"] != "running" or not any(
+                    task.get("run") == run.name and not topic_task_done(task, run)
+                    for task in data["tasks"].values()):
                 continue
             cmd_pause(argparse.Namespace(run=str(run)))
             if control(run)["state"] == "paused" and run.name not in paused:
