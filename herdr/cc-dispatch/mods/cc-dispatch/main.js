@@ -619,8 +619,8 @@ export default class Dispatch extends View {
       .children(this.archiveButton(t, topic));
     const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : active ? t.input : t.border)
       .bg(active ? t.surface : t.background).overflow_hidden().child(head)
-      .when(!topic.implicit, (el) => el.child(h_flex().pl(30).pr(10).pb(6).gap(8).flex_wrap().text_size(S().label).text_color(t.muted)
-        .children(groups.map((g) => div().flex_none().text_color(g.group === "you" ? t.ansi3 : t.muted).child(`${GROUP_WORDS[g.group]} ${g.tasks.length}`)))));
+      .child(h_flex().pl(30).pr(10).pb(6).gap(8).flex_wrap().text_size(S().label).text_color(t.muted)
+        .children(groups.map((g) => div().flex_none().text_color(g.group === "you" ? t.ansi3 : t.muted).child(`${GROUP_WORDS[g.group]} ${g.tasks.length}`))));
     const quotaAgents = new Set();
     for (const r of topic.runs) {
       const agent = runQuotaAgent(r, terminals() ?? []);
@@ -642,8 +642,7 @@ export default class Dispatch extends View {
       const mainLive = topic.runs.some((r) => this.mainAgentOf(r));
       const bg = bgView(topicTasks(assigned, topic), mainLive, this.bgMore.get(topic.id) ?? 0);
       if (bg.running.length || bg.ended.length) card.child(this.renderBg(t, topic, bg));
-      if (topic.implicit && topic.tasks[0]) card.child(this.renderTask(t, topic, topic.tasks[0], true));
-      else for (const g of groups) {
+      for (const g of groups) {
         const key = `${topic.id}|${g.group}`, folded = this.groupFold.get(key) ?? g.group === "done";
         card.child(h_flex().id(`tasks-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
           .border_t(1).border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -669,10 +668,9 @@ export default class Dispatch extends View {
     return h_flex().flex_none().gap(4).items_center().tooltip(program?.name ?? key).child(glyph);
   }
 
-  renderTask(t, topic, task, bare = false) {
+  renderTask(t, topic, task) {
     const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
-    // bare: a run from before Topics, shown straight under its Topic (whose header holds its controls).
-    const folded = bare ? false : this.fold.get(key) ?? true, inset = bare ? 28 : 46;
+    const folded = this.fold.get(key) ?? true, inset = 46;
     const queued = group === "queued", request = requestState(task);
     const terminated = r?.control?.state === "stopped" || r?.control?.retired;
     const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
@@ -685,7 +683,7 @@ export default class Dispatch extends View {
         ? p.tasks.filter((x) => x.runDir && !x.finishedAt && !this.states[x.runDir]?.finished && x.run?.control?.state !== "stopped" && !x.run?.control?.retired) : []) : [];
     const executor = this.renderExecutor(t, task.agent ?? task.request?.agent ?? (task.request?.target === "owner" ? topic.owner?.agent : null));
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface);
-    if (!bare) box.child(h_flex().id(`task-${key}`).min_h(32).pl(28).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+    box.child(h_flex().id(`task-${key}`).min_h(32).pl(28).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
       .when(Boolean(executor), (el) => el.child(executor))

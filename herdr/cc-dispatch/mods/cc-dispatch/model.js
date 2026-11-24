@@ -481,7 +481,8 @@ export function buildTopics(runs, topics = {}, states = {}) {
   for (const run of allRuns) {
     if (claimed.has(run.dir)) continue;
     const task = {
-      id: "k1", title: run.id ?? baseName(run.dir), kind: run.kind, detail: "", dependsOn: [],
+      // The Topic already carries the run's directory name; the Task shows what the run is about.
+      id: "k1", title: states[run.dir]?.title || run.id || baseName(run.dir), kind: run.kind, detail: "", dependsOn: [],
       parentTask: null, fromBacklog: null, run, runDir: run.dir, agent: run.mainAgent ?? null,
       request: null, summaryLine: null, artifact: null, createdAt: run.startedAt || 0,
       startedAt: run.startedAt || null, finishedAt: null, group: "active",

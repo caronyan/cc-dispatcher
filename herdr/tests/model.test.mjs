@@ -49,7 +49,7 @@ test("buildTopics binds parent and child runs to independent Tasks, preserves dr
   const child = "/r/.cc-dispatch/test-child", old = "/r/.cc-dispatch/fix-old", stale = "/r/.cc-dispatch/dev-stale";
   const states = {
     [RUN]: { topic: "topic-a", task: "wrong-hint" }, [child]: { topic: "topic-a", task: "k2" },
-    [old]: {}, [stale]: { topic: "missing", task: "k1" },
+    [old]: { title: "修复负数" }, [stale]: { topic: "missing", task: "k1" },
   };
   const runs = buildRuns([], [], {}, { [old]: 4000 }, {}, states);
   const request = { id: "r123456", type: "dispatch", target: "owner", agent: "codex", at: 11, delivered_at: 12 };
@@ -79,6 +79,9 @@ test("buildTopics binds parent and child runs to independent Tasks, preserves dr
   const history = topics.find((t) => t.id === "run:fix-old");
   assert.deepEqual([history.implicit, history.archived, history.tasks[0].id, history.tasks[0].kind], [true, 4000, "k1", "fix"]);
   assert.deepEqual(history.backlog, []);
+  // A run from before Topics is wrapped as Topic → Task; the Task names what the run is about, not its directory again.
+  assert.deepEqual([history.title, history.tasks[0].title], ["fix-old", "修复负数"]);
+  assert.equal(topics.find((t) => t.id === "run:dev-stale").tasks[0].title, "dev-stale");
   assert.ok(topics.some((t) => t.id === "run:dev-stale"));
   assert.equal(topics.length, 4);
 });
