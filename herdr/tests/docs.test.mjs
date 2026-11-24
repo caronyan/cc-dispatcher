@@ -94,3 +94,13 @@ test("panel toggle and header are named Dispatch", async () => {
   assert.equal(main.match(/\.child\("Dispatch"\)/g)?.length, 2, "开关和面板标题都应写 .child(\"Dispatch\")");
   assert.doesNotMatch(main, /\.child\("派发"\)/);
 });
+
+test("a Task is one row: agent icon before the name, no id or extra caption", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  // Task 行只放主 agent 图标、职责、名称、状态和控制按钮；任务编号和说明文字不上行。
+  assert.doesNotMatch(main, /控制这个 Task/, "控制按钮放在 Task 名称同一行，不另起一行写说明");
+  assert.doesNotMatch(main, /\.child\(task\.id\)/, "Task 行不显示任务编号（如 k1）");
+  assert.match(main, /\.when\(Boolean\(executor\), \(el\) => el\.child\(executor\)\)\s*\.child\(pill\(t, task\.kind\)\)/, "主 agent 图标放在 Task 名称前面");
+  assert.match(main, /\.child\(termDot\(t, c\)\)\s*\.children\(\[this\.renderExecutor\(t, c\.agent/, "卡片的 agent 图标放在卡片名称前面");
+});

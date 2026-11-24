@@ -463,6 +463,9 @@ test("a paused run: control.json from the dump, held helpers, the paused stage, 
 test("run control: buttons by state, and a running control.json counts as none", () => {
   assert.deepEqual(controlOps({ live: true, control: null }), ["pause", "stop"]);
   assert.deepEqual(controlOps({ live: false, control: null }), []);
+  // A finished run (state.json "finished") has nothing left to pause or stop.
+  assert.deepEqual(controlOps({ live: true, control: null }, true), []);
+  assert.deepEqual(controlOps({ live: true, control: { state: "paused" } }, true), []);
   assert.deepEqual(controlOps({ live: true, control: { state: "stopping" } }), []);
   assert.deepEqual(controlOps({ live: false, control: { state: "stopped" } }), []);
   assert.match(controlBanner({ calls: [], control: { state: "stopped", at: 0 } }), /^已终止/);

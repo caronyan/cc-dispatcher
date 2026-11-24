@@ -1424,9 +1424,9 @@ export function takeoverPrompt(r) {
 export const takeoverBanner = (r) => `${mainAgentName(r)} 已经不在了 · 把提示交给新的主 agent`;
 
 /** Which control buttons a run offers: pause and stop while it runs, resume and stop while paused. */
-export function controlOps(r) {
+export function controlOps(r, finished = false) {
   const state = r?.control?.state ?? "running";
-  if (state === "stopping" || state === "stopped" || state === "handoff") return [];
+  if (finished || state === "stopping" || state === "stopped" || state === "handoff") return [];
   if (!r?.live && state !== "paused") return [];
   return state === "paused" ? ["resume", "stop"] : ["pause", "stop"];
 }
