@@ -438,6 +438,26 @@ class DefaultAgent(unittest.TestCase):
         meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
         self.assertEqual((meta["agent"], meta["model"], meta["fallback"]), ("agy", "gemini-4-neon-high", "codex"))
 
+    def test_agy_sends_no_notes_and_its_passing_blocked_report_is_not_a_failure(self):
+        w = Env()
+        self.agy(w)
+        rd, r = self.research(w)
+        self.assertEqual(w.kv(r).get("AGENT"), "agy", r.stdout + r.stderr)
+        name = json.loads((rd / "agents" / "web" / "meta.json").read_text())["name"]
+        self.assertFalse(w.hc_state()["terminals"][name]["notify"])  # hc types no notes into the main agent
+        w.patch(name, status="blocked", app="antigravity", status_ms=int(time.time() * 1000))
+        r = w.hd("collect", "--run", str(rd))
+        self.assertNotIn("FAILURE=", r.stdout)  # agy reports blocked (auth) for a few seconds as it starts
+        self.assertIn("WORKING=web", r.stdout)
+        w.patch(name, status_ms=int(time.time() * 1000) - 60_000)
+        r = w.hd("collect", "--run", str(rd))
+        self.assertIn("FAILURE=blocked", r.stdout)  # still blocked half a minute later: a person is needed
+
+    def test_codex_helpers_keep_hc_notes(self):
+        w = Env()
+        m = w.dispatch()
+        self.assertTrue(w.hc_state()["terminals"][m["name"]]["notify"])
+
     def test_other_kinds_stay_on_codex(self):
         w = Env()
         self.agy(w)

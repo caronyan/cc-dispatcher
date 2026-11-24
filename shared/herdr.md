@@ -135,7 +135,7 @@ WORKING=T2,T3 | none
 - `RUN_CONTROL=adopted`（附 `RUN_ADOPTED:`）：另一个主 agent 已经接手了这次运行。你不再负责它：不派发、不 `send`、不 `wait`、不 `collect`、不清理，告诉用户"这次运行已由新的主 agent 接手"后停下。
 - `STALL`：某个调用在同一轮里干了很久（默认 45 分钟），附屏幕末尾几行。在跑耗时的测试、构建、实验时，用一句话告诉用户在等什么，然后再启动 `wait`；看起来在原地打转时，`hc interrupt <NAME>` 打断它，再 `send` 让它停下来把已有结果写进回报；仍无进展按 `other` 处理。
 
-herdr 也会把子 agent 出错、等人、退出的通知（`<hc>…</hc>`）直接送进对话。收到时运行 `python3 $HD collect --run $RD`，按它的输出处理；`wait` 若还在后台跑，它之后报到同一状态时不会重复。
+herdr 也会把 Codex、Claude 子 agent 出错、等人、退出的通知（`<hc>…</hc>`）直接送进对话；agy 子 agent 不发这类通知，它的状态只由 `wait`/`collect` 报告（agy 启动时会短暂报"等人（auth）"，持续 30 秒以上才算数）。收到时运行 `python3 $HD collect --run $RD`，按它的输出处理；`wait` 若还在后台跑，它之后报到同一状态时不会重复。
 
 **返工与追问**：写提示文件，`python3 $HD send --run $RD --call <调用名> --prompt <提示文件>`，然后照常启动 `wait`。上一轮的回报会改名为 `report.r<k>.json` 保留。子 agent 已退出（`STATE=finished`/`gone`）时 `send` 会拒绝，改用 `run` 开新调用，把需要的上下文写进提示。
 

@@ -356,13 +356,21 @@ def calls(run: Path):
     return sorted(p.parent.name for p in root.glob("*/meta.json")) if root.exists() else []
 
 
+# agy reports `blocked` (auth) for a few seconds while it starts and then goes on working by itself:
+# its blocked status counts only once it has lasted this long.
+AGY_BLOCK_GRACE = 30
+
+
 def observe(meta: dict) -> dict:
     """The helper's state now: state live|finished|gone, status, turn."""
     g = hc_json("get", meta["name"])
     if not g or "error" in g:
         return {"state": "gone", "status": None, "turn": meta.get("acked_turn", 0)}
-    return {"state": g.get("state"), "status": (g.get("status") or {}).get("state"),
-            "turn": g.get("turn") or 0, "address": g.get("address")}
+    status = (g.get("status") or {}).get("state")
+    if (status == "blocked" and meta.get("agent") == "agy"
+            and time.time() * 1000 - (g.get("status_ms") or 0) < AGY_BLOCK_GRACE * 1000):
+        status = "working"
+    return {"state": g.get("state"), "status": status, "turn": g.get("turn") or 0, "address": g.get("address")}
 
 
 def is_lost(meta: dict, o: dict) -> bool:
@@ -906,6 +914,8 @@ def head_for(run: Path, meta: dict, agent: str) -> list:
     labels = [f"cc.run={run_tag(run)}", f"cc.call={meta['call']}", f"cc.kind={run_kind(run)}", f"cc.dir={run}",
               f"cc.mode={meta['mode']}", f"cc.round={meta['round']}", f"cc.agent={agent}"]
     head = ["run", "--bg", "--json", "--name", meta["name"], "--cwd", meta["workdir"]]
+    if agent == "agy":  # its passing blocked reports would reach the main agent as notes; wait reports real ones
+        head.append("--no-notify")
     for l in labels:
         head += ["--label", l]
     return head

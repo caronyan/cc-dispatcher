@@ -52,6 +52,7 @@ def main(argv):
         else:
             reply = {"name": name, "address": t.get("address"), "state": t.get("state", "live"),
                      "status": {"state": t.get("status", "idle"), "app": t.get("app", "codex")},
+                     "status_ms": t.get("status_ms"),
                      "turn": t.get("turn", 0), "labels": t.get("labels", {}),
                      "parent": t.get("parent"),
                      "foreground": {"argv": t.get("argv", ["codex"]), "cwd": t.get("cwd")}}
@@ -119,7 +120,8 @@ def main(argv):
         pos = [a for i, a in enumerate(rest) if not a.startswith("--") and (i == 0 or rest[i - 1] not in
                ("--name", "--cwd", "--label", "--template")) and a != "--bg"]
         st["terminals"][name] = {"address": addr, "state": "live", "status": "working", "turn": 1,
-                                 "labels": labels, "cwd": cwd, "argv": pos[:1], "sent": pos[1:]}
+                                 "labels": labels, "cwd": cwd, "argv": pos[:1], "sent": pos[1:],
+                                 "notify": "--no-notify" not in rest}
         reply = {"address": addr, "name": name, "first_message": {"sent": True}}
     elif cmd == "wait":
         pass
