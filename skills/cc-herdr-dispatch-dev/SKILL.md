@@ -2,7 +2,7 @@
 name: cc-herdr-dispatch-dev
 description: "herdr 内的重型协作编码：Claude 定契约、拆任务卡、验收、合并，Codex 子 agent 在独立 worktree 中并行实现。只在 herdr 终端里（HC_TERMINAL_ID 有值），且用户点名用 cc-herdr-dispatch-dev，或 cc-herdr-dispatch-review 收尾时用户确认交给它时调用。普通需求、小改动和 bug 修复不要调用"
 user-invocable: true
-argument-hint: "<方案文件路径或需求描述> [--parent .cc-dispatch/<run>] [--checkpoints on|off]"
+argument-hint: "[方案文件路径或需求描述] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>] [--checkpoints on|off]"
 ---
 
 ## 角色
@@ -23,7 +23,8 @@ state.json        运行状态：base 分支与 sha、集成分支、checkpoints
                   merged（已合入集成分支）/ parked（搁置）。parked 的卡必须写 parked_why：user（交给用户
                   决定，还没答复）/ superseded（被另一张卡取代，by 写那张卡的编号）/ dropped（用户决定不做），
                   note 写原因。tasks 只放要合入的任务卡：复核（T<n>-check-r<k>）和摸底（survey）不是卡，
-                  不进 tasks，复核结论记在被复核卡的 checks（如 {"r1": "LGTM"}）和 log.md
+                  不进 tasks，复核结论记在被复核卡的 checks（如 {"r1": "LGTM"}）和 log.md；
+                  children（调用过的 test 运行目录，子运行继承同一 Topic）
 plan.md           采用的方案（输入方案的副本或你写的简版）
 survey.md         代码摸底结论（要改的位置、可参照的实现、测试命令、约定），任务卡的线索来源
 contracts.md      模块边界与接口契约
@@ -42,7 +43,7 @@ Worktree 放在仓库**外面**，避免被主仓库的测试和构建扫到：`
 
 1. 按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 2. 确认在 git 仓库内（`git rev-parse --show-toplevel` → `$REPO`）。如果工作区不干净，告诉用户未提交的改动不会进入 worktree，问他们是先提交/stash 还是照常继续。
-3. 建运行目录，并把 `.cc-dispatch/` 写进 `$REPO/.git/info/exclude`（不改用户的 `.gitignore`）。
+3. 建运行目录，并把 `.cc-dispatch/` 写进 `$REPO/.git/info/exclude`（不改用户的 `.gitignore`）。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为本次需求。
 4. 记下 `base_branch`、`base_sha`，建集成分支并检出到它自己的 worktree，所有合并和全量测试都在这里做：
    ```bash
    git -C "$REPO" worktree add -b cc/$RUN/integration "$WT_ROOT/integration" $base_sha
@@ -54,7 +55,7 @@ Worktree 放在仓库**外面**，避免被主仓库的测试和构建扫到：`
 
 如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/<run>/` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
 
-**找输入**：$ARGUMENTS 指定的文件 → 对话中刚产出的方案（例如 cc-herdr-dispatch-research 的 `plan.md`、cc-herdr-dispatch-review 的结果）→ 都没有时，摸底之后根据需求和代码现状写一份简版方案。方案存为 `plan.md`。如果需求含糊到会影响拆分，先问用户。
+**找输入**：带 `--task` 时用第 0 步得到的 `DETAIL`，其中指定的文件按需读取；否则按 $ARGUMENTS 指定的文件 → 对话中刚产出的方案（例如 cc-herdr-dispatch-research 的 `plan.md`、cc-herdr-dispatch-review 的结果）→ 都没有时，摸底之后根据需求和代码现状写一份简版方案。方案存为 `plan.md`。如果需求含糊到会影响拆分，先问用户。
 
 **摸底**：拆分要的是代码现状，按 [shared/survey.md](shared/survey.md) 做（要不要派发、提示、核对），`<用途>` 写"拆分实现任务"。整理出的 `survey.md` 是任务卡"现有代码线索"的来源。
 
@@ -80,7 +81,7 @@ Worktree 放在仓库**外面**，避免被主仓库的测试和构建扫到：`
 - **需要**：在"拆分完成后"和"合并进 base 分支前"两处停下来等确认。此时就处在第一个确认点，再问一次"按这个拆分开始执行吗"；用户提出修改就修改后再确认。
 - **不需要**：全程自主执行到合并完成，只在出现搁置（4.5 节）或 Codex 需要重新登录时才找用户。
 
-把结果写进 `state.json.checkpoints`（`on`/`off`）。
+把结果写进 `state.json.checkpoints`（`on`/`off`）。面板派发的 Task 也保留本步骤，派卡前按原规则确认。
 
 ### 4. 按波次执行
 
@@ -99,7 +100,7 @@ python3 $HD run --run $RD --call T<n> --mode write --effort high \
   --dir "$WT_ROOT/T<n>" --schema "$SKILL_DIR/references/report.schema.json" --prompt $RD/tasks/T<n>-prompt.md \
   --title "<卡片的中文短标题>"
 ```
-小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板会把它列在"还没有子 agent"下并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
+小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板在所属 Topic → Task 的运行明细中列出这些待派发卡片，并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
 
 `wait` 每报回一张卡，按它的输出处理：`REPORT_OK` 先把卡改为 `accepting` 再验收（停在 running 的卡在面板上显示为"待验收"，用户会来催）；其他情况按 shared/herdr.md 处理，属于 `FAILURE=` 的再按"Codex 不可用时"处理。
 
@@ -123,7 +124,7 @@ git -C "$REPO" worktree remove --force "$WT_ROOT/T<n>"
 ```
 卡片分支上的临时提交不会进入集成分支，随分支在第 6 步删除。合并冲突在小活范围内的就自己解决；冲突多、或涉及逻辑取舍的按"返工"处理（子 agent 已结束时用 `run` 开新调用），让它在卡片 worktree 里 rebase 到最新的集成分支后解决。
 
-一个波次全部合入后跑回归测试，交给 cc-herdr-dispatch-test，测试输出就不会进入你的上下文：用 Skill 工具调用它，参数写 `<范围> --path "$WT_ROOT/integration" --parent .cc-dispatch/$RUN`。范围：中间波次写本波次的改动（`<上一波次合入点>..HEAD`），最后一个波次写 `full`。技能列表里没有 cc-herdr-dispatch-test 时，你自己在集成 worktree 里跑全量测试。
+一个波次全部合入后跑回归测试，交给 cc-herdr-dispatch-test，测试输出就不会进入你的上下文：用 Skill 工具调用它，参数写 `<范围> --path "$WT_ROOT/integration" --parent .cc-dispatch/$RUN`，把子运行目录记进 `state.json.children`，子运行继承同一 Topic。范围：中间波次写本波次的改动（`<上一波次合入点>..HEAD`），最后一个波次写 `full`。技能列表里没有 cc-herdr-dispatch-test 时，你自己在集成 worktree 里跑全量测试。
 
 交还的结论：
 - **PASS**：开始下一个波次，下一波次从新的集成分支拉 worktree。
@@ -143,7 +144,7 @@ git -C "$REPO" worktree remove --force "$WT_ROOT/T<n>"
 
 ### 6. 清理与报告
 
-`python3 $HD cleanup --run $RD` 结束剩余的子 agent；删除剩余的 worktree（集成 worktree、搁置卡片的 worktree 先问用户是否保留）和已合并的 `cc/$RUN/*` 分支（卡片分支是 squash 合入的，用 `git branch -D` 删除；搁置卡片的分支随 worktree 一起问用户），保留 `.cc-dispatch/$RUN/` 作为记录。然后输出：
+`python3 $HD cleanup --run $RD` 结束剩余的子 agent；删除剩余的 worktree（集成 worktree、搁置卡片的 worktree 先问用户是否保留）和已合并的 `cc/$RUN/*` 分支（卡片分支是 squash 合入的，用 `git branch -D` 删除；搁置卡片的分支随 worktree 一起问用户），保留 `.cc-dispatch/$RUN/` 作为记录。把最终结论写进 `log.md`，运行 `python3 $HD topic finish --run "$RD" --line "<实现、合并与测试的一句结论>" --artifact "$RD/log.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出：
 
 ```
 ## cc-herdr-dispatch-dev 完成：<方案标题>

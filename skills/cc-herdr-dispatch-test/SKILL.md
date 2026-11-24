@@ -2,7 +2,7 @@
 name: cc-herdr-dispatch-test
 description: "herdr 内：派 Codex 子 agent 跑测试并分诊失败，主 agent 只抽查和兜底。只在 herdr 终端里（HC_TERMINAL_ID 有值）用于：cc-herdr-dispatch-dev/-fix/-review 流程里的回归、用户点名用 cc-herdr-dispatch-test 跑测试或补测试"
 user-invocable: true
-argument-hint: "[full | 改动范围 | 测试命令] [--path 目录或 worktree] [--parent .cc-dispatch/<run>]"
+argument-hint: "[full | 改动范围 | 测试命令] [--path 目录或 worktree] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>]"
 ---
 
 ## 角色
@@ -15,7 +15,7 @@ argument-hint: "[full | 改动范围 | 测试命令] [--path 目录或 worktree]
 
 ## 输入
 
-- **范围**：`full`（全量）、一段改动范围（`<base>..<ref>`、文件或目录列表）、或者直接给出的测试命令。没给时默认测目标工作区相对 HEAD 的改动；没有改动时测全量。
+- **范围**：带 `--task` 时用准备阶段得到的 `DETAIL`，否则用参数里的 `full`（全量）、一段改动范围（`<base>..<ref>`、文件或目录列表）、或者直接给出的测试命令。没给时默认测目标工作区相对 HEAD 的改动；没有改动时测全量。
 - **目标**：`--path` 指定的目录或 worktree（例如 cc-herdr-dispatch-dev 的集成 worktree），默认当前目录。
 - **父运行**：`--parent` 指向调用方的运行目录。有它时，从里面读改动背景：`plan.md`、`survey.md` 的测试命令、任务卡的验收命令、`log.md` 里已知的问题。
 
@@ -25,7 +25,8 @@ argument-hint: "[full | 改动范围 | 测试命令] [--path 目录或 worktree]
 
 ```
 state.json     target（路径、快照 sha、base）、scope、parent、shards（以分片 id 为键：title/mode/commands/
-               worktree/NAME/status）、codex（available/unavailable）、takeover（由你代劳的分片）
+               worktree/NAME/status）、codex（available/unavailable）、takeover（由你代劳的分片）、
+               children（单独使用时经用户确认调用的 fix 运行目录，子运行继承同一 Topic）
 plan.md        测试计划：范围、分片、每片的命令与通过标准、环境准备、未覆盖项
 result.md      测试结论
 agents/        hd_dispatch.py 的调用记录，调用名即分片 id（unit、integration、e2e、write…）
@@ -39,7 +40,7 @@ agents/        hd_dispatch.py 的调用记录，调用名即分片 id（unit、i
 
 1. 按 shared/herdr.md 运行 `probe`。不可用时直接进入"Codex 不可用时"，由你代劳。
 2. 冻结快照：`SNAP=$(git -C "$TARGET" stash create); SNAP=${SNAP:-$(git -C "$TARGET" rev-parse HEAD)}`（不改动工作区）。`git -C "$TARGET" status --porcelain` 里有未跟踪的新文件时，记下来，第 2 步建好 worktree 后拷进去。
-3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。
+3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为测试范围的输入，原有范围核对和用户确认照常进行。
 
 完成标准：`state.json` 已写入 target、`SNAP` 和 scope。
 
@@ -95,7 +96,7 @@ python3 $HD run --run $RD --call <分片> --mode write --effort high \
 git -C "$WT_ROOT/write" add -A && git -C "$WT_ROOT/write" diff --cached $SNAP -- <新增或改动的测试文件> | git -C "$TARGET" apply
 ```
 
-写 `result.md`，并输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制权回到调用方的流程）：
+写 `result.md`，完成第 5 步的清理与 `topic finish` 后输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制权回到调用方的流程）：
 
 ```
 ## cc-herdr-dispatch-test：<范围>
@@ -120,11 +121,11 @@ git -C "$WT_ROOT/write" add -A && git -C "$WT_ROOT/write" diff --cached $SNAP --
 
 结论的判定：所有命令都通过（只允许有已记录的 flaky）为 **PASS**；有已复现的 `product` 或已确认的 `test` 失败为 **FAIL**；环境问题修不好、有分片没跑成为 **BLOCKED**，写明缺什么。
 
-单独使用（没有调用方）时，FAIL 之后用 AskUserQuestion 问用户：**交给 cc-herdr-dispatch-fix**（修法明确或能定位的 `product`/`test` 失败，用 Skill 工具调用，参数写 `.cc-dispatch/test-$RUN/result.md 中的 <编号列表> --path "$TARGET" --parent .cc-dispatch/test-$RUN`）/ **交给 cc-herdr-dispatch-dev**（失败指向需要重新设计的问题，提示用户用 `/cc-herdr-dispatch-dev` 并附上失败清单）/ 自己修 / 先放着。同时把这个问题按 shared/herdr.md「待决项」写成一条 `decision`（id `next`），让面板上也能选；BLOCKED 缺的环境或信息写成 `question`。
+单独使用（没有调用方）时，FAIL 之后用 AskUserQuestion 问用户：**交给 cc-herdr-dispatch-fix**（修法明确或能定位的 `product`/`test` 失败，用 Skill 工具调用，参数写 `.cc-dispatch/test-$RUN/result.md 中的 <编号列表> --path "$TARGET" --parent .cc-dispatch/test-$RUN`，子运行目录记进 `state.json.children`，子运行继承同一 Topic）/ **交给 cc-herdr-dispatch-dev**（失败指向需要重新设计的问题，提示用户用 `/cc-herdr-dispatch-dev` 并附上失败清单）/ 自己修 / 先放着。同时把这个问题按 shared/herdr.md「待决项」写成一条 `decision`（id `next`），让面板上也能选；BLOCKED 缺的环境或信息写成 `question`。
 
 ### 5. 清理
 
-`python3 $HD cleanup --run $RD` 结束各分片的子 agent，删除各分片 worktree（`git -C "$ROOT" worktree remove --force`），保留 `.cc-dispatch/test-$RUN/`。你启动的外部服务，调用方不再需要时停掉。
+`python3 $HD cleanup --run $RD` 结束各分片的子 agent，删除各分片 worktree（`git -C "$ROOT" worktree remove --force`），保留 `.cc-dispatch/test-$RUN/`。你启动的外部服务，调用方不再需要时停掉。运行 `python3 $HD topic finish --run "$RD" --line "<测试通过、失败或受阻的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
 
 ## Codex 不可用时
 

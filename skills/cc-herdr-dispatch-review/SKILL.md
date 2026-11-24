@@ -3,7 +3,7 @@ name: cc-herdr-dispatch-review
 description: "herdr 内的方案/代码审查：Claude 与 Codex 子 agent（旁路加一个 Gemini 4 Neon）交叉审查，再由子 agent 找反例并用测试复现，Claude 分诊补强"
 user-invocable: true
 disable-model-invocation: true
-argument-hint: "<方案文件路径 | diff/分支/PR | 审查主题> [--no-fix]"
+argument-hint: "[方案文件路径 | diff/分支/PR | 审查主题] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>] [--no-fix]"
 ---
 
 ## 角色
@@ -20,7 +20,7 @@ argument-hint: "<方案文件路径 | diff/分支/PR | 审查主题> [--no-fix]"
 
 ```
 state.json         模式、fix（on/off）、对象、快照 sha、各调用的 NAME、当前轮次、
-                   codex（available/unavailable）、degraded_stages、children（调用过的 fix/test/dev 运行目录）
+                   codex（available/unavailable）、degraded_stages、children（调用过的 fix/test/dev 运行目录，子运行继承同一 Topic）
 target.md          审查对象的描述（方案路径，或 diff 范围 + 文件列表）
 claude-review.md   你的独立审查
 cross.md           交叉审查合并结果（Codex、Gemini 旁路审查和你三方）
@@ -36,6 +36,8 @@ agents/            hd_dispatch.py 的调用记录（reviewer、reviewer-gemini�
 先按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 
 如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/review-*` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
+
+建好 `$RD` 并按上文排除 `.cc-dispatch/` 后，运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为对象与模式的输入，原有范围核对和用户确认照常进行。
 
 - **方案模式**：参数是文档路径，或对话中刚产出的方案（`~/.claude/plans/` 下最近的文件也算）。补强 = 原地修改方案文件。
 - **代码模式**：参数是 diff、分支、commit 范围或 PR 号，没有参数时默认审工作区相对 HEAD 的改动。冻结快照：`SNAP=$(git stash create); SNAP=${SNAP:-$(git rev-parse HEAD)}`（`git stash create` 不会改动工作区），后续子 agent 都审这个快照。补强 = 修复代码。
@@ -105,10 +107,10 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 - **方案模式**：直接原地修改方案文件，把补强写进对应的章节，而不是附在文末。
 - **代码模式**：修复最终落在用户的工作区，默认不提交，提交由用户决定；用户要求提交时，按通用守则"提交记录只写改动本身"写说明，一个提交对应一组相关的修复，不按审查阶段或轮次拆分。每个修复都要把复现测试转成正式的回归测试（测试名描述被保护的行为，不用反例编号）。按量分三档：
   - 在小活范围内（一个文件、约 20 行以内、修法已确定），连同回归测试都很小：你直接在工作区改。
-  - 其余修法明确的：本轮这些证实项合成一次交给 **cc-herdr-dispatch-fix**：用 Skill 工具调用，参数写 `<问题清单文件> 中的 <编号列表> --path "$ROOT" --parent .cc-dispatch/review-$RUN --no-regress`：反例阶段清单是 `.cc-dispatch/review-$RUN/rounds/r<k>.md`，再加 `--repro <本轮反例测试 worktree>/cc-repro`；交叉审查阶段清单是 `cross.md`，不带 `--repro`。它的运行目录记进 `state.json.children`。它交还的"未解决"项写进本轮记录，留到残余风险；"需要重新设计"项并入下一档。技能列表里没有 cc-herdr-dispatch-fix 时，这一档由你按同样的要求自己修。
+  - 其余修法明确的：本轮这些证实项合成一次交给 **cc-herdr-dispatch-fix**：用 Skill 工具调用，参数写 `<问题清单文件> 中的 <编号列表> --path "$ROOT" --parent .cc-dispatch/review-$RUN --no-regress`：反例阶段清单是 `.cc-dispatch/review-$RUN/rounds/r<k>.md`，再加 `--repro <本轮反例测试 worktree>/cc-repro`；交叉审查阶段清单是 `cross.md`，不带 `--repro`。它的运行目录记进 `state.json.children`，子运行继承同一 Topic。它交还的"未解决"项写进本轮记录，留到残余风险；"需要重新设计"项并入下一档。技能列表里没有 cc-herdr-dispatch-fix 时，这一档由你按同样的要求自己修。
   - 需要重新设计的（改接口契约、跨多个模块）：不在本次审查里修，写进 `followup.md`（问题、证据、约束、建议方向），收尾时问用户要不要交给 cc-herdr-dispatch-dev。
 
-  **回归**：本轮有任何代码改动（含交叉审查阶段的修复）时，用 Skill 工具调用 **cc-herdr-dispatch-test**，参数写 `<本轮改动的文件列表> --parent .cc-dispatch/review-$RUN`（目标默认是当前工作区）。FAIL 中由本轮修复引起的 `product` 失败当作新的证实项，按上面三档再修一次（fix 用新调用）并复测；同一轮最多这样补修 2 次，仍失败就停止补强，写进残余风险。与本次修复无关、快照上本来就失败的，记进报告。技能列表里没有 cc-herdr-dispatch-test 时，你跑改动模块的测试（只看结果）。
+  **回归**：本轮有任何代码改动（含交叉审查阶段的修复）时，用 Skill 工具调用 **cc-herdr-dispatch-test**，参数写 `<本轮改动的文件列表> --parent .cc-dispatch/review-$RUN`（目标默认是当前工作区），把子运行目录记进 `state.json.children`，子运行继承同一 Topic。FAIL 中由本轮修复引起的 `product` 失败当作新的证实项，按上面三档再修一次（fix 用新调用）并复测；同一轮最多这样补修 2 次，仍失败就停止补强，写进残余风险。与本次修复无关、快照上本来就失败的，记进报告。技能列表里没有 cc-herdr-dispatch-test 时，你跑改动模块的测试（只看结果）。
 
   回归通过后重新冻结快照 `$SNAP`。
 - 存疑项：写清楚需要什么信息才能下结论，最终报告中交给用户。
@@ -129,7 +131,8 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 
 1. **过度设计检查**（仅方案模式，`fix=on`）：回看各轮补强，有没有为 speculative 级风险加入的重型机制、只用一次的抽象、"以后可能用到"的配置项。把这类补强精简为与已证实风险相称的最小做法，并说明理由。
 2. `python3 $HD cleanup --run $RD` 结束剩余的子 agent，删除 review worktree，保留 `.cc-dispatch/review-$RUN/` 作为记录。
-3. 输出最终报告：
+3. 把最终结论补进 `cross.md`，运行 `python3 $HD topic finish --run "$RD" --line "<能否继续与残余风险的一句结论>" --artifact "$RD/cross.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
+4. 输出最终报告：
 
 ```
 ## cc-herdr-dispatch-review 结论：<对象>
@@ -156,7 +159,7 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 
 收尾后的下一步：
 
-- `followup.md` 不为空（代码模式）：用 AskUserQuestion 问用户怎么处理这些需要重新设计的问题：**交给 cc-herdr-dispatch-dev，中途确认 / 交给 cc-herdr-dispatch-dev，自主执行 / 先放着**。同时按 shared/herdr.md「待决项」写成一条 `decision`（id `followup`），让面板上也能选。选了交给它时，用 Skill 工具调用 cc-herdr-dispatch-dev，参数写 `.cc-dispatch/review-$RUN/followup.md --parent .cc-dispatch/review-$RUN --checkpoints on|off`，运行目录记进 `state.json.children`；它把改动应用到工作区后，在报告末尾补一行它的结论。这部分改动没有经过本次反例测试，提示用户需要时再审一轮。
+- `followup.md` 不为空（代码模式）：用 AskUserQuestion 问用户怎么处理这些需要重新设计的问题：**交给 cc-herdr-dispatch-dev，中途确认 / 交给 cc-herdr-dispatch-dev，自主执行 / 先放着**。同时按 shared/herdr.md「待决项」写成一条 `decision`（id `followup`），让面板上也能选。选了交给它时，用 Skill 工具调用 cc-herdr-dispatch-dev，参数写 `.cc-dispatch/review-$RUN/followup.md --parent .cc-dispatch/review-$RUN --checkpoints on|off`，运行目录记进 `state.json.children`，子运行继承同一 Topic；它把改动应用到工作区后，在报告末尾补一行它的结论。这部分改动没有经过本次反例测试，提示用户需要时再审一轮。
 - `fix=off`：报告末尾提示用户，要修的话可以说"修复 C1、C3"（交给 cc-herdr-dispatch-fix），需要重新设计的交给 cc-herdr-dispatch-dev。
 - 方案模式下如果下一步是实现，提示用户可以用 `/cc-herdr-dispatch-dev <方案文件>` 开始实现。
 

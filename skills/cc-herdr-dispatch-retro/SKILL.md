@@ -3,7 +3,7 @@ name: cc-herdr-dispatch-retro
 description: "herdr 内复盘已结束的 cc-herdr-dispatch-* 运行：Codex 子 agent 从运行记录和用户原话里找反复出现的错误、纠正、偏好和事实，Claude 核实证据，经用户确认后对 skill 文件或项目文档做最小改动"
 user-invocable: true
 disable-model-invocation: true
-argument-hint: "[仓库路径] [.cc-dispatch/<运行目录> ...] [--days N]"
+argument-hint: "[仓库路径] [.cc-dispatch/<运行目录> ...] [--days N] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>]"
 ---
 
 ## 角色
@@ -31,13 +31,15 @@ agents/            hd_dispatch.py 的调用记录（调用名 review）
 
 按 shared/herdr.md 运行 `probe`。
 
+建好 `$RD`，在 git 仓库内时把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为复盘范围与参数的输入，原有用户确认点照常保留。
+
 ### 1. 生成材料
 
 ```bash
 python3 $RETRO digest --root "$ROOT" [--run <运行目录> ...] [--days N] --out $RD/digest.md
 ```
 
-默认取最近 14 天、还没复盘过的运行；$ARGUMENTS 点名了运行目录就只取那些（`--run` 可重复）。输出 `RUNS=0` 时告诉用户没有新运行可复盘（可以用 `--include-reviewed` 或点名运行重看），到此结束。把 `RUN=` 各行记进 `state.json.runs`。
+默认取最近 14 天、还没复盘过的运行；输入点名了运行目录就只取那些（`--run` 可重复）。输出 `RUNS=0` 时先运行 `python3 $HD topic finish --run "$RD" --line "没有新运行可复盘" --artifact "$RD/digest.md"`，再告诉用户没有新运行可复盘（可以用 `--include-reviewed` 或点名运行重看），到此结束。把 `RUN=` 各行记进 `state.json.runs`。
 
 不通读 `digest.md`：看一眼 `BYTES=` 和各运行的摘要行（`grep -n '^开始 ' $RD/digest.md`）就够了。
 
@@ -98,7 +100,8 @@ python3 $HD run --run $RD --call review --mode read --effort high \
    下次复盘的复盘员会读它，避免重复提已被拒绝的条目。
 2. `python3 $RETRO mark --root "$ROOT" --retro $RD --run <运行名> ...` 把这批运行记为已复盘（一条都没采纳也要记）。
 3. `python3 $HD cleanup --run $RD`。
-4. 输出报告：
+4. 运行 `python3 $HD topic finish --run "$RD" --line "<复盘数量与采纳改动的一句结论>" --artifact "$RD/proposals.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
+5. 输出报告：
 
 ```
 ## cc-herdr-dispatch-retro：<仓库名>

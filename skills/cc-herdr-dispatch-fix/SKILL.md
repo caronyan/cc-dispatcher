@@ -2,7 +2,7 @@
 name: cc-herdr-dispatch-fix
 description: "herdr 内：派 Codex 子 agent 修复已确认、修法明确的问题并补回归测试，经 cc-herdr-dispatch-test 回归后应用到工作区，不提交。只在 herdr 终端里（HC_TERMINAL_ID 有值）用于：cc-herdr-dispatch-review/-test 报出的待修问题、用户点名用 cc-herdr-dispatch-fix 修某个 bug。需要重新设计的交给 cc-herdr-dispatch-dev，一个文件约 20 行以内且修法已定的直接改"
 user-invocable: true
-argument-hint: "<问题清单文件 | 问题描述> [--path 目标工作区] [--parent .cc-dispatch/<run>] [--repro 复现测试目录] [--no-regress]"
+argument-hint: "[问题清单文件 | 问题描述] [--path 目标工作区] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>] [--repro 复现测试目录] [--no-regress]"
 ---
 
 ## 角色
@@ -15,7 +15,7 @@ argument-hint: "<问题清单文件 | 问题描述> [--path 目标工作区] [--
 
 ## 输入
 
-- **问题**：$ARGUMENTS 里的问题清单文件（cc-herdr-dispatch-review 的 `rounds/r<k>.md` 加编号、cc-herdr-dispatch-test 的 `result.md`），或者自然语言描述的 bug。每个问题尽量带上：位置、触发条件、期望行为、复现方式、修法方向。
+- **问题**：带 `--task` 时用准备阶段得到的 `DETAIL`，否则用 $ARGUMENTS 里的问题清单文件（cc-herdr-dispatch-review 的 `rounds/r<k>.md` 加编号、cc-herdr-dispatch-test 的 `result.md`），或者自然语言描述的 bug。每个问题尽量带上：位置、触发条件、期望行为、复现方式、修法方向。
 - **目标**：`--path` 指定的工作区，默认当前目录。修复最终应用到这里。
 - **父运行**：`--parent` 指向调用方的运行目录，从里面读背景（`target.md`、`survey.md`、`plan.md`、测试命令）。
 - **复现**：`--repro` 指向调用方已有的复现测试目录（例如 cc-herdr-dispatch-review 反例测试 worktree 里的 `cc-repro/`）。
@@ -27,7 +27,7 @@ argument-hint: "<问题清单文件 | 问题描述> [--path 目标工作区] [--
 
 ```
 state.json     target（路径、快照 sha）、parent、issues（以编号为键：title/status）、calls（调用名 → NAME）、
-               轮次、codex（available/unavailable）、takeover、children（调用过的 cc-herdr-dispatch-test 运行目录）
+               轮次、codex（available/unavailable）、takeover、children（调用过的 cc-herdr-dispatch-test 运行目录，子运行继承同一 Topic）
 issues.md      整理后的问题清单（第 1 步）
 survey.md      定位结论（需要时，见 shared/survey.md）
 result.md      修复结论
@@ -42,7 +42,7 @@ agents/        hd_dispatch.py 的调用记录（fix、survey）
 
 1. 按 shared/herdr.md 运行 `probe`。不可用时直接按"Codex 不可用时"处理。
 2. 冻结快照：`SNAP=$(git -C "$TARGET" stash create); SNAP=${SNAP:-$(git -C "$TARGET" rev-parse HEAD)}`（不改动工作区）。`git -C "$TARGET" status --porcelain` 里有未跟踪的新文件时记下来，建好 worktree 后拷进去。
-3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。
+3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为问题清单的输入，原有范围核对和用户确认照常进行。
 
 ### 1. 整理问题
 
@@ -86,7 +86,7 @@ python3 $HD run --run $RD --call fix --mode write --effort high \
 
 带 `--no-regress` 时跳过。
 
-用 Skill 工具调用 cc-herdr-dispatch-test，参数写 `<修复改动的文件列表> --path "$FIX_WT" --parent .cc-dispatch/fix-$RUN`，把它的运行目录记进 `state.json.children`。技能列表里没有 cc-herdr-dispatch-test 时，你在 `$FIX_WT` 里跑改动模块的测试（安静模式，`2>&1 | tail -n 60`）。
+用 Skill 工具调用 cc-herdr-dispatch-test，参数写 `<修复改动的文件列表> --path "$FIX_WT" --parent .cc-dispatch/fix-$RUN`，把它的运行目录记进 `state.json.children`，子运行继承同一 Topic。技能列表里没有 cc-herdr-dispatch-test 时，你在 `$FIX_WT` 里跑改动模块的测试（安静模式，`2>&1 | tail -n 60`）。
 
 - **PASS**：进入第 5 步。
 - **FAIL**：修复引入的 `product` 失败，`send` 给修复者返工（计入第 3 步的返工轮数），修完再用 cc-herdr-dispatch-test 只复测失败的用例；与本次修复无关、快照上本来就失败的，记进结论，不在这里修。
@@ -104,7 +104,7 @@ git -C "$ROOT" worktree remove --force "$FIX_WT"
 
 apply 冲突说明用户在修复期间改过这些文件：停下来告诉用户冲突的文件，问怎么处理。
 
-写 `result.md`，并输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制回到调用方）：
+写 `result.md`，运行 `python3 $HD topic finish --run "$RD" --line "<修复与回归的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制回到调用方）：
 
 ```
 ## cc-herdr-dispatch-fix：<问题来源>

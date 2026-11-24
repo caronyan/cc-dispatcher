@@ -10,12 +10,12 @@
 
 | skill | 触发 | 作用 |
 |---|---|---|
-| `cc-herdr-dispatch-research` | 手动 | 立题、拆线程并行调研代码/资料/可行性，核实证据，出调研结论或方案 |
-| `cc-herdr-dispatch-review` | 手动 | 方案或代码的交叉审查 + 反例测试，分诊并补强 |
-| `cc-herdr-dispatch-dev` | 手动，或 review 收尾时经用户确认 | 定契约、拆任务卡，子 agent 在各自 worktree 并行实现，验收后合并 |
-| `cc-herdr-dispatch-fix` | 手动，或由上面几个调用 | 修复已确认的问题并补回归测试，应用到工作区，不提交 |
-| `cc-herdr-dispatch-test` | 手动，或由上面几个调用 | 分片跑测试、分诊失败，可补测试 |
-| `cc-herdr-dispatch-retro` | 手动 | 复盘已结束的运行和用户的纠正，经确认后对 skill 文件或项目文档做最小改动，记进 `retro-log.md` |
+| `cc-herdr-dispatch-research` | 手动或面板请求 | 立题、拆线程并行调研代码/资料/可行性，核实证据，出调研结论或方案 |
+| `cc-herdr-dispatch-review` | 手动或面板请求 | 方案或代码的交叉审查 + 反例测试，分诊并补强 |
+| `cc-herdr-dispatch-dev` | 手动、面板请求，或 review 收尾时经用户确认 | 定契约、拆任务卡，子 agent 在各自 worktree 并行实现，验收后合并 |
+| `cc-herdr-dispatch-fix` | 手动、面板请求，或由上面几个调用 | 修复已确认的问题并补回归测试，应用到工作区，不提交 |
+| `cc-herdr-dispatch-test` | 手动、面板请求，或由上面几个调用 | 分片跑测试、分诊失败，可补测试 |
+| `cc-herdr-dispatch-retro` | 手动或面板请求 | 复盘已结束的运行和用户的纠正，经确认后对 skill 文件或项目文档做最小改动，记进 `retro-log.md` |
 
 这组 skill 之间只互相调用；缺了哪个，就由 Claude 自己做那部分，不会转去调用其他同类 skill。
 
@@ -24,13 +24,13 @@
 ```
 shared/herdr.md              共用约定：分工、派发与回报、失败处理、守则
 shared/survey.md             代码摸底的做法
-shared/scripts/hd_dispatch.py  派发脚本：probe / run / send / wait / collect / status / diagnose / cleanup，以及 pause / resume / stop / handoff / adopt / recover / takeover / runs / ask（待决项）
+shared/scripts/hd_dispatch.py  派发脚本：topic（目标、Task、面板请求）/ probe / run / send / wait / collect / status / diagnose / cleanup，以及 pause / resume / stop / handoff / adopt / recover / takeover / runs / ask（待决项）
 shared/scripts/hd_check.py   按 schema 检查回报 JSON
 shared/scripts/hd_handoff.py 交接包：子 agent 移交（handover）和主 agent 交接（handoff / adopt）用的材料
 shared/scripts/hd_usage.py   主 agent 的账号额度：优先从 magpie 读，面板运行卡片上显示，超过阈值时提示主 agent 先问你要不要交接
 shared/scripts/hd_retro.py   复盘材料：digest（运行记录 + 用户原话）/ mark（记为已复盘）
 shared/templates/cc-hd-*.md  herdr-core 模板：{read,write,net} × {medium,high}
-herdr/cc-dispatch/           Herdr 面板（mod + layout）：派发运行、轮次、回报验收、历史，见其 README / RECIPE
+herdr/cc-dispatch/           Herdr 面板（mod + layout）：Topic → Task、待细化条目、派发请求、运行明细与历史，见其 README / RECIPE
 herdr/tests/                 面板逻辑的 node 测试：node --test herdr/tests/*.test.mjs
 skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模板、回报 schema）
 ```
@@ -38,26 +38,34 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 运行中的文件：
 
 - 每次运行的记录在目标仓库的 `.cc-dispatch/<kind>-<run>/`（自动加进 `.git/info/exclude`）。
+- Topic 的记录在 `.cc-dispatch/topics/<id>/`：`topic.json` 保存目标、负责人、Task 与派发请求，`backlog.json` 保存待细化条目，`summary.md` 汇总各 Task 的结论。运行的 `state.json.topic/task` 指向它所属的 Topic 和 Task。
 - worktree 在仓库旁的 `.cc-dispatch-wt/<repo>/` 下。
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
-- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（回报合格 / 已合并 / 已完成 / 已搁置 / 已结束，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「已归档 n 个 · 显示」里能看到并取消归档；之后再向这个运行派发会自动取消归档。已归档的运行在取消归档按钮旁还有一个删除按钮，确认后运行 `hd_dispatch.py delete`：关掉还开着的子 agent 终端，删除运行文件夹（meta、事件流、任务文件、屏幕、回报备份、待决项、交接包）、`$CC_HD_HOME` 下的回报和进度笔记、worktree 快照 `refs/cc-dispatch/<run>/*`、面板缓存和复盘台账里的条目，不能撤销；worktree、`cc/<run>/*` 分支和 Codex / Claude Code 自己的会话日志不动。
+- skill 在准备时用 `topic start` 绑定 Task，收尾用 `topic finish` 写回结论与产物，同时标记 Task 和运行完成；子 agent 由主 agent `cleanup` 关掉终端。运行文件夹保留，供接手和复盘读取。
+- 归档和删除按 Topic 操作。所有已绑定 Task 都完成或其运行已终止，且没有未回答的待决项时才可归档；草稿不挡归档。归档会撤销未确认请求，并同步下属运行的 `archived` 标记，列表底部可显示和取消归档。删除只接受已归档的 Topic，会先整体检查下属运行已归档、没有工作中的子 agent、没有暂停或终止中或交接中的运行，全部通过才逐个删除运行及 Topic 记录。运行删除仍清理其终端、回报、进度笔记、快照、面板缓存和复盘台账；worktree、`cc/<run>/*` 分支和各 agent 自己的会话日志保留。删除不能撤销。
 - 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的主 agent：`parent`（终端）、`space`（herdr space）、`dispatcher_agent`、`session`（Claude Code 会话或 Codex 线程，面板据此读它的后台任务；没记下时按运行目录去找）、`claude_cwd`。面板对每种主 agent 程序各有一个读会话日志的适配器（目前 Claude Code、Codex），后台任务按同一种样子显示。
 
 ## Herdr 面板
 
-Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板只放 skill 才知道的：每次派发运行、各子 agent 的轮次、回报是否过 schema、失败原因、已结束运行的历史。行内可跳转查看终端、看回报 / 任务文件 / worktree 改动，或经确认把"请收回报 / 请诊断"发给派发它的 Claude、清理终端。
+Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板按 **Topic → Task** 组织工作。一个 Topic 对应一个问题或目标；每个 Task 有标题、职责（research / review / dev / fix / test / retro）、说明和依赖，启动后绑定一次 skill 运行。dev 运行里的 T1、T2 等任务卡在 Task 的运行明细内展示。
 
-运行卡片标题行末尾有三个运行级图标按钮（悬停显示名称），点了都要再确认一次：
+Topic 下的 Task 按 **等你 / 进行中 / 待分发 / 已完成** 分组，展开可读说明、结论与产物，再看运行中的任务卡、子 agent 轮次、回报检查、失败原因和历史。行内可跳转终端、读回报与任务文件、看 worktree 改动，或经确认请主 agent 收回报、诊断和清理终端。Topic 的汇总统计合并下属运行，后台任务按会话与任务编号去重。
 
-- **暂停**：给工作中的子 agent 按停止键，Codex 会话保留，已交回的不动；派发方暂停期间 `run`/`send` 被拒，`wait` 不报任何调用。
-- **继续**：让被挂起的子 agent 接着做任务，不重做已完成的部分。
-- **终止**：优雅终止：让还没交合格回报的子 agent 停手，把已完成部分写进回报（最多等 3 分钟），收回报、关终端（worktree 保留），写 `stop.md`，再请派发方汇总给你并等你决定下一步。
+**草稿与待细化条目**：可以新建 Topic、增加或编辑未启动的 Task，也可以先记下 backlog 条目，请主 agent 细化成一批草稿 Task。细化提交后等待你派发；主 agent 收尾也可提议下一步草稿。已绑定运行的 Task 不再编辑；修改草稿职责、说明或待细化条目会撤销相应旧请求。
 
-暂停是运行这一层的状态，和子 agent 自己的状态分开显示：运行圆点换成暂停标记，卡片边框变黄，标题下有一行"已暂停 · 多久前 · 挂起几个子 agent"；被挂起的子 agent 的圆点从转圈换成暂停标记，归入“已暂停”组。终止中和已终止也各有一行，已终止的可直接打开 `stop.md`。`./install.sh` 会一并安装（装了 Herdr app 时），然后切到 `herdr-cc-dispatch` layout。
+**派发请求**：选择由主 agent 接手，或在新标签页启动。交给主 agent 的请求先排队，只在它在线、空闲且没有进行中的 Task 时投递；细化只要求空闲。Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`，其他 agent 收到同义文字。面板显示请求排队或已送达，可撤销、重发或改派。skill 通过 `topic start` 核对仍有效的请求，读取 Task 说明并绑定运行；原有确认点照常保留。
 
-**需要你处理（待决项）**：主 agent 需要你拍板或只有你知道答案的事，列在运行卡片里的“需要你处理”下（运行折叠时也显示）。分两种：**decision** 是在 2–4 个具体做法里选一个，每个选项写明代价，主 agent 标出推荐（★）和理由；**question** 是要你提供的信息，可能附几个猜测的答案。点开后能看到上下文（含子 agent 回报里的 open questions）、选项和要发给主 agent 的消息，选一个、写补充，点“发送”后答案记进运行目录的 `answers.jsonl` 并发给主 agent；主 agent 不在时只保存，接手的主 agent 会读到。主 agent 处理完用 `hd_dispatch.py ask --resolve` 关掉这一项。搁置等你决定的卡没有写待决项时，面板给它补一个"继续做 / 不做了"。
+Topic 标题行提供暂停、继续、终止，确认后作用于下属运行：
+
+- **暂停**：暂停还在运行的工作并记下这次挂起的运行，阻止新请求投递、Task 启动和运行激活。
+- **继续**：只恢复这次 Topic 暂停时挂起的运行；之前单独暂停的运行保持暂停，排队请求恢复投递。
+- **终止**：撤销未确认请求，草稿保留；逐个终止尚未结束的运行，让子 agent 写下已完成部分、关终端并保留 worktree，再请主 agent 汇总。各运行的 `stop.md` 可在明细中打开。
+
+Topic 的暂停状态与子 agent 自身状态分别显示，Task 运行内仍可查看暂停、终止、交接和接手信息。历史运行自动显示成只有一个 Task 的隐式 Topic，原有记录可继续查看和操作。`./install.sh` 会一并安装面板（装了 Herdr app 时），然后切到 `herdr-cc-dispatch` layout。
+
+**待决项**：主 agent 需要你拍板或只有你知道答案的事，显示在所属 Topic → Task 的运行明细里。分两种：**decision** 是在 2–4 个具体做法里选一个，每个选项写明代价，主 agent 标出推荐（★）和理由；**question** 是要你提供的信息，可能附几个猜测的答案。点开后能看到上下文（含子 agent 回报里的 open questions）、选项和要发给主 agent 的消息，选一个、写补充，点“发送”后答案记进运行目录的 `answers.jsonl` 并发给主 agent；主 agent 不在时只保存，接手的主 agent 会读到。主 agent 处理完用 `hd_dispatch.py ask --resolve` 关掉这一项。搁置等你决定的卡没有写待决项时，面板给它补一个"继续做 / 不做了"。
 
 断网时，子 agent 在面板上标为“等网络”；因断网停下的不占自动重试次数，网络恢复后自动接着做，主 agent 不用处理。
 
@@ -85,7 +93,7 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 - **直接说**：在新会话里说"用 cc-herdr-dispatch-dev 接着之前的运行"（research、review 同理）。skill 运行 `hd_dispatch.py runs` 列出本仓库没做完的运行，问你接哪个。
 - 新主 agent 运行 `hd_dispatch.py takeover --run <dir>`：一步完成恢复中断的子 agent 和接手（`recover` + `adopt`），运行先处于暂停；再向你复述现状，你确认后才继续派发。原主 agent 还开着时会拒绝，除非你明确让它接手（`--force`）。
 - 新旧主 agent 是什么程序都可以（Claude Code、Codex、Antigravity 等）。主 agent 程序登记在 `hd_dispatch.py` 的 `MAIN_AGENTS` 里（会话变量、续上原会话的命令）；没登记的程序照样能接手，只是不给续上原会话的命令。
-- 主 agent 给出最终结论后会在 `state.json` 写 `finished`，这样的运行不再出现在 `runs` 和面板的接手提示里。
+- 主 agent 给出最终结论时用 `topic finish` 同步 Task 结论、产物与 `state.json.finished`，这样的运行不再出现在 `runs` 和面板的接手提示里。接手一个 Task 时，若 Topic 的负责人仍是前任，也会同步改为接手者。
 
 ## 子 agent 默认是谁
 

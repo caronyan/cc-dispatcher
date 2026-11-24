@@ -3,7 +3,7 @@ name: cc-herdr-dispatch-research
 description: "herdr 内的调研与出方案：Claude 立题、核实、综合，子 agent（默认 Antigravity / Gemini 4 Neon，不可用时自动换 Codex）并行调研代码、资料和可行性，并独立给出备选方案"
 user-invocable: true
 disable-model-invocation: true
-argument-hint: "<调研问题 | 要出方案的需求 | 相关文件路径>"
+argument-hint: "[调研问题 | 要出方案的需求 | 相关文件路径] [--topic <id> --task <tid> [--request <rid>]] [--parent .cc-dispatch/<run>]"
 ---
 
 ## 角色
@@ -17,7 +17,7 @@ argument-hint: "<调研问题 | 要出方案的需求 | 相关文件路径>"
 - **调研模式**：要一个答案。"X 是怎么工作的""为什么会出现 Y""A 和 B 选哪个""这个库能不能满足 Z"。交付 `research.md`。
 - **方案模式**：要一份能拿去实现的方案。"怎么做 X""设计一下 Y""出个方案"。交付 `research.md` + `plan.md`，`plan.md` 可以直接作为 cc-herdr-dispatch-dev 的输入。
 
-从 $ARGUMENTS 和对话判断；判断不了就默认调研模式，在结尾问用户要不要继续出方案。
+带 `--task` 时从准备阶段得到的 `DETAIL` 判断，否则从 $ARGUMENTS 和对话判断；判断不了就默认调研模式，在结尾问用户要不要继续出方案。
 
 ## 运行状态
 
@@ -39,6 +39,8 @@ agents/            hd_dispatch.py 的调用记录，调用名即线程 id（code
 按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 
 如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/research-*` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
+
+建好 `$RD` 并按上文排除 `.cc-dispatch/` 后，运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为立题输入，原有范围核对和用户确认照常进行。
 
 ### 1. 立题
 
@@ -142,7 +144,8 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
 ### 5. 收尾
 
 1. `python3 $HD cleanup --run $RD` 结束剩余的子 agent，删除 spike worktree（如有），保留 `.cc-dispatch/research-$RUN/` 作为记录。
-2. 输出最终报告：
+2. 写好 `research.md`（方案模式同时写好 `plan.md`），运行 `python3 $HD topic finish --run "$RD" --line "<一句调研结论或推荐>" --artifact "$RD/research.md"`；方案模式把 `--artifact` 改为 `"$RD/plan.md"`。有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议 review 或 dev 草稿，不自动派发。
+3. 输出最终报告：
 
 ```
 ## cc-herdr-dispatch-research：<问题>
@@ -161,7 +164,7 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
 记录目录：.cc-dispatch/research-$RUN/
 ```
 
-3. 下一步提示：方案模式下，建议先用 `/cc-herdr-dispatch-review <plan.md 路径>` 做对抗审查，再用 `/cc-herdr-dispatch-dev <plan.md 路径>` 实现；调研模式下问用户要不要继续出方案。
+4. 下一步提示：方案模式下，建议先用 `/cc-herdr-dispatch-review <plan.md 路径>` 做对抗审查，再用 `/cc-herdr-dispatch-dev <plan.md 路径>` 实现；调研模式下问用户要不要继续出方案。
 
 如果有阶段因 Codex 不可用而降级，在一句话结论后面加一行：`⚠️ 降级：<阶段> 由 Claude 子 agent 代替 Codex 完成，与主编属同一系列模型，视角可能重合；建议额度恢复后重跑 /cc-herdr-dispatch-research .cc-dispatch/research-$RUN`。
 
