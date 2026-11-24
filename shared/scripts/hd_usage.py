@@ -3,7 +3,7 @@
 user about handing the run off when a window gets close to its limit.
 
   hd_usage.py quota [AGENT] [--slow]
-                         prints what is known of AGENT's quota (claude or codex; default claude) as JSON, or
+                         prints what is known of AGENT's quota (claude, codex or agy; default claude) as JSON, or
                          null. The panel runs it for each live run's main agent.
   hd_usage.py hook       Claude Code's PostToolUse hook: once a window of this account passes the threshold
                          while it is the main agent of a running cc-dispatch run, adds a note telling it to
@@ -42,7 +42,10 @@ from pathlib import Path
 HOME = Path(os.environ.get("CC_HD_HOME", "/tmp/cc-dispatch"))
 USAGE = HOME / "usage"
 TTL = 60
-AGENT_LABEL = {"claude": "Claude", "codex": "Codex"}
+AGENT_LABEL = {"claude": "Claude", "codex": "Codex", "agy": "Antigravity"}
+# What a program name contains for each agent, and the magpie providers whose subscription it runs on.
+AGENT_NAMES = {"claude": ("claude",), "codex": ("codex",), "agy": ("agy", "antigravity")}
+PROVIDERS = {"claude": ("claude",), "codex": ("codex",), "agy": ("antigravity", "antigravity-bridge")}
 
 
 def threshold() -> float:
@@ -53,9 +56,20 @@ def threshold() -> float:
 
 
 def agent_of(program) -> str | None:
-    """claude / codex from a program name or path, else None."""
+    """claude / codex / agy from a program name or path, else None."""
     name = Path(str(program or "")).name.lower()
-    return next((a for a in AGENT_LABEL if a in name), None)
+    return next((a for a, names in AGENT_NAMES.items() if any(n in name for n in names)), None)
+
+
+DURATION = re.compile(r"^\d+\s+(minutes?|hours?|days?|weeks?)$", re.I)
+
+
+def window_name(name) -> str:
+    """'Gemini · 5 hours' (Antigravity puts the models first) -> '5 hours · Gemini', as the others name them."""
+    head, dot, tail = str(name or "").partition("·")
+    if dot and DURATION.match(tail.strip()) and not DURATION.match(head.strip()):
+        return f"{tail.strip()} · {head.strip()}"
+    return str(name or "")
 
 
 def epoch(t) -> int | None:
@@ -116,12 +130,12 @@ def magpie_entries(slow: bool):
 
 
 def from_magpie(entries, agent: str):
-    mine = [e for e in entries or [] if isinstance(e, dict) and e.get("provider") == agent
+    mine = [e for e in entries or [] if isinstance(e, dict) and e.get("provider") in PROVIDERS.get(agent, (agent,))
             and e.get("kind", "subscription") == "subscription" and not e.get("error") and e.get("windows")]
     if not mine:
         return None
     e = next((e for e in mine if e.get("last")), None) or max(mine, key=lambda e: e.get("lastServedAt") or "")
-    wins = [{"name": w.get("name"), "used": float(w["used"]), "resets": epoch(w.get("resetsAt"))}
+    wins = [{"name": window_name(w.get("name")), "used": float(w["used"]), "resets": epoch(w.get("resetsAt"))}
             for w in e["windows"] if isinstance(w.get("used"), (int, float)) and not w.get("unlimited")]
     return {"source": "magpie", "account": e.get("user"), "plan": e.get("plan"), "windows": wins} if wins else None
 

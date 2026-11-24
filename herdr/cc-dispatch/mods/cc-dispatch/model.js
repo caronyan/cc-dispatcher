@@ -14,10 +14,26 @@ export const CONTROL_SEP = "@@cc-dispatch-control ";
 // A run the user archived from the panel: <run>/archived holds when (epoch seconds). Listed before the
 // control.json files, so it never lands inside one of them.
 export const ARCHIVE_SEP = "@@cc-dispatch-archived ";
+// What the main agent waits on the person for (<run>/asks.json, hd_dispatch.py ask) and the person's answers
+// from the panel (<run>/answers.jsonl, its last 50 lines). Listed first of all.
+export const ASKS_SEP = "@@cc-dispatch-asks ";
+export const ANSWERS_SEP = "@@cc-dispatch-answers ";
 
 // The shell script the loader runs: every run's control.json, each introduced by a CONTROL_SEP line
 // with its path, then every meta.json under the given run-parent folders, each introduced by a SEP line.
 export const LIST_SCRIPT = [
+  'for root in "$@"; do',
+  '  for f in "$root"/*/asks.json; do',
+  '    [ -f "$f" ] || continue',
+  `    printf '\\n${ASKS_SEP}%s\\n' "$f"`,
+  '    cat "$f"',
+  '  done',
+  '  for f in "$root"/*/answers.jsonl; do',
+  '    [ -f "$f" ] || continue',
+  `    printf '\\n${ANSWERS_SEP}%s\\n' "$f"`,
+  '    tail -n 50 "$f"',
+  '  done',
+  'done',
   'for root in "$@"; do',
   '  for f in "$root"/*/archived; do',
   '    [ -f "$f" ] || continue',
@@ -82,6 +98,30 @@ export function parseArchived(text) {
   return out;
 }
 
+/** The asks and answers at the head of LIST_SCRIPT's output → { <run dir>: { asks: {id: item}, answers: [answer] } }. */
+export function parseAsks(text) {
+  const all = String(text ?? "");
+  const ends = [ARCHIVE_SEP, CONTROL_SEP, SEP].map((x) => all.indexOf(x)).filter((i) => i >= 0);
+  const head = ends.length ? all.slice(0, Math.min(...ends)) : all;
+  const out = {};
+  const at = (dir) => (out[dir] ??= { asks: {}, answers: [] });
+  for (const part of head.split(ASKS_SEP).slice(1)) {
+    const [chunk] = part.split(ANSWERS_SEP);
+    const nl = chunk.indexOf("\n");
+    if (nl < 0) continue;
+    const path = chunk.slice(0, nl).trim(), v = parseJSON(chunk.slice(nl + 1));
+    if (path && v && typeof v === "object" && !Array.isArray(v)) at(path.replace(/\/asks\.json$/, "")).asks = v;
+  }
+  for (const chunk of head.split(ANSWERS_SEP).slice(1)) {
+    const nl = chunk.indexOf("\n");
+    if (nl < 0) continue;
+    const path = chunk.slice(0, nl).trim();
+    const list = chunk.slice(nl + 1).split(ASKS_SEP)[0].split("\n").map((l) => parseJSON(l.trim())).filter((a) => a && typeof a === "object" && a.id);
+    if (path) at(path.replace(/\/answers\.jsonl$/, "")).answers = list;
+  }
+  return out;
+}
+
 /** Archive (or take back out) an ended run: `sh -c ARCHIVE_SCRIPT _ archive|unarchive <run dir>`. */
 export const ARCHIVE_SCRIPT = 'case "$1" in archive) date +%s > "$2/archived" ;; unarchive) rm -f "$2/archived" ;; *) exit 2 ;; esac';
 
@@ -92,11 +132,13 @@ export const ARCHIVE_SCRIPT = 'case "$1" in archive) date +%s > "$2/archived" ;;
  * Not whether it is `live`: a run whose helpers all reported fine is done even while their terminals are
  * still open or its main agent still runs. `cards` is the run's card statuses (state.json), if any.
  * An archived run stays hidden only while this holds: a helper that needs someone again brings it back,
- * and hd_dispatch.py run / send remove the marker.
+ * and hd_dispatch.py run / send remove the marker. A run hd_dispatch.py retire ended (control.json
+ * `retired`) holds whatever its cards say: nobody carries it on.
  */
 export function canArchive(r, cards) {
   const state = r?.control?.state ?? "running";
   if (["paused", "stopping", "handoff"].includes(state) || !r?.calls?.length) return false;
+  if (r.control?.retired) return true;
   if (Object.values(cards ?? {}).some((s) => !CARD_FINAL.has(s))) return false; // a card still to do (queued, …)
   return r.calls.every((c) => SETTLED.has(callStage(c, cards?.[c.call])));
 }
@@ -135,8 +177,13 @@ function verdict(label, stored) {
   return stored === "ok" || stored === "bad" || stored === "missing" ? stored : null;
 }
 
-/** The helper's terminal: by address, else by name among live ones. */
+/**
+ * The helper's terminal: by address, else by name among live ones. None once hd_dispatch.py closed it
+ * (meta.open false: cleanup, stop and freeze set it only after `hc kill` and `hc rm`), even while the app's
+ * terminal list still has it: that list can lag herdr-core, and Peek on it fails with "no running terminal".
+ */
 function terminalFor(meta, terminals) {
+  if (meta.open === false) return null;
   const list = terminals ?? [];
   return (meta.address && list.find((t) => t.address === meta.address))
     ?? list.find((t) => t.name && t.name === meta.name && t.state === "live")
@@ -178,6 +225,8 @@ export function buildCall(meta, runDir, terminals) {
     space: meta.space ?? null,
     claudeCwd: meta.claude_cwd ?? null,
     mainAgent: meta.dispatcher_agent ?? null,
+    // The main agents it had before an adopt ([{terminal, agent, session}], oldest first; hd_dispatch.py earlier_mains).
+    earlierMains: Array.isArray(meta.mains) ? meta.mains.filter((m) => m && typeof m === "object") : [],
     title: term?.title ?? "",
     dir: meta.dir ?? "",
     workdir: meta.workdir ?? "",
@@ -210,6 +259,7 @@ export function buildCall(meta, runDir, terminals) {
 export const AGENTS = {
   codex: { label: "Codex", isolation: "sandbox" },
   claude: { label: "Claude Code", isolation: "weak" },
+  agy: { label: "Antigravity", isolation: "weak" },
 };
 export const agentLabel = (a) => AGENTS[a]?.label ?? a;
 /** How the panel names a run's main agent: "the main agent (Codex)", or just "the main agent". */
@@ -251,10 +301,31 @@ export function runParent(calls, terminals) {
   return (byNewest.find((c) => live.has(c.parent)) ?? byNewest[0])?.parent ?? null;
 }
 
-/** Whether a call's main agent is (or may be) Claude Code: recorded so, or not recorded at all. */
-const claudeMain = (c) => !c.mainAgent || /claude/i.test(c.mainAgent);
+/** A main agent's program as a short key: claude-code → claude, …/codex → codex; not recorded → claude (runs from before it was). */
+export const mainKey = (name) => { const n = String(name ?? "").toLowerCase(); return !n ? "claude" : n.includes("claude") ? "claude" : n.includes("codex") ? "codex"
+  : /\bagy\b|antigravity/.test(n) ? "agy" : n; };
 
-export function buildRuns(entries, terminals, controls = {}, archived = {}) {
+/**
+ * Every main agent that dispatched to a run, newest first: [{agent, session}]. A long run outlives its
+ * first one, and a takeover replaces it (meta.json's mains, older still). session is null when
+ * hd_dispatch.py could not record it (bg.js then finds it); such an entry is kept only for a program
+ * with no recorded session.
+ */
+export function runMains(calls) {
+  const list = [
+    ...[...calls].sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).map((c) => ({ agent: mainKey(c.mainAgent), session: c.session || null })),
+    ...calls.flatMap((c) => [...c.earlierMains].reverse()).map((m) => ({ agent: mainKey(m.agent), session: m.session || null })),
+  ];
+  const known = new Set(list.filter((m) => m.session).map((m) => m.agent)), seen = new Set(), out = [];
+  for (const m of list) {
+    const k = `${m.agent}|${m.session}`;
+    if (seen.has(k) || (!m.session && known.has(m.agent))) continue;
+    seen.add(k); out.push(m);
+  }
+  return out;
+}
+
+export function buildRuns(entries, terminals, controls = {}, archived = {}, asks = {}) {
   const byRun = new Map();
   for (const { path, meta } of entries ?? []) {
     const dir = runDirOf(path);
@@ -271,14 +342,13 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}) {
     return {
       dir, id: baseName(dir), kind: kindOf(dir), repo: repoOf(dir),
       calls, counts, need, control, archived: archived?.[dir] ?? null,
+      asks: asks?.[dir]?.asks ?? {}, answers: asks?.[dir]?.answers ?? [],
       hd: calls.find((c) => c.hd)?.hd ?? null,
       helpersLive: calls.some((c) => c.state === "live"),
       parent: runParent(calls, terminals),
-      // Every Claude Code main agent session that dispatched here, newest first (a long run outlives its
-      // first one): their transcripts list the background tasks. Other main agents' sessions (a Codex
-      // thread, …) have no such transcript.
-      sessions: [...new Set([...calls].filter(claudeMain).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)).map((c) => c.session).filter(Boolean))],
-      session: calls.find((c) => c.session && claudeMain(c))?.session ?? null,
+      // Its main agents' sessions, whose logs list their background tasks (bg.js).
+      mains: runMains(calls),
+      adopted: calls.some((c) => c.adoptedFrom),
       lastAt: Math.max(0, ...calls.map((c) => c.startedAt || 0)),
       space: calls.find((c) => c.space)?.space ?? null,
       claudeCwd: calls.find((c) => c.claudeCwd)?.claudeCwd ?? null,
@@ -461,8 +531,6 @@ export function handoffText(c, ask) {
     blocked: `${c.call} 停在等人确认的地方，请看一下它卡在哪`,
     lost: `${c.call} 的终端意外消失了（第 ${c.round} 轮还没交合格回报），请先 collect 确认，再问我要不要 recover 恢复（按 herdr.md 里 lost 的做法）`,
     accept: `${c.call} 的回报已合格，但 state.json 里这张卡还没进入验收，请按 dev 4.4 验收并更新卡片状态`,
-    resume: `搁置的卡 ${c.call} 我决定继续做：请按 dev 4.5「搁置之后」把它改回 pending，按你的判断返工或重新派发；要改契约或拿不准的先问我`,
-    drop: `搁置的卡 ${c.call} 我决定不做了：请按 dev 4.5「搁置之后」把它记为 parked_why=dropped，它的 worktree 和分支先问我是否保留`,
   }[ask] ?? `请看一下 ${c.call}`;
   return `[cc-dispatch 面板] ${what}。run=${c.runDir} call=${c.call}（${run}）`;
 }
@@ -470,7 +538,7 @@ export function handoffText(c, ask) {
 /**
  * Which messages to the main agent fit a call now: [] when it needs nothing. `card` is its dev card
  * ({status, parked_why, note}), if any: a good report on a card still pending / running asks for review;
- * a card parked for the person to decide offers both answers, carry on or drop it.
+ * a card parked for the person to decide is "decide" (its item in pendingItems, answered in the decide dialog).
  */
 export function handoffAsks(c, card) {
   const need = callNeed(c);
@@ -478,9 +546,96 @@ export function handoffAsks(c, card) {
   if (one) return [one];
   const stage = callStage(c, card?.status);
   if (stage === "await") return ["accept"];
-  if (stage === "parked" && parkedWhy(card) === "user") return ["resume", "drop"];
+  if (stage === "parked" && parkedWhy(card) === "user") return ["decide"];
   return [];
 }
+
+// ---- Waiting on the person: decisions and questions ----
+//
+// One list per run of what the main agent waits on the person for (hd_dispatch.py open_items does the same):
+//   - <run>/asks.json, written with `hd_dispatch.py ask --add`: kind "decision" (pick one of 2-4 options, maybe a
+//     recommended one) or "question" (facts or a preference only the person has; options are suggested answers);
+//   - each dev card parked for the person (parked_why user) no ask is about: id card:<card>, carry on or drop it;
+//   - an older run's state.json pending_decisions {key: text} (id pending:<key>); one about a parked card
+//     (<card> or <card>-<what>) is folded into that card's item.
+// The person's answer is appended to <run>/answers.jsonl and sent to the main agent; the item stays, marked
+// answered, until the main agent closes it (ask --resolve, or the card's new status).
+
+export const CARD_OPTIONS = [
+  { key: "resume", label: "继续做", detail: "改回 pending，负责人按判断返工或重新派发；要改契约或拿不准的先问你" },
+  { key: "drop", label: "不做了", detail: "记为 dropped；它的 worktree 和分支先问你是否保留，依赖它的卡改依赖或一起搁置" },
+];
+
+const legacyCard = (key, cards) => [...cards].sort((a, b) => b.length - a.length).find((c) => key === c || key.startsWith(`${c}-`)) ?? null;
+
+/**
+ * The run's open items, unanswered first, decisions before questions, oldest first. `cards` is the run's
+ * state.json cards (stats.js), `pending` its pending_decisions.
+ */
+export function pendingItems(r, cards = {}, pending = {}) {
+  const items = [];
+  for (const [id, v] of Object.entries(r?.asks ?? {})) {
+    if (!v || typeof v !== "object" || !["decision", "question"].includes(v.kind) || !v.title) continue;
+    items.push({ id, kind: v.kind, title: String(v.title), context: v.context ? String(v.context) : "", card: v.card ?? null,
+      options: Array.isArray(v.options) ? v.options.filter((o) => o?.key && o?.label).map((o) => ({ key: String(o.key), label: String(o.label), detail: o.detail ? String(o.detail) : "" })) : [],
+      recommend: v.recommend ?? null, why: v.why ? String(v.why) : "", blocks: Array.isArray(v.blocks) ? v.blocks.map(String) : [],
+      asked: (Number(v.asked) || 0) * 1000, source: "ask" });
+  }
+  const asked = new Set(items.map((x) => x.card).filter(Boolean));
+  const parked = Object.entries(cards ?? {}).filter(([, c]) => parkedWhy(c) === "user").map(([id]) => id);
+  const byCard = {};
+  for (const id of parked) {
+    if (asked.has(id)) continue;
+    const c = cards[id];
+    byCard[id] = { id: `card:${id}`, kind: "decision", title: `搁置的卡 ${id}：继续还是不做`, card: id,
+      context: [c.title && `**${c.title}**`, c.note && `负责人的说明：${c.note}`, c.result && `结果：${c.result}`].filter(Boolean).join("\n\n"),
+      options: CARD_OPTIONS, recommend: null, why: "", blocks: [], asked: 0, source: "card" };
+    items.push(byCard[id]);
+  }
+  for (const [key, v] of Object.entries(pending ?? {})) {
+    const text = typeof v === "string" ? v : JSON.stringify(v), card = legacyCard(key, parked);
+    if (card && byCard[card]) { byCard[card].context = [byCard[card].context, `待你决定（${key}）：${text}`].filter(Boolean).join("\n\n"); continue; }
+    if (card && asked.has(card)) continue;
+    items.push({ id: `pending:${key}`, kind: "question", title: key, context: text, card: null, options: [], recommend: null, why: "", blocks: [], asked: 0, source: "pending" });
+  }
+  const last = {};  // an answer counts if given since the item was (last) asked
+  for (const a of r?.answers ?? []) last[a.id] = a;
+  for (const x of items) x.answer = last[x.id] && (Number(last[x.id].at) || 0) * 1000 >= x.asked ? last[x.id] : null;
+  return items.sort((a, b) => (Boolean(a.answer) - Boolean(b.answer)) || ((a.kind === "question") - (b.kind === "question")) || (a.asked - b.asked) || a.id.localeCompare(b.id));
+}
+
+/** One line under an item's title: its options (the recommended one marked), or what it asks. */
+export function itemLine(x) {
+  if (x.answer) return `answered · ${answerWords(x.answer)}`;
+  if (x.options.length) return x.options.map((o) => `${o.key === x.recommend ? "★ " : ""}${o.label}`).join(" / ");
+  return (x.context || "").replace(/\s+/g, " ").slice(0, 140);
+}
+
+/** What the person chose and said, in a few words. */
+export const answerWords = (a) => [a?.choice && a?.label ? a.label : null, (a?.text ?? "").trim() || null].filter(Boolean).join(" · ") || "answered";
+
+/** The line hd_dispatch.py reads back: { id, at (s), kind, choice, label, text, by }. */
+export function answerRecord(x, { choice = null, text = "" } = {}, now = Date.now()) {
+  const o = x.options.find((y) => y.key === choice) ?? null;
+  return { id: x.id, at: Math.floor(now / 1000), kind: x.kind, choice: o?.key ?? null, label: o?.label ?? null, text: text.trim(), by: "panel" };
+}
+
+/** The message the main agent gets with the person's answer. */
+export function answerText(r, x, ans) {
+  const o = x.options.find((y) => y.key === ans.choice) ?? null, note = (ans.text ?? "").trim();
+  const extra = note ? `。补充：${note}` : "";
+  if (x.source === "card" && o) {
+    const what = o.key === "resume"
+      ? `搁置的卡 ${x.card} 我决定继续做：请按 dev 4.5「搁置之后」把它改回 pending，按你的判断返工或重新派发；要改契约或拿不准的先问我`
+      : `搁置的卡 ${x.card} 我决定不做了：请按 dev 4.5「搁置之后」把它记为 parked_why=dropped，它的 worktree 和分支先问我是否保留`;
+    return `[cc-dispatch 面板] ${what}${extra}。run=${r.dir} call=${x.card}`;
+  }
+  const said = x.kind === "decision" ? `我选 ${o ? `${o.key}「${o.label}」` : "（没选项）"}${extra}` : `我的回答：${[o?.label, note].filter(Boolean).join("；") || "（空）"}`;
+  return `[cc-dispatch 面板] 待决项 ${x.id}「${x.title}」${said}。请按 herdr.md「待决项」照办，并用 hd_dispatch.py ask --resolve ${x.id} 记下。run=${r.dir}`;
+}
+
+/** Appends one answer: `sh -c ANSWER_SCRIPT _ <run dir> <json line>`. */
+export const ANSWER_SCRIPT = 'printf "%s\\n" "$2" >> "$1/answers.jsonl"';
 
 /** The first of handoffAsks, or null. */
 export const handoffAsk = (c, card) => handoffAsks(c, card)[0] ?? null;
@@ -930,10 +1085,10 @@ export function splitBySpace(runs, terminals, spaces, shown, repo) {
 // background, logging to <run>/stop.log and <run>/agents/<call>/handover.log.
 // ---- The main agent's quota (hd_usage.py quota) ----
 
-/** "claude" / "codex" from a program key, name or path, else null: the subscription hd_usage.py reads. */
+/** "claude" / "codex" / "agy" from a program key, name or path, else null: the subscription hd_usage.py reads. */
 export function quotaAgent(name) {
   const n = String(name ?? "").split("/").pop().toLowerCase();
-  return n.includes("claude") ? "claude" : n.includes("codex") ? "codex" : null;
+  return n.includes("claude") ? "claude" : n.includes("codex") ? "codex" : /agy|antigravity/.test(n) ? "agy" : null;
 }
 
 /**

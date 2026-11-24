@@ -1,6 +1,6 @@
 ---
 name: cc-herdr-dispatch-research
-description: "herdr 内的调研与出方案：Claude 立题、核实、综合，Codex 子 agent 并行调研代码、资料和可行性，并独立给出备选方案"
+description: "herdr 内的调研与出方案：Claude 立题、核实、综合，子 agent（默认 Antigravity / Gemini 4 Neon，不可用时自动换 Codex）并行调研代码、资料和可行性，并独立给出备选方案"
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "<调研问题 | 要出方案的需求 | 相关文件路径>"
@@ -8,7 +8,7 @@ argument-hint: "<调研问题 | 要出方案的需求 | 相关文件路径>"
 
 ## 角色
 
-你是**主编**兼**核查人**：定问题、拆线程、核实证据、写结论、选推荐方案。Codex 子 agent 是**调研员**：按线程读代码、查资料、跑最小实验，方案模式下另开一个调用独立给出备选方案。读代码、查资料、跑实验都交给子 agent，你只做 shared/herdr.md 里的小活。子 agent 的发现是线索不是结论：报告里每个关键结论（会左右回答或推荐的那些）都要经你亲手核实证据，但核实只看证据本身，不重新调研。
+你是**主编**兼**核查人**：定问题、拆线程、核实证据、写结论、选推荐方案。子 agent 是**调研员**（默认 Antigravity 的 Gemini 4 Neon，见第 2 步）：按线程读代码、查资料、跑最小实验，方案模式下另开一个调用独立给出备选方案。读代码、查资料、跑实验都交给子 agent，你只做 shared/herdr.md 里的小活。子 agent 的发现是线索不是结论：报告里每个关键结论（会左右回答或推荐的那些）都要经你亲手核实证据，但核实只看证据本身，不重新调研。
 
 `$SKILL_DIR` 指本文件所在目录。**开始前先读 [shared/herdr.md](shared/herdr.md)**：前提（在 herdr 里）、分工与小活、skill 之间怎么调用、怎么派发和收回报（`$HD`、`$RD`）、调用失败的通用处理和通用守则都在那里，本文只写本 skill 特有的部分。
 
@@ -73,6 +73,8 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
   --title "<子问题的英文简写>"
 ```
 
+不写 `--agent`：research 运行的子 agent 默认是 Antigravity（`agy`），模型 `gemini-4-neon-<effort>`；agy 没装、模型不可用或 Gemini 额度用完时脚本自动改派 Codex（全局默认模型），输出 `FALLBACK=agy→codex why=…`，运行中途因额度等原因停下的也会自动移交给 Codex 接着做（见 shared/herdr.md"派发"）。把输出的 `AGENT=` 记进 `state.json.threads.<线程>.agent`，报告里不必区分。用户点名要某个 agent 或模型时才加 `--agent`/`--model`。
+
 子问题窄、范围在几个文件内的线程用 `--effort medium`。全部派出后按 shared/herdr.md 启动 `wait`，把每个线程的 `NAME` 写进 `state.json.threads`。
 
 **子 agent 运行期间，你写 `criteria.md`**（选型问题和方案模式必写，纯事实类调研可跳过）：评估维度、各自的权重或底线（例如"必须支持 PG 16""运维成本优先于性能"），每条都要能追溯到 `brief.md` 的约束。在看到子 agent 的结果之前定下标准，避免被先看到的答案锚定：`criteria.md` 写完之前，`wait` 报回的回报先不读。
@@ -87,7 +89,7 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
 | **未核实** | 不左右结论的次要事实，照录并标注来源 |
 | **不成立** | 证据与结论不符、来源过时或与代码现状矛盾；写明理由 |
 
-左右回答或推荐的结论必须是"已核实"。线程之间互相矛盾、或某个子问题没有答案时，`send` 给该线程追问一次，问题写具体；每个线程最多追问一次，仍然没有答案就在报告里标为未解决。一个线程的结论都处理完后 `cleanup` 它。
+左右回答或推荐的结论必须是"已核实"。线程之间互相矛盾、或某个子问题没有答案时，`send` 给该线程追问一次，问题写具体；每个线程最多追问一次，仍然没有答案就在报告里标为未解决。只有用户能回答的（内部约定、业务取舍、可用的账号或环境），按 shared/herdr.md「待决项」写成 `question`，报告里照样列出。一个线程的结论都处理完后 `cleanup` 它。
 
 写 `research.md`：
 
@@ -165,7 +167,7 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
 
 ## Codex 不可用时
 
-通用处理见 shared/herdr.md 的"调用失败"。本 skill 特有的规则：
+agy 不可用时自动换 Codex 由脚本处理，不在这一节的范围内；这一节说的是 Codex 也用不了的情况（自动换过去的 Codex 调用报 `quota`/`other`，或 `probe` 不通过）。通用处理见 shared/herdr.md 的"调用失败"。本 skill 特有的规则：
 
 - `quota`：用 AskUserQuestion 让用户选择：**Claude 子 agent 代替 Codex 继续 / 暂停，等额度恢复后续跑 / 到此结束，用已有材料出结论**。查到了额度重置时间就写进问题里。
 - `other`：同一线程连续两次 `other`，按 `quota` 的降级处理。

@@ -120,7 +120,7 @@ git -C "$WT_ROOT/write" add -A && git -C "$WT_ROOT/write" diff --cached $SNAP --
 
 结论的判定：所有命令都通过（只允许有已记录的 flaky）为 **PASS**；有已复现的 `product` 或已确认的 `test` 失败为 **FAIL**；环境问题修不好、有分片没跑成为 **BLOCKED**，写明缺什么。
 
-单独使用（没有调用方）时，FAIL 之后用 AskUserQuestion 问用户：**交给 cc-herdr-dispatch-fix**（修法明确或能定位的 `product`/`test` 失败，用 Skill 工具调用，参数写 `.cc-dispatch/test-$RUN/result.md 中的 <编号列表> --path "$TARGET" --parent .cc-dispatch/test-$RUN`）/ **交给 cc-herdr-dispatch-dev**（失败指向需要重新设计的问题，提示用户用 `/cc-herdr-dispatch-dev` 并附上失败清单）/ 自己修 / 先放着。
+单独使用（没有调用方）时，FAIL 之后用 AskUserQuestion 问用户：**交给 cc-herdr-dispatch-fix**（修法明确或能定位的 `product`/`test` 失败，用 Skill 工具调用，参数写 `.cc-dispatch/test-$RUN/result.md 中的 <编号列表> --path "$TARGET" --parent .cc-dispatch/test-$RUN`）/ **交给 cc-herdr-dispatch-dev**（失败指向需要重新设计的问题，提示用户用 `/cc-herdr-dispatch-dev` 并附上失败清单）/ 自己修 / 先放着。同时把这个问题按 shared/herdr.md「待决项」写成一条 `decision`（id `next`），让面板上也能选；BLOCKED 缺的环境或信息写成 `question`。
 
 ### 5. 清理
 

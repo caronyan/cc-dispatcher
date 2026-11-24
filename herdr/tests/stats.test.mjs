@@ -26,7 +26,7 @@ function fixture() {
   execFileSync("sqlite3", [db, `create table threads (id text, rollout_path text, created_at integer, first_user_message text);
     insert into threads values ('a', '${log}', 1, '<hc>…</hc>\n\n读取任务文件 ${run}/agents/T1/task-1.md，按其中要求完成。');
     insert into threads values ('b', '/nowhere.jsonl', 2, 'something else');`]);
-  writeFileSync(join(run, "state.json"), JSON.stringify({ tasks: { T1: { status: "merged" }, T2: { status: "running" }, T3: { status: "parked", parked_why: "superseded", by: "T2", note: "n" }, "T2-check-r1": { status: "accepting" }, T4: { status: "pending", depends_on: ["T2"] } }, finished: 1790000000 }));
+  writeFileSync(join(run, "state.json"), JSON.stringify({ tasks: { T1: { status: "merged" }, T2: { status: "running" }, T3: { status: "parked", parked_why: "superseded", by: "T2", note: "n" }, "T2-check-r1": { status: "accepting" }, T4: { status: "pending", depends_on: ["T2"] } }, finished: 1790000000, pending_decisions: { db: "which PG", obj: { a: 1 } } }));
   const r = { dir: run, live: false, startedAt: Date.parse("2026-11-08T02:59:00Z"), calls: [{ key: `${run}#T1`, agentDir: `${run}/agents/T1` }] };
   return { home, log, run, r };
 }
@@ -49,6 +49,7 @@ test("stats script: finds the helper's thread by its task file and totals its lo
   assert.deepEqual(out.runs[run].cards.T3, { status: "parked", parked_why: "superseded", by: "T2", note: "n" });
   assert.deepEqual(out.runs[run].cards.T4.depends_on, ["T2"]);
   assert.deepEqual(out.finished, { [run]: 1790000000 });
+  assert.deepEqual(out.pending, { [run]: { db: "which PG", obj: "{\"a\": 1}" } });
 });
 
 test("stats script: reads only what was appended, and a half-written line waits", () => {

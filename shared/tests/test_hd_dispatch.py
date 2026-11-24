@@ -84,12 +84,87 @@ class Env:
 
 
 class Archive(unittest.TestCase):
+    def test_retire_ends_a_handoff_nobody_adopted_and_dispatching_again_undoes_it(self):
+        w = Env()
+        m = w.dispatch("a")
+        w.patch(m["name"], status="working")
+        (w.run_dir / "state.json").write_text(json.dumps({"tasks": {"a": {"status": "accepting"}}}))
+        (w.run_dir / "handoff-notes.md").write_text("交出去")
+        self.assertEqual(w.hd("handoff", "--run", str(w.run_dir), "--why", "usage").returncode, 0)
+        r = w.hd("retire", "--run", str(w.run_dir))
+        self.assertIn("HELPERS_AT_WORK", r.stdout)  # a helper still at work
+        w.patch(m["name"], status="done", turn=1)
+        r = w.hd("retire", "--run", str(w.run_dir), HC_TERMINAL_ID="")  # from the panel
+        kv = w.kv(r)
+        self.assertEqual((kv.get("WAS"), kv.get("CLOSED"), kv.get("ARCHIVED")), ("handoff", "a", "yes"), r.stdout + r.stderr)
+        c = json.loads((w.run_dir / "control.json").read_text())
+        self.assertEqual((c["state"], c["retired"]["from"], c["retired"]["by"]), ("running", "handoff", "panel"))
+        st = json.loads((w.run_dir / "state.json").read_text())
+        self.assertEqual(st["finished"], c["retired"]["at"])
+        self.assertTrue((w.run_dir / "archived").exists())
+        self.assertFalse(w.meta()["open"])
+        self.assertIn(["kill", m["address"]], [x[:2] for x in w.hc_state()["calls"]])
+        rows = json.loads(w.hd("runs", "--repo", str(w.repo), "--json").stdout)
+        self.assertEqual(rows, [])  # finished and archived: nothing to carry on
+        w.dispatch("b")
+        self.assertNotIn("retired", json.loads((w.run_dir / "control.json").read_text()))
+        self.assertNotIn("finished", json.loads((w.run_dir / "state.json").read_text()))
+        self.assertFalse((w.run_dir / "archived").exists())
+
+    def test_retire_refuses_a_run_its_live_main_agent_still_has(self):
+        w = Env()
+        w.dispatch("a")
+        w.patch(w.meta()["name"], status="done", turn=1)
+        r = w.hd("retire", "--run", str(w.run_dir), HC_TERMINAL_ID="t9")
+        self.assertIn("MAIN_LIVE", r.stdout)
+        self.assertFalse((w.run_dir / "archived").exists())
+        self.assertEqual(w.kv(w.hd("retire", "--run", str(w.run_dir), "--keep"))["ARCHIVED"], "no")  # its own main agent may
+
     def test_dispatching_again_takes_the_run_out_of_the_archive(self):
         w = Env()
         w.dispatch("a")
         (w.run_dir / "archived").write_text("1\n")
         w.dispatch("b")
         self.assertFalse((w.run_dir / "archived").exists())
+
+
+    def test_delete_refuses_a_run_that_is_not_archived(self):
+        w = Env()
+        w.dispatch("a")
+        r = w.hd("delete", "--run", str(w.run_dir))
+        self.assertIn("NOT_ARCHIVED", r.stdout)
+        self.assertTrue(w.run_dir.exists())
+
+    def test_delete_removes_the_run_and_what_is_kept_of_it_but_not_code(self):
+        w = Env()
+        m = w.dispatch("a")
+        report_dir = Path(m["report"]).parent
+        Path(m["report"]).write_text('{"status": "done"}')
+        git = lambda *a: subprocess.run(["git", "-C", str(w.repo), *a], capture_output=True, text=True)
+        git("update-ref", "refs/cc-dispatch/dev-x/a/r1", "HEAD")
+        git("update-ref", "refs/cc-dispatch/dev-xy/a/r1", "HEAD")  # another run, a longer name
+        git("branch", "cc/dev-x/T1")
+        other = w.home / "hother"
+        other.mkdir(parents=True)
+        (w.home / ".panel-bg.json").write_text(json.dumps({"v": 4, "resolved": {f"claude|{w.run_dir}": "s1", "claude|/else": "s2"},
+            "packages": {str(w.run_dir / "handoff/1/handoff.json"): ["claude", "s1"]}, "logs": {}}))
+        ledger = w.repo / ".cc-dispatch" / ".retro-reviewed.json"
+        ledger.write_text(json.dumps({"dev-x": "retro-1", "dev-y": "retro-1"}))
+        (w.run_dir / "archived").write_text("1\n")
+        r = w.hd("delete", "--run", str(w.run_dir))
+        kv = w.kv(r)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((kv["HELPERS"], kv["CLOSED"], kv["SNAPSHOTS"]), ("1", "1", "1"))
+        self.assertFalse(w.run_dir.exists())
+        self.assertFalse(report_dir.parent.exists())
+        self.assertTrue(other.exists())
+        self.assertNotIn(m["name"], w.hc_state()["terminals"])
+        refs = git("for-each-ref", "--format=%(refname)", "refs/cc-dispatch/").stdout.split()
+        self.assertEqual(refs, ["refs/cc-dispatch/dev-xy/a/r1"])
+        self.assertEqual(git("branch", "--list", "cc/dev-x/T1").stdout.strip(), "cc/dev-x/T1")
+        bgc = json.loads((w.home / ".panel-bg.json").read_text())
+        self.assertEqual((bgc["resolved"], bgc["packages"]), ({"claude|/else": "s2"}, {}))
+        self.assertEqual(json.loads(ledger.read_text()), {"dev-y": "retro-1"})
 
 
 class ReportBackup(unittest.TestCase):
@@ -300,6 +375,27 @@ class Handover(unittest.TestCase):
         self.assertEqual(meta["claude_sessions"], [meta["agent_session"]])
         self.assertIn(["label", m["address"], "cc.handover=claude"], [c[:3] for c in st["calls"]])
 
+    def test_to_agy_runs_it_with_the_task_on_its_command_line(self):
+        w = Env()
+        agy = w.bin / "agy"
+        agy.write_text("#!/bin/sh\nexit 0\n")
+        agy.chmod(0o755)
+        m = w.dispatch(mode="read")
+        w.patch(m["name"], status="working",
+                on_send={"status": "done", "turn": 1, "write": [str(Path(m["report"]).parent / "progress-r1.md"), "进度"]})
+        r = w.hd("handover", "--run", str(w.run_dir), "--call", "a", "--to", "agy", "--ask", "10",
+                 CC_HD_AGY_HOME=str(w.root / "noagy"))
+        kv = w.kv(r)
+        self.assertEqual((kv.get("AGENT"), kv.get("ISOLATION")), ("agy", "weak"), r.stdout + r.stderr)
+        meta = w.meta()
+        run_call = [c for c in w.hc_state()["calls"] if c[0] == "run"][-1]
+        argv = run_call[run_call.index("--") + 1:]
+        self.assertEqual(argv[:2], ["agy", "--dangerously-skip-permissions"])
+        self.assertIn("--add-dir", argv)
+        self.assertEqual(argv[-2], "-i")
+        self.assertIn("task-2.md", argv[-1])
+        self.assertIsNone(meta.get("agent_session"))
+
     def test_refused_while_paused(self):
         w = Env()
         w.dispatch()
@@ -307,6 +403,104 @@ class Handover(unittest.TestCase):
         r = w.hd("handover", "--run", str(w.run_dir), "--call", "a")
         self.assertEqual(r.returncode, 3)
         self.assertEqual(w.meta()["round"], 1)
+
+
+class DefaultAgent(unittest.TestCase):
+    """run picks the helper by the run's kind: agy (Gemini 4 Neon) for research, Codex otherwise."""
+
+    def agy(self, w, models="gemini-4-neon-low\ngemini-4-neon-high\ngemini-4-neon-xhigh\n"):
+        f = w.bin / "agy"
+        f.write_text(f"#!/bin/sh\nif [ \"$1\" = models ]; then printf '%s' '{models}'; fi\nexit 0\n")
+        f.chmod(0o755)
+
+    def research(self, w, call="web", *extra, **env):
+        rd = w.repo / ".cc-dispatch" / "research-x"
+        rd.mkdir(parents=True, exist_ok=True)
+        p = w.root / f"prompt-{call}.md"
+        p.write_text("look it up")
+        r = w.hd("run", "--run", str(rd), "--call", call, "--mode", "read", "--effort", "high", "--dir", str(w.repo),
+                 "--prompt", str(p), "--schema", str(w.schema), *extra, CC_HD_AGY_HOME=str(w.root / "noagy"), **env)
+        return rd, r
+
+    def argv(self, w):
+        c = [c for c in w.hc_state()["calls"] if c[0] == "run"][-1]
+        return c[c.index("--") + 1:] if "--" in c else c[c.index("--json") + 1:]
+
+    def test_research_goes_to_agy_on_gemini_4_neon(self):
+        w = Env()
+        self.agy(w)
+        rd, r = self.research(w)
+        kv = w.kv(r)
+        self.assertEqual((kv.get("AGENT"), kv.get("MODEL"), kv.get("FALLBACK")), ("agy", "gemini-4-neon-high", None),
+                         r.stdout + r.stderr)
+        argv = self.argv(w)
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-neon-high")
+        meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
+        self.assertEqual((meta["agent"], meta["model"], meta["fallback"]), ("agy", "gemini-4-neon-high", "codex"))
+
+    def test_other_kinds_stay_on_codex(self):
+        w = Env()
+        self.agy(w)
+        m = w.dispatch()
+        self.assertEqual((m["agent"], m["model"]), ("codex", None))
+
+    def test_without_agy_research_falls_back_to_codex(self):
+        w = Env()
+        rd, r = self.research(w, PATH=f"{w.bin}:/usr/bin:/bin")  # no agy on it
+        kv = w.kv(r)
+        self.assertEqual((kv.get("AGENT"), kv.get("FALLBACK")), ("codex", "agy→codex why=agy_missing"), r.stdout)
+        self.assertEqual(self.argv(w)[-2], "cc-hd-read-high")  # Codex's template: its own default model
+        meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
+        self.assertEqual((meta["agent"], meta["model"], meta["fell_back"]["why"]), ("codex", None, "agy_missing"))
+
+    def test_a_model_agy_does_not_list_falls_back(self):
+        w = Env()
+        self.agy(w, models="gemini-3-pro\n")
+        _, r = self.research(w)
+        self.assertEqual(w.kv(r).get("FALLBACK"), "agy→codex why=model_unavailable", r.stdout)
+
+    def test_a_used_up_gemini_window_falls_back(self):
+        w = Env()
+        self.agy(w)
+        q = w.root / "quota.json"
+        q.write_text(json.dumps([{"provider": "antigravity-bridge", "kind": "subscription", "windows": [
+            {"name": "Gemini · 5 hours", "used": 100, "resetsAt": int(time.time()) + 3600},
+            {"name": "Claude & GPT · 7 days", "used": 10}]}]))
+        _, r = self.research(w, CC_HD_QUOTA_JSON=str(q))
+        self.assertEqual(w.kv(r).get("FALLBACK"), "agy→codex why=quota:5h_Gemini", r.stdout)
+
+    def test_a_side_call_without_fallback_fails_when_agy_cannot(self):
+        w = Env()
+        rd, r = self.research(w, "reviewer-gemini", "--agent", "agy", "--fallback", "none", PATH=f"{w.bin}:/usr/bin:/bin")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("AGENT_UNAVAILABLE", r.stdout)
+        self.assertEqual(w.kv(r).get("FAILURE"), "agent_unavailable")
+        self.assertFalse((rd / "agents" / "reviewer-gemini" / "meta.json").exists())
+
+    def test_agy_stopping_on_its_quota_hands_the_call_to_codex(self):
+        w = Env()
+        self.agy(w)
+        rd, _ = self.research(w)
+        meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
+        w.patch(meta["name"], status="error", turn=1, screen="Error: RESOURCE_EXHAUSTED: Gemini quota used up\n")
+        r = w.hd("collect", "--run", str(rd))
+        kv = w.kv(r)
+        self.assertEqual(kv.get("FAILURE"), "quota", r.stdout)
+        self.assertTrue(kv.get("FALLBACK", "").startswith("web agy→codex why=quota round=2"), r.stdout + r.stderr)
+        meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
+        self.assertEqual((meta["agent"], meta["round"], meta["handovers"][-1]["why"]), ("codex", 2, "fallback:quota"))
+        self.assertEqual(self.argv(w)[-2], "cc-hd-read-high")
+
+    def test_agy_without_fallback_is_reported_as_it_is(self):
+        w = Env()
+        self.agy(w)
+        rd, _ = self.research(w, "web", "--fallback", "none")
+        meta = json.loads((rd / "agents" / "web" / "meta.json").read_text())
+        w.patch(meta["name"], status="error", turn=1, screen="Error: model gemini-4-neon-high not available\n")
+        r = w.hd("collect", "--run", str(rd))
+        self.assertEqual(w.kv(r).get("FAILURE"), "model_unavailable", r.stdout)
+        self.assertNotIn("FALLBACK", r.stdout)
+        self.assertEqual(json.loads((rd / "agents" / "web" / "meta.json").read_text())["agent"], "agy")
 
 
 class DispatcherHandoff(unittest.TestCase):
@@ -547,6 +741,8 @@ class Takeover(unittest.TestCase):
         ctl = self.ctl(w)
         self.assertEqual((ctl["state"], ctl["owner"], ctl["held"]), ("paused", "t2", ["a"]))
         self.assertEqual((w.meta()["parent"], w.meta()["dispatcher_agent"]), ("t2", "codex"))
+        # the replaced main agent's session stays on record (the panel reads its background tasks)
+        self.assertEqual([(m["terminal"], m["session"]) for m in w.meta()["mains"]], [("t1", "sess-1")])
         r = w.hd("takeover", "--run", str(w.run_dir), HC_TERMINAL_ID="t2")
         self.assertEqual(w.kv(r)["TAKEOVER"], "self")
 
@@ -623,11 +819,70 @@ class Takeover(unittest.TestCase):
         self.assertIn("skill=cc-herdr-dispatch-dev", line)
         self.assertIn("main=live(claude)", line)
         self.assertIn("cards=1/2 merged", line)  # parked ones are not meant to be merged
-        self.assertIn("open=1 cards open, 1 parked for you", line)
+        self.assertIn("open=1 cards open, 1 waiting on you", line)
         rows = json.loads(w.hd("runs", "--repo", str(w.repo), "--all", "--json").stdout)
         self.assertEqual(sorted(r["name"] for r in rows), ["dev-x", "review-z", "test-y"])
         self.gone(w, "parent")
         self.assertIn("main=gone(claude)", w.hd("runs", "--repo", str(w.repo)).stdout)
+
+
+class Asks(unittest.TestCase):
+    """What waits on the person: asks.json items, parked cards and older pending_decisions; answers from the panel."""
+
+    def item(self, w, body):
+        f = w.root / "ask.json"
+        f.write_text(json.dumps(body))
+        return w.hd("ask", "--run", str(w.run_dir), "--add", str(f))
+
+    def test_add_list_answer_and_resolve(self):
+        w = Env()
+        w.dispatch()
+        (w.run_dir / "state.json").write_text(json.dumps({"tasks": {
+            "b": {"status": "parked", "parked_why": "user", "note": "3 轮没过"},
+            "c": {"status": "parked", "note": "superseded by b"}},
+            "pending_decisions": {"b-redaction": "要不要扩大脱敏范围", "db": "用哪个 PG 版本"}}))
+        bad = self.item(w, {"x": {"kind": "decision", "title": "t", "options": [{"key": "A", "label": "a"}]}})
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("at least 2 options", bad.stdout)
+        r = self.item(w, {"id": "api-shape", "kind": "decision", "title": "接口返回 409 还是 410",
+                          "options": [{"key": "A", "label": "409"}, {"key": "B", "label": "410"}], "recommend": "B"})
+        self.assertEqual(w.kv(r)["ASKED"], "api-shape")
+        listed = w.hd("ask", "--run", str(w.run_dir), "--list").stdout
+        self.assertEqual(w.kv(w.hd("ask", "--run", str(w.run_dir), "--list"))["OPEN"], "3")
+        self.assertIn("ASK card:b\tdecision", listed)       # b-redaction is folded into card b
+        self.assertIn("ASK pending:db\tquestion", listed)
+        self.assertNotIn("card:c", listed)                   # superseded: nothing to decide
+        with open(w.run_dir / "answers.jsonl", "a") as f:
+            f.write(json.dumps({"id": "api-shape", "at": int(time.time()), "choice": "B", "label": "410", "text": "前端已按 410 写"}) + "\n")
+            f.write(json.dumps({"id": "gone-item", "at": int(time.time()), "text": "x"}) + "\n")
+        r = w.hd("collect", "--run", str(w.run_dir))
+        kv = w.kv(r)
+        self.assertEqual(kv["ANSWERS"], "api-shape")
+        self.assertIn("ANSWER api-shape: B. 410；前端已按 410 写", r.stdout)
+        asks = json.loads((w.run_dir / "asks.json").read_text())
+        asks["api-shape"]["asked"] += 5                      # asked again later: the answer is older
+        (w.run_dir / "asks.json").write_text(json.dumps(asks))
+        self.assertNotIn("ANSWERS", w.kv(w.hd("collect", "--run", str(w.run_dir))))
+        kv = w.kv(w.hd("ask", "--run", str(w.run_dir), "--resolve", "api-shape", "--decision", "410（用户选定）"))
+        self.assertEqual((kv["RESOLVED"], kv["FOUND"]), ("api-shape", "yes"))
+        self.assertNotIn("ANSWERS", w.kv(w.hd("collect", "--run", str(w.run_dir))))
+        w.hd("ask", "--run", str(w.run_dir), "--resolve", "card:b", "--decision", "不做了")
+        st = json.loads((w.run_dir / "state.json").read_text())
+        self.assertEqual(st["decisions"], {"api-shape": "410（用户选定）", "card:b": "不做了"})
+        self.assertEqual(st["pending_decisions"], {"db": "用哪个 PG 版本"})
+
+    def test_wait_returns_when_the_person_answers(self):
+        w = Env()
+        w.dispatch()
+        self.item(w, {"id": "q", "kind": "question", "title": "哪个环境"})
+        p = subprocess.Popen([sys.executable, str(HD), "wait", "--run", str(w.run_dir), "--timeout", "60"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=w.env())
+        time.sleep(2)
+        with open(w.run_dir / "answers.jsonl", "a") as f:
+            f.write(json.dumps({"id": "q", "at": int(time.time()), "text": "staging"}) + "\n")
+        out, err = p.communicate(timeout=30)
+        self.assertIn("WAIT=answer", out, out + err)
+        self.assertIn("ANSWERS=q", out)
 
 
 class Digest(unittest.TestCase):
@@ -717,6 +972,13 @@ class Classify(unittest.TestCase):
         self.assertEqual(hd.classify("■ You've hit your usage limit. Try again at 3:00 PM."), "quota")
         self.assertEqual(hd.classify("stream disconnected before completion"), "capacity")
         self.assertNotIn("context_limit", hd.RETRYABLE)
+
+    def test_a_model_it_may_not_use_and_an_exhausted_resource(self):
+        hd = module()
+        self.assertEqual(hd.classify("Error: model gemini-4-neon-high is not available for your account"), "model_unavailable")
+        self.assertEqual(hd.classify("unknown model: gpt-9"), "model_unavailable")
+        self.assertEqual(hd.classify("429 RESOURCE_EXHAUSTED"), "quota")
+        self.assertIn("model_unavailable", hd.NO_ASK)
 
 
 if __name__ == "__main__":

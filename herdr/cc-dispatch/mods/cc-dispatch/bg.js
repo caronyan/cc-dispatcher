@@ -1,21 +1,34 @@
-// The dispatching Claude's background tasks: shells started with run_in_background, Monitors and
-// async Agents, read from its Claude Code transcript. No Herdr imports: herdr/tests/bg.test.mjs
-// runs it under node.
+// The main agent's background work, whatever program it is, read from its own session log by an
+// adapter per program (BG_PY's ADAPTERS) and handed to the panel in one task shape, so every main agent's
+// tasks are shown the same way. No Herdr imports: herdr/tests/bg.test.mjs runs it under node.
 //
-// hd_dispatch.py run records the dispatching Claude's session (CLAUDE_CODE_SESSION_ID) in each
-// helper's meta.json; the transcript is ~/.claude/projects/<slug>/<session>.jsonl. Runs from before
-// that have no session: the newest transcript under the Claude's folder that names the run folder
-// is taken. A tool_use starts a task once its result says it went to the background (a foreground
-// Bash call too, when it outlived its timeout and was moved there); a <task-notification> with a
-// <status> ends it, one with only an <event> (a Monitor's) updates it.
-// Transcripts are read from where the last read stopped (cache $CC_HD_HOME/.panel-bg.json).
+// An adapter knows three things about its program:
+//   path(session)  the session's log;
+//   find(run)      the session when hd_dispatch.py could not record one: the newest log of that program,
+//                  in the run's folder, that names the run folder (remembered once found);
+//   scan(path)     the log's background tasks, read from where the last read stopped.
+// Adapters:
+//   claude  Claude Code. hd_dispatch.py run records CLAUDE_CODE_SESSION_ID; the transcript is
+//           ~/.claude/projects/<slug>/<session>.jsonl. A tool_use (Bash with run_in_background, Monitor,
+//           async Agent) starts a task once its result says it went to the background (a foreground Bash
+//           call too, when it outlived its timeout and was moved there); a <task-notification> with a
+//           <status> ends it, one with only an <event> (a Monitor's) updates it; a TaskStop kills it.
+//   codex   Codex. Its threads are in <CODEX_HOME>/state_*.sqlite (every ~/.codex* home), each with a
+//           rollout log. An exec_command that outlives its yield keeps running as a process ("Process
+//           running with session ID N"), which write_stdin then polls until "Process exited with code X".
+//           Such a process is a background task once the agent makes another tool call while it runs;
+//           one it only polled until done was a slow foreground command and is left out.
+// Logs are read from where the last read stopped (cache $CC_HD_HOME/.panel-bg.json).
 
-// argv[1]: {"runs": [{"dir", "session", "cwd", "since"}]}
-// stdout:  {"resolved": {dir: session}, "sessions": {session: [task]}}
-//          task: {id, use, kind, title, command, started, ended, status, summary, event, output, tail}
+// argv[1]: {"runs": [{"dir", "agent": "claude"|"codex", "session", "cwd", "since", "adopted"}]}
+//          one entry per main agent of a run; session null: find it. adopted: also the main agents named
+//          in the run's handoff packages (runs adopted before meta.json kept them, hd_dispatch.py earlier_mains).
+// stdout:  {"runs": {dir: [session]}, "sessions": {session: [task]}}
+//          task: {id, use, agent, kind, title, command, started, ended, status, summary, event, output, log, tail}
+//          output: a file holding the task's output (claude); log: the output's end as text (codex).
 import { fmtDur } from "./stats.js";
 export const BG_PY = String.raw`
-import glob, json, os, re, sys
+import glob, json, os, re, sqlite3, sys
 from datetime import datetime
 
 req = json.loads(sys.argv[1])
@@ -29,8 +42,12 @@ try:
 except Exception:
     cache = {}
 resolved = cache.get("resolved") if isinstance(cache.get("resolved"), dict) else {}
-# v3 also takes foreground shells moved to the background, and stops: older caches read past them.
-logs = cache.get("logs") if isinstance(cache.get("logs"), dict) and cache.get("v") == 3 else {}
+# v4: adapters (resolved keys are "<agent>|<dir>"); older caches are read again.
+fresh = cache.get("v") == 4
+logs = cache.get("logs") if isinstance(cache.get("logs"), dict) and fresh else {}
+resolved = resolved if fresh else {}
+missed = cache.get("missed") if isinstance(cache.get("missed"), dict) and fresh else {}
+now_s = int(datetime.now().timestamp())
 
 slug = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p or "")
 
@@ -55,22 +72,18 @@ def mentions(path, needle):
     except OSError:
         return False
 
-def find_session(r):
-    if r.get("session"):
-        return r["session"]
-    if resolved.get(r["dir"]):
-        return resolved[r["dir"]]
+# ---- claude: Claude Code transcripts ----
+
+def claude_find(r):
     folder = os.path.join(projects, slug(r.get("cwd")))
     since = (r.get("since") or 0) / 1000 - 600
     files = [p for p in glob.glob(os.path.join(folder, "*.jsonl")) if os.path.getmtime(p) >= since]
     for p in sorted(files, key=os.path.getmtime, reverse=True):
         if mentions(p, r["dir"]):
-            sid = os.path.basename(p)[:-6]
-            resolved[r["dir"]] = sid
-            return sid
+            return os.path.basename(p)[:-6]
     return None
 
-def transcript(sid):
+def claude_path(sid):
     found = glob.glob(os.path.join(projects, "*", sid + ".jsonl"))
     return found[0] if found else None
 
@@ -91,14 +104,14 @@ def texts(content):
 
 KEYS = (b'"tool_use"', b'"tool_result"', b"task-notification")
 
-def scan(path, sid):
+def claude_scan(path, sid):
     """A transcript's background tasks, reading only what was appended since last time."""
     try:
         size = os.path.getsize(path)
     except OSError:
         return logs.get(path, {}).get("tasks", {})
     e = logs.get(path)
-    if not isinstance(e, dict) or size < e.get("off", 0):
+    if not isinstance(e, dict) or size < e.get("off", 0) or "ids" not in e:
         e = {"off": 0, "tasks": {}, "pending": {}, "ids": {}}
     tasks, pending, ids = e["tasks"], e["pending"], e["ids"]
     tasks_dir = os.path.join("/tmp", "claude-%d" % os.getuid(), os.path.basename(os.path.dirname(path)), sid, "tasks")
@@ -225,28 +238,230 @@ def tail(path, n=2):
             text = f.read().decode("utf-8", "replace")
     except OSError:
         return []
+    return tail_text(text, n)
+
+def tail_text(text, n=2):
+    """The last lines of some output, without colours, carriage-return redraws or an end marker."""
     lines = []
-    for l in ANSI.sub("", text).split("\n"):
+    for l in ANSI.sub("", text or "").split("\n"):
         parts = [p for p in l.split("\r") if p.strip()]
         if parts and not END_RE.match(parts[-1].strip()):
             lines.append(parts[-1].rstrip()[:200])
     return lines[-n:]
 
-out = {"resolved": {}, "sessions": {}}
-since = {}
-for r in req.get("runs", []):
-    sid = find_session(r)
-    out["resolved"][r["dir"]] = sid
+# ---- codex: Codex rollout logs ----
+
+codex_homes, seen_homes = [], set()
+for h in [os.environ.get("CODEX_HOME")] + sorted(glob.glob(os.path.join(home, ".codex*"))):
+    if h and os.path.isdir(h) and os.path.realpath(h) not in seen_homes:
+        seen_homes.add(os.path.realpath(h)); codex_homes.append(h)
+
+def codex_threads(sql, args):
+    rows = []
+    for h in codex_homes:
+        for db in sorted(glob.glob(os.path.join(h, "state_*.sqlite"))):
+            try:
+                con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=1)
+                rows += con.execute(sql, args).fetchall()
+                con.close()
+            except sqlite3.Error:
+                pass
+    return rows
+
+def codex_path(sid):
+    for (path,) in codex_threads("select rollout_path from threads where id = ?", (sid,)):
+        if path and os.path.exists(path):
+            return path
+    return None
+
+def codex_find(r):
+    # The main agent's thread, not a helper's: helpers' threads start with herdr's <hc …> envelope.
+    since = int((r.get("since") or 0) / 1000) - 600
+    rows = codex_threads("select id, rollout_path, updated_at from threads where cwd = ? and updated_at >= ? "
+                         "and first_user_message not like '<hc %' order by updated_at desc limit 20", (r.get("cwd") or "", since))
+    for sid, path, _ in sorted(rows, key=lambda x: -x[2]):
+        if path and mentions(path, r["dir"]):
+            return sid
+    return None
+
+CODEX_RUNNING = re.compile(r"^Process running with session ID (\d+)", re.M)
+CODEX_EXITED = re.compile(r"^Process exited with code (-?\d+)", re.M)
+CODEX_UNKNOWN = re.compile(r"write_stdin failed: Unknown process id (\d+)")
+WAIT_RE = re.compile(r"hd_dispatch\.py[\"']?\s+wait\b")
+HEREDOC = re.compile(r"<<-?\s*['\"]?\w+['\"]?\s*$")
+
+def codex_body(o):
+    i = o.find("\nOutput:\n")
+    return o[i + 9:] if i >= 0 else ""
+
+def command_title(cmd):
+    """A command's first line; for a heredoc (python3 - <<'PY'), with its first line that says something."""
+    lines = [l.strip() for l in (cmd or "").strip().splitlines() if l.strip()]
+    if not lines:
+        return "command"
+    first = lines[0]
+    if HEREDOC.search(first):
+        said = next((l for l in lines[1:] if not re.match(r"^(import|from)\s|^#", l)), None)
+        if said:
+            first = "%s · %s" % (first, said)
+    return first[:120]
+
+def codex_scan(path, sid):
+    """A rollout's background processes, reading only what was appended since last time."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return logs.get(path, {}).get("tasks", {})
+    e = logs.get(path)
+    if not isinstance(e, dict) or size < e.get("off", 0) or "procs" not in e:
+        e = {"off": 0, "tasks": {}, "pending": {}, "procs": {}}
+    tasks, pending, procs = e["tasks"], e["pending"], e["procs"]
+    if size > e["off"]:
+        with open(path, "rb") as f:
+            f.seek(e["off"])
+            data = f.read()
+        end = data.rfind(b"\n")
+        if end >= 0:
+            for line in data[:end].splitlines():
+                if b'"function_call' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                p = ev.get("payload") or {}
+                ts = epoch_ms(ev.get("timestamp"))
+                if p.get("type") == "function_call":
+                    try:
+                        a = json.loads(p.get("arguments") or "{}")
+                    except ValueError:
+                        a = {}
+                    a = a if isinstance(a, dict) else {}
+                    poll = a.get("session_id") if p.get("name") == "write_stdin" else None
+                    # Any other call while a process runs: the agent went on with it in the background.
+                    for t in tasks.values():
+                        if t["status"] == "running" and t["proc"] != poll:
+                            t["bg"] = True
+                    if p.get("name") == "exec_command":
+                        cmd = a.get("cmd") or ""
+                        pending[p.get("call_id")] = {"use": p.get("call_id"), "kind": "wait" if WAIT_RE.search(cmd) else "shell",
+                                                     "title": command_title(cmd), "command": cmd[:2000] or None, "started": ts}
+                    elif poll is not None:
+                        pending[p.get("call_id")] = {"poll": poll, "kill": "\x03" in str(a.get("chars") or "")}
+                elif p.get("type") == "function_call_output":
+                    t = pending.pop(p.get("call_id"), None)
+                    if not t:
+                        continue
+                    o = p.get("output")
+                    o = o if isinstance(o, str) else json.dumps(o, ensure_ascii=False)
+                    if "poll" in t:
+                        s = tasks.get(procs.get(str(t["poll"])))
+                        if not s or s["status"] != "running":
+                            continue
+                        s["log"] = (s["log"] + codex_body(o))[-6000:]
+                        m = CODEX_EXITED.search(o)
+                        if m:
+                            code = int(m.group(1))
+                            s.update({"status": "killed" if t["kill"] else "completed" if code == 0 else "failed", "ended": ts,
+                                      "summary": None if code == 0 else "exit code %d" % code})
+                        elif CODEX_UNKNOWN.search(o):
+                            s.update({"status": "lost", "ended": ts})
+                        if s["status"] != "running" and not s["bg"]:
+                            tasks.pop(s["use"], None)   # a slow foreground command, not background work
+                        continue
+                    m = CODEX_RUNNING.search(o)
+                    if not m:
+                        continue
+                    t.update({"id": "codex-" + str(t["use"]), "proc": int(m.group(1)), "status": "running", "ended": None,
+                              "summary": None, "event": None, "output": None, "log": codex_body(o)[-6000:], "bg": t["kind"] == "wait"})
+                    tasks[t["use"]] = t
+                    procs[str(t["proc"])] = t["use"]
+            # Keep the newest 120 tasks (and their process ids).
+            if len(tasks) > 120:
+                for k in sorted(tasks, key=lambda k: tasks[k].get("started") or 0)[:-120]:
+                    tasks.pop(k)
+                live = set(tasks)
+                for k in [k for k, v in procs.items() if v not in live]:
+                    procs.pop(k)
+            e["off"] += end + 1
+    logs[path] = e
+    return {k: t for k, t in tasks.items() if t.get("bg")}
+
+# ---- one shape for every main agent ----
+
+ADAPTERS = {
+    "claude": {"path": claude_path, "find": claude_find, "scan": claude_scan},
+    "codex": {"path": codex_path, "find": codex_find, "scan": codex_scan},
+}
+
+def agent_key(name):
+    """ADAPTERS' key for a program name (claude-code → claude), else None."""
+    name = str(name or "").lower()
+    return next((k for k in ADAPTERS if k in name), None)
+
+def find(agent, r):
+    """The session hd_dispatch.py did not record, remembered once found; a miss is retried after 2 minutes."""
+    key = "%s|%s" % (agent, r["dir"])
+    if resolved.get(key):
+        return resolved[key]
+    if now_s - (missed.get(key) or 0) < 120:
+        return None
+    sid = ADAPTERS[agent]["find"](r)
     if sid:
-        since[sid] = min(since.get(sid, r.get("since") or 0), r.get("since") or 0)
-for sid, start in since.items():
-    path = transcript(sid)
+        resolved[key] = sid
+        missed.pop(key, None)
+    else:
+        missed[key] = now_s
+    return sid
+
+packages = cache.get("packages") if isinstance(cache.get("packages"), dict) and fresh else {}
+
+def package_mains(d):
+    """[(agent, session)] of the main agents an adopted run's handoff packages name. Each is read once."""
+    found = []
+    for p in sorted(glob.glob(os.path.join(d, "handoff", "*", "handoff.json"))):
+        if p not in packages:
+            try:
+                frm = json.load(open(p)).get("from") or {}
+            except Exception:
+                frm = {}
+            packages[p] = [agent_key(frm.get("agent")), frm.get("session")]
+        agent, sid = packages[p]
+        if agent and sid and (agent, sid) not in found:
+            found.append((agent, sid))
+    return found
+
+out = {"runs": {}, "sessions": {}}
+want = {}  # session -> [agent, earliest run start]
+
+def add(d, agent, sid, start):
+    if not sid:
+        return
+    if sid not in out["runs"][d]:
+        out["runs"][d].append(sid)
+    w = want.setdefault(sid, [agent, start])
+    w[1] = min(w[1], start)
+
+for r in req.get("runs", []):
+    out["runs"].setdefault(r["dir"], [])
+    agent, start = agent_key(r.get("agent")), r.get("since") or 0
+    if agent:
+        add(r["dir"], agent, r.get("session") or find(agent, r), start)
+    if r.get("adopted"):
+        for a, sid in package_mains(r["dir"]):
+            add(r["dir"], a, sid, start)
+for sid, (agent, start) in want.items():
+    path = ADAPTERS[agent]["path"](sid)
     if not path:
         continue
-    tasks = sorted(scan(path, sid).values(), key=lambda t: t.get("started") or 0)
-    tasks = [dict(t) for t in tasks if (t.get("started") or 0) >= start - 600000][-60:]
+    tasks = sorted(ADAPTERS[agent]["scan"](path, sid).values(), key=lambda t: t.get("started") or 0)
+    tasks = [dict(t, agent=agent) for t in tasks if (t.get("started") or 0) >= start - 600000][-60:]
     for t in tasks:
-        t["tail"] = tail(t["output"]) if t.get("output") and t["kind"] in ("shell", "monitor") else []
+        t.pop("bg", None); t.pop("proc", None)
+        if t["kind"] in ("shell", "monitor"):
+            t["tail"] = tail(t["output"]) if t.get("output") else tail_text(t.get("log"))
+        else:
+            t["tail"] = []
         end = ending(t["output"]) if t["status"] == "running" and t["kind"] in ("shell", "wait") and t.get("output") else None
         if end:
             t["status"], t["ended"] = end
@@ -258,20 +473,25 @@ try:
     os.makedirs(cache_dir, exist_ok=True)
     tmp = cache_path + ".%d" % os.getpid()
     with open(tmp, "w") as f:
-        json.dump({"v": 3, "resolved": resolved, "logs": dict(keep)}, f)
+        json.dump({"v": 4, "resolved": resolved, "missed": missed, "logs": dict(keep),
+                   "packages": {p: s for p, s in packages.items() if os.path.exists(p)}}, f)
     os.replace(tmp, cache_path)
 except OSError:
     pass
 print(json.dumps(out))
 `;
 
-/** The script's request: each run's dispatching Claude Code session, where to look for it, and when it began. */
+/**
+ * The script's request: one entry per main agent of each run (model.js runMains), with where to look
+ * for a session not recorded and when the run began. A program without an adapter is skipped by the script.
+ */
 export function bgRequest(runs) {
   return {
-    // A run whose main agents were all something else (Codex, …) has no Claude transcript to look for.
-    runs: runs.filter((r) => r.sessions?.length || r.session || !r.mainAgent || /claude/i.test(r.mainAgent))
-      .flatMap((r) => (r.sessions?.length ? r.sessions : [r.session || null])
-      .map((session) => ({ dir: r.dir, session, cwd: r.claudeCwd || r.repo || null, since: r.startedAt || 0 }))),
+    runs: runs.flatMap((r) => {
+      const mains = r.mains?.length ? r.mains : (r.adopted ? [{ agent: null, session: null }] : []);
+      return mains.map((m, i) => ({ dir: r.dir, agent: m.agent, session: m.session, cwd: r.claudeCwd || r.repo || null,
+        since: r.startedAt || 0, adopted: Boolean(r.adopted) && i === 0 }));
+    }),
   };
 }
 
@@ -281,14 +501,16 @@ export const BG_ENDED_KEPT = 3; // tasks shown at first, running ones included
 export const BG_MORE = 5;       // each "earlier" click shows this many more
 
 /**
- * Each run's tasks: a task belongs to the latest run of the same session that started before it
- * (less BG_GRACE). A run's sessions are all its main agents' (`sessions`), else the one the script
- * found for it. → { dir: [task] }.
+ * Each run's tasks: a task whose command names one of its session's run folders (hd_dispatch.py
+ * wait --run …) belongs to that run; any other to the latest run of the session that started before
+ * it (less BG_GRACE). A run's sessions are the ones the script gave for it (`found`: recorded, found or
+ * named by a handoff package), else its recorded ones. → { dir: [task] }.
  */
-export function assignTasks(runs, resolved, sessions) {
+export function assignTasks(runs, found, sessions) {
   const out = {}, bySession = new Map();
   for (const r of runs) {
-    for (const sid of r.sessions?.length ? r.sessions : [resolved?.[r.dir]]) {
+    const own = found?.[r.dir] ?? (r.mains ?? []).map((m) => m.session);
+    for (const sid of new Set(own)) {
       if (!sid) continue;
       if (!bySession.has(sid)) bySession.set(sid, []);
       bySession.get(sid).push(r);
@@ -297,7 +519,9 @@ export function assignTasks(runs, resolved, sessions) {
   for (const [sid, list] of bySession) {
     list.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
     for (const t of sessions?.[sid] ?? []) {
-      const owner = [...list].reverse().find((r) => (t.started || 0) >= (r.startedAt || 0) - BG_GRACE);
+      const cmd = t.command ?? "";
+      const named = list.filter((r) => r.dir && cmd.includes(r.dir)).sort((a, b) => b.dir.length - a.dir.length)[0];
+      const owner = named ?? [...list].reverse().find((r) => (t.started || 0) >= (r.startedAt || 0) - BG_GRACE);
       if (owner) (out[owner.dir] ??= []).push(t);
     }
   }
@@ -310,8 +534,8 @@ export function assignTasks(runs, resolved, sessions) {
  * `waiting`: hd_dispatch.py wait is running (the helper rows already say what it waits on). With
  * the dispatching Claude gone, a task that never reported its end is "lost".
  */
-export function bgView(tasks, claudeLive, more = 0) {
-  const list = (tasks ?? []).map((t) => (t.status === "running" && !claudeLive ? { ...t, status: "lost" } : t));
+export function bgView(tasks, mainLive, more = 0) {
+  const list = (tasks ?? []).map((t) => (t.status === "running" && !mainLive ? { ...t, status: "lost" } : t));
   const waiting = list.some((t) => t.kind === "wait" && t.status === "running");
   const shown = list.filter((t) => t.kind !== "wait");
   const running = shown.filter((t) => t.status === "running");

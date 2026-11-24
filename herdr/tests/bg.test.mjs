@@ -39,13 +39,13 @@ function fixture() {
 }
 
 const bg = (home, req) => JSON.parse(execFileSync("python3", ["-I", "-c", BG_PY, JSON.stringify(req)], {
-  encoding: "utf8", env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: "", CC_HD_HOME: join(home, "hd") },
+  encoding: "utf8", env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: "", CODEX_HOME: "", CC_HD_HOME: join(home, "hd") },
 }));
 
 test("bg script: finds the session by the run folder and reads its tasks", () => {
   const { home, repo, run } = fixture();
-  const o = bg(home, bgRequest([{ dir: run, repo, startedAt: Date.parse(ts("00:00")) }]));
-  assert.equal(o.resolved[run], SID);
+  const o = bg(home, bgRequest([{ dir: run, repo, startedAt: Date.parse(ts("00:00")), mains: [{ agent: "claude", session: null }] }]));
+  assert.deepEqual(o.runs[run], [SID]);
   const tasks = o.sessions[SID];
   assert.deepEqual(tasks.map((t) => [t.id, t.kind, t.status]),
     [["b1", "shell", "completed"], ["b2", "wait", "running"], ["m1", "monitor", "running"], ["a1", "agent", "running"]]);
@@ -58,7 +58,7 @@ test("bg script: finds the session by the run folder and reads its tasks", () =>
 
 test("bg script: a recorded session needs no search; appended notifications end tasks", () => {
   const { home, run, log } = fixture();
-  const req = { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] };
+  const req = { runs: [{ dir: run, agent: "claude", session: SID, cwd: null, since: 0 }] };
   bg(home, req);
   appendFileSync(log, note("00:09", "<task-id>a1</task-id>\n<status>failed</status>\n<summary>Agent \"Draft docs\" failed: boom</summary>"));
   const a = bg(home, req).sessions[SID].find((t) => t.id === "a1");
@@ -69,8 +69,17 @@ test("bg script: a recorded session needs no search; appended notifications end 
 test("assignTasks: each task goes to the latest run of its session that started before it", () => {
   const runs = [{ dir: "A", startedAt: 1_000_000 }, { dir: "B", startedAt: 5_000_000 }, { dir: "C", startedAt: 1_000_000 }];
   const sessions = { s: [{ id: "early", started: 100 }, { id: "a", started: 2_000_000 }, { id: "b", started: 4_900_000 }, { id: "c", started: 6_000_000 }] };
-  const got = assignTasks(runs, { A: "s", B: "s" }, sessions);
+  const got = assignTasks(runs, { A: ["s"], B: ["s"] }, sessions);
   assert.deepEqual(Object.fromEntries(Object.entries(got).map(([k, v]) => [k, v.map((t) => t.id)])), { A: ["a"], B: ["b", "c"] });
+});
+
+test("assignTasks: a task whose command names a run folder goes to that run", () => {
+  const runs = [{ dir: "/r/.cc-dispatch/old", startedAt: 1000 }, { dir: "/r/.cc-dispatch/old-2", startedAt: 5000 }];
+  const sessions = { s: [{ id: "w", started: 9000, command: "hd_dispatch.py wait --run /r/.cc-dispatch/old --timeout 600" },
+    { id: "w2", started: 9000, command: "hd_dispatch.py wait --run /r/.cc-dispatch/old-2" }, { id: "x", started: 9000, command: "ls" }] };
+  const got = assignTasks(runs, { [runs[0].dir]: ["s"], [runs[1].dir]: ["s"] }, sessions);
+  assert.deepEqual(got[runs[0].dir].map((t) => t.id), ["w"]);
+  assert.deepEqual(got[runs[1].dir].map((t) => t.id), ["w2", "x"]);
 });
 
 test("bgView: wait hidden but noted, running first, a few ended, lost when Claude is gone", () => {
@@ -148,7 +157,7 @@ test("bg script: a foreground shell moved to the background after its timeout is
     use("00:10", "u6", "Bash", { command: "npm test", description: "Full tests" }) +
     result("00:20", "u6", "build=0\nCommand did not complete within its 600s timeout and was moved to the background (ID: b6). Output is being written to: /x/b6.output.",
       { stdout: "build=0", backgroundTaskId: "b6", timedOutAfterMs: 600000 }));
-  const t = bg(home, { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b6");
+  const t = bg(home, { runs: [{ dir: run, agent: "claude", session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b6");
   assert.deepEqual([t.kind, t.status, t.title, t.output, t.started], ["shell", "running", "Full tests", "/x/b6.output", Date.parse(ts("00:10"))]);
 });
 
@@ -161,7 +170,7 @@ test("bg script: a TaskStop ends its task as killed; a failed stop changes nothi
     JSON.stringify({ type: "user", timestamp: ts("00:11"), message: { content: [{ type: "tool_result", tool_use_id: "u7", content: "No task found", is_error: true }] } }) + "\n" +
     use("00:12", "u8", "TaskStop", { task_id: "b6" }) +
     result("00:12", "u8", '{"message":"Successfully stopped task: b6"}', { message: "Successfully stopped task: b6" }));
-  const tasks = bg(home, { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] }).sessions[SID];
+  const tasks = bg(home, { runs: [{ dir: run, agent: "claude", session: SID, cwd: null, since: 0 }] }).sessions[SID];
   const b6 = tasks.find((x) => x.id === "b6"), m1 = tasks.find((x) => x.id === "m1");
   assert.deepEqual([b6.status, b6.ended], ["killed", Date.parse(ts("00:12"))]);
   assert.equal(m1.status, "running");
@@ -174,24 +183,115 @@ test("bg script: a running shell whose output file says it ended is ended, and t
   appendFileSync(log,
     use("00:10", "u9", "Bash", { command: "npm test", description: "Tests", run_in_background: true }) +
     result("00:10", "u9", `Command running in background with ID: b9. Output is being written to: ${out}.`, { backgroundTaskId: "b9" }));
-  const t = bg(home, { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b9");
+  const t = bg(home, { runs: [{ dir: run, agent: "claude", session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b9");
   assert.equal(t.status, "killed");
   assert.ok(t.ended > 0);
   assert.deepEqual(t.tail, ["build=0"]);
   writeFileSync(out, "ok\n[exited with code 1]\n");
-  assert.equal(bg(home, { runs: [{ dir: run, session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b9").status, "failed");
+  assert.equal(bg(home, { runs: [{ dir: run, agent: "claude", session: SID, cwd: null, since: 0 }] }).sessions[SID].find((x) => x.id === "b9").status, "failed");
 });
 
 test("a run read by every main agent session that dispatched to it", () => {
-  const r = { dir: "/r", sessions: ["s2", "s1"], startedAt: 1000, repo: "/repo" };
-  assert.deepEqual(bgRequest([r]).runs.map((x) => x.session), ["s2", "s1"]);
-  const out = assignTasks([r], { "/r": "s1" }, { s1: [{ id: "a", started: 2000 }], s2: [{ id: "b", started: 3000 }] });
+  const r = { dir: "/r", mains: [{ agent: "codex", session: "s2" }, { agent: "claude", session: "s1" }], startedAt: 1000, repo: "/repo" };
+  assert.deepEqual(bgRequest([r]).runs.map((x) => [x.agent, x.session]), [["codex", "s2"], ["claude", "s1"]]);
+  const out = assignTasks([r], { "/r": ["s1", "s2"] }, { s1: [{ id: "a", started: 2000 }], s2: [{ id: "b", started: 3000 }] });
   assert.deepEqual(out["/r"].map((t) => t.id).sort(), ["a", "b"]);
-  assert.deepEqual(bgRequest([{ dir: "/x", startedAt: 0 }]).runs.map((x) => x.session), [null]);
+  // the script not heard from yet: the recorded sessions
+  assert.deepEqual(assignTasks([r], {}, { s2: [{ id: "b", started: 3000 }] })["/r"].map((t) => t.id), ["b"]);
 });
 
-test("bgRequest skips runs whose main agents were all something else than Claude Code", () => {
-  const got = bgRequest([{ dir: "/a", mainAgent: "codex", sessions: [] }, { dir: "/b", mainAgent: null, sessions: [] },
-    { dir: "/c", mainAgent: "codex", sessions: ["s1"] }]).runs.map((x) => x.dir);
-  assert.deepEqual(got, ["/b", "/c"]);
+test("bgRequest: one entry per main agent; an adopted run with none known still asks for its handoff packages", () => {
+  const got = bgRequest([{ dir: "/a", mains: [] }, { dir: "/b", mains: [], adopted: true },
+    { dir: "/c", mains: [{ agent: "codex", session: null }, { agent: "claude", session: "s1" }], adopted: true }]).runs;
+  assert.deepEqual(got.map((x) => [x.dir, x.agent, x.adopted]), [["/b", null, true], ["/c", "codex", true], ["/c", "claude", false]]);
+});
+
+test("a run a Codex main agent took over still shows its earlier Claude Code main agent's tasks", () => {
+  const { home, run } = fixture();
+  // adopted before meta.json kept earlier main agents: the handoff package names the Claude session
+  mkdirSync(join(run, "handoff", "1"), { recursive: true });
+  writeFileSync(join(run, "handoff", "1", "handoff.json"), JSON.stringify({ from: { terminal: "t1", agent: "claude", session: SID } }));
+  const r = { dir: run, mains: [{ agent: "codex", session: null }], adopted: true, startedAt: 0 };
+  const o = bg(home, bgRequest([r]));
+  assert.deepEqual(o.runs[run], [SID]);
+  assert.ok(assignTasks([r], o.runs, o.sessions)[run].length > 0);
+});
+
+// ---- codex adapter ----
+
+const cts = (s) => `2026-11-08T04:${s}:00.000Z`;
+const ccall = (t, id, name, args) => JSON.stringify({ timestamp: cts(t), type: "response_item",
+  payload: { type: "function_call", name, arguments: JSON.stringify(args), call_id: id } }) + "\n";
+const cout = (t, id, output) => JSON.stringify({ timestamp: cts(t), type: "response_item",
+  payload: { type: "function_call_output", call_id: id, output } }) + "\n";
+const running = (n, out = "") => `Chunk ID: x\nWall time: 10.0 seconds\nProcess running with session ID ${n}\nOriginal token count: 1\nOutput:\n${out}`;
+const exited = (code, out = "") => `Chunk ID: y\nWall time: 1.0 seconds\nProcess exited with code ${code}\nOriginal token count: 1\nOutput:\n${out}`;
+const TH = "019a0000-0000-7000-8000-000000000001";
+
+// A Codex home: the main agent's thread (in the repo, naming the run) and a helper's (<hc …>), in state_5.sqlite.
+function codexFixture() {
+  const home = mkdtempSync(join(tmpdir(), "cc-bg-codex-"));
+  const repo = join(home, "repo"), run = join(repo, ".cc-dispatch/dev-y"), chome = join(home, ".codex-api");
+  mkdirSync(join(chome, "sessions"), { recursive: true });
+  mkdirSync(run, { recursive: true });
+  const log = join(chome, "sessions", `rollout-${TH}.jsonl`), helper = join(chome, "sessions", "rollout-helper.jsonl");
+  writeFileSync(helper, ccall("00", "h1", "exec_command", { cmd: `echo ${run}` }));
+  writeFileSync(log,
+    ccall("00", "c1", "exec_command", { cmd: `python3 hd_dispatch.py run --run ${run}` }) + cout("00", "c1", exited(0, "ok")) +
+    // a build the agent goes on beside: background
+    ccall("01", "c2", "exec_command", { cmd: "npm run build" }) + cout("01", "c2", running(7, "step 1\n")) +
+    ccall("02", "c3", "exec_command", { cmd: "git status" }) + cout("02", "c3", exited(0, "clean")) +
+    ccall("03", "c4", "write_stdin", { session_id: 7, chars: "", yield_time_ms: 1000 }) + cout("03", "c4", exited(0, "step 2\ndone\n")) +
+    // a slow test run only polled until it ended: a foreground command, left out
+    ccall("04", "c5", "exec_command", { cmd: "npm test" }) + cout("04", "c5", running(8)) +
+    ccall("05", "c6", "write_stdin", { session_id: 8, chars: "", yield_time_ms: 30000 }) + cout("05", "c6", exited(1, "1 failing")) +
+    // the hd wait, and a heredoc that fails in the background
+    ccall("06", "c7", "exec_command", { cmd: `python3 hd_dispatch.py wait --run ${run}` }) + cout("06", "c7", running(9)) +
+    ccall("07", "c8", "exec_command", { cmd: "python3 - <<'PY'\nimport json\nprint(check())\nPY" }) + cout("07", "c8", running(10, "checking\n")) +
+    ccall("08", "c9", "exec_command", { cmd: "ls" }) + cout("08", "c9", exited(0, "a")) +
+    ccall("09", "c10", "write_stdin", { session_id: 10, chars: "" }) + cout("09", "c10", exited(2, "boom\n")) +
+    // a server stopped with ^C
+    ccall("10", "c11", "exec_command", { cmd: "npm run dev" }) + cout("10", "c11", running(11, "listening\n")) +
+    ccall("11", "c12", "update_plan", { plan: [] }) + cout("11", "c12", "ok") +
+    ccall("12", "c13", "write_stdin", { session_id: 11, chars: "\u0003" }) + cout("12", "c13", exited(130)));
+  const db = join(chome, "state_5.sqlite"), at = Math.floor(Date.parse(cts("12")) / 1000);
+  execFileSync("python3", ["-I", "-c", `import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table threads (id text, rollout_path text, cwd text, updated_at integer, first_user_message text)")
+con.execute("insert into threads values (?,?,?,?,?)", ("${TH}", sys.argv[2], sys.argv[4], ${at}, "fix the build"))
+con.execute("insert into threads values (?,?,?,?,?)", ("helper", sys.argv[3], sys.argv[4], ${at + 5}, "<hc task>"))
+con.commit()`, db, log, helper, repo]);
+  return { home, repo, run, log };
+}
+
+test("codex adapter: finds the main agent's thread and reads the processes it went on beside", () => {
+  const { home, repo, run } = codexFixture();
+  const o = bg(home, bgRequest([{ dir: run, repo, startedAt: Date.parse(cts("00")), mains: [{ agent: "codex", session: null }] }]));
+  assert.deepEqual(o.runs[run], [TH]);
+  const tasks = o.sessions[TH];
+  assert.deepEqual(tasks.map((t) => [t.id, t.agent, t.kind, t.status, t.summary]), [
+    ["codex-c2", "codex", "shell", "completed", null],
+    ["codex-c7", "codex", "wait", "running", null],
+    ["codex-c8", "codex", "shell", "failed", "exit code 2"],
+    ["codex-c11", "codex", "shell", "killed", "exit code 130"],
+  ]);
+  const [build, , heredoc] = tasks;
+  assert.deepEqual([build.title, build.started, build.ended, build.output], ["npm run build", Date.parse(cts("01")), Date.parse(cts("03")), null]);
+  assert.deepEqual(build.tail, ["step 2", "done"]);
+  assert.equal(build.log, "step 1\nstep 2\ndone\n");
+  assert.equal(heredoc.title, "python3 - <<'PY' · print(check())");
+});
+
+test("codex adapter: a recorded thread needs no search; appended polls end its tasks", () => {
+  const { home, run, log } = codexFixture();
+  const req = { runs: [{ dir: run, agent: "codex", session: TH, cwd: null, since: 0 }] };
+  assert.equal(bg(home, req).sessions[TH].find((t) => t.id === "codex-c7").status, "running");
+  appendFileSync(log, ccall("20", "c20", "write_stdin", { session_id: 9, chars: "" }) + cout("20", "c20", "write_stdin failed: Unknown process id 9"));
+  const w = bg(home, req).sessions[TH].find((t) => t.id === "codex-c7");
+  assert.deepEqual([w.status, w.ended], ["lost", Date.parse(cts("20"))]);
+});
+
+test("bg script: a program without an adapter is skipped", () => {
+  const { home, run } = fixture();
+  assert.deepEqual(bg(home, { runs: [{ dir: run, agent: "aider", session: "x", cwd: null, since: 0 }] }), { runs: { [run]: [] }, sessions: {} });
 });

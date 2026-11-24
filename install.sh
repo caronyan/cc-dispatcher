@@ -28,6 +28,15 @@ for home in ${CODEX_SKILLS_HOMES:-"$HOME/.codex" "$HOME/.codex-api"}; do
     link "${d%/}" "$home/skills/$(basename "$d")"
   done
 done
+# Antigravity (agy) as a main agent loads global skills from ~/.gemini/config/skills (when agy or ~/.gemini is there).
+if [ -n "${AGY_SKILLS_DIR:-}" ] || [ -d "$HOME/.gemini" ] || command -v agy >/dev/null 2>&1; then
+  AGY_SKILLS="${AGY_SKILLS_DIR:-$HOME/.gemini/config/skills}"
+  mkdir -p "$AGY_SKILLS"
+  for d in "$ROOT"/skills/cc-herdr-dispatch-*/; do
+    [ -d "$d" ] || continue
+    link "${d%/}" "$AGY_SKILLS/$(basename "$d")"
+  done
+fi
 for f in "$ROOT"/shared/templates/cc-hd-*.md; do
   link "$f" "$TEMPLATES/$(basename "$f")"
 done

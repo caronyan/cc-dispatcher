@@ -20,7 +20,8 @@
 // stdout:  {"calls": {key: {tokens, model, commands, files, first, last}},
 //           "runs": {dir: {status: {card: status}, cards: {card: {status, title, note, result, parked_why, by,
 //                       depends_on}}, checks: n}},
-//           "finished": {dir: epoch s}}   runs whose state.json the main agent marked "finished"
+//           "finished": {dir: epoch s},   runs whose state.json the main agent marked "finished"
+//           "pending": {dir: {key: text}}} an older run's state.json pending_decisions (model.js pendingItems)
 // A dev run's cards come from its state.json tasks. Review calls (<card>-check-r<k>, "check": true) and the
 // survey are not cards to merge: they are counted in checks and left out, so they never sit in a stage.
 export const STATS_PY = String.raw`
@@ -209,7 +210,7 @@ def scan_claude(path):
     logs[path] = e
     return e
 
-out = {"calls": {}, "runs": {}, "finished": {}}
+out = {"calls": {}, "runs": {}, "finished": {}, "pending": {}}
 snaps = {c["key"]: snapshot(c["events"]) for c in req.get("calls", []) if c.get("events")}
 known = {c["needle"]: [p for p in (snaps.get(c["key"]) or {}).get("rollouts") or [] if os.path.exists(p)] for c in req.get("calls", [])}
 req["calls_to_find"] = [c for c in req.get("calls", []) if not known.get(c["needle"])]
@@ -249,6 +250,9 @@ for d in req.get("runs", []):
         state = {}
     if state.get("finished"):  # the main agent marked the run done (herdr.md)
         out["finished"][d] = state["finished"]
+    pend = state.get("pending_decisions")
+    if isinstance(pend, dict) and pend:
+        out["pending"][d] = {str(k): v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for k, v in pend.items()}
     tasks = state.get("tasks")
     if isinstance(tasks, dict) and tasks:
         cards, checks = {}, 0

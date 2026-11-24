@@ -4,13 +4,14 @@
 // Herdr's Agents list already shows live status and the sub-agent tree; this panel shows what only
 // the skills know. Roles (props.role): the panel (default); "toggle", the tab-bar button that
 // shows or hides the layout's "cc-dispatch-panel" node; dialogs "text", "handoff", "handover", "cleanup",
-// "control" (confirms a run's pause / resume / stop), "bgtask" (a running background task, live).
+// "control" (confirms a run's pause / resume / stop), "bgtask" (a running background task, live), "decide"
+// (answer one item the main agent waits on you for), "delete" (confirms deleting an archived run).
 // Only this file imports Herdr: model.js and loader.js are tested under node.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, TextView } from "gpui-base";
+import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView } from "./model.js";
-import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun } from "./loader.js";
+import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords } from "./model.js";
+import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
 
@@ -215,12 +216,15 @@ function toggle() {
   const t = theme(), node = find(layout(), PANEL), on = Boolean(node) && !node.hidden;
   const live = (terminals() ?? []).filter((x) => x?.labels?.["cc.run"] && x.state === "live");
   const busy = live.filter((x) => (typeof x.status === "string" ? x.status : x.status?.state) === "working").length;
-  return h_flex().size_full().pr(10).items_center().justify_end().bg(t.chrome).border_b(1).border_color(t.border)
-    .child(h_flex().id("toggle-cc-dispatch").h(26).px(8).gap(6).flex_none().items_center().rounded(6)
+  // Styled like the tab bar's Files / Changes buttons (tabs mod panelButton). It starts at the block's left
+  // edge, right after the tabs block's own 10px padding, and the block is wide enough that the rounded
+  // corners are never clipped.
+  return h_flex().size_full().items_center().justify_start().bg(t.chrome).border_b(1).border_color(t.border)
+    .child(h_flex().id("toggle-cc-dispatch").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
       .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(() => run("layout.toggle", { id: PANEL }))
-      .child(mark(15, on ? t.foreground : t.muted)).child("dispatch")
+      .child(mark(14, on ? t.foreground : t.muted)).child("Dispatch")
       .when(live.length > 0, (el) => el.child(h_flex().h(16).px(5).items_center().rounded(8).bg(busy ? t.working : t.selected)
         .text_size(11).text_color(busy ? t.background : t.muted).child(String(busy || live.length)))));
 }
@@ -245,11 +249,29 @@ export default class Dispatch extends View {
       cx.timer.every(LIVE_POLL, load);
       return;
     }
+    if (this.role === "decide") {
+      const p = blockProps() ?? {};
+      this.choice = null; this.sending = false; this.failed = null; this.saved = false; this.extra = null;
+      this.answerBox = TextareaState.new({ rows: 3, placeholder: p.item?.kind === "question"
+        ? "Your answer (or pick a suggestion above and add to it)" : "A note for the main agent (optional): why, or what to watch" });
+      this.answerBox.on("change", (_e, cx) => cx.notify());
+      this.answerBox.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+      this.answerBox.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+      // The card's helper report: its open questions add to the context.
+      if (p.reportPath) cx.spawn(async (cx) => {
+        const files = io(p.on ?? null);
+        const text = (await files.readText(p.reportPath)) ?? (p.reportBackup ? await files.readText(p.reportBackup) : null);
+        const v = text ? (() => { try { return JSON.parse(text); } catch { return null; } })() : null;
+        const qs = Array.isArray(v?.open_questions) ? v.open_questions.filter((x) => typeof x === "string" && x.trim()) : [];
+        if (qs.length) { this.extra = qs; cx.notify(); }
+      });
+      return;
+    }
     if (this.role !== "panel") return;
     this.runs = []; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.liveKey = null;
     this.open = null; this.fold = new Map(); this.groupFold = new Map(); this.bgMore = new Map(); this.showOld = false; this.showArchived = false; this.loading = false; this.token = 0; this.lastAgent = null;
-    this.stats = { calls: {}, runs: {}, finished: {} }; this.statsFor = new Set(); this.statsBusy = false;
-    this.bg = { resolved: {}, sessions: {} };
+    this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.statsBusy = false;
+    this.bg = { runs: {}, sessions: {} };
     this.quota = {}; // agent -> { q, at, busy }
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
   }
@@ -310,9 +332,10 @@ export default class Dispatch extends View {
         const b = await loadBg(files, want);
         if (token !== this.token) return;
         this.statsError = s.error ? `stats: ${s.error}` : b.error ? `tasks: ${b.error}` : null;
-        if (!b.error) { Object.assign(this.bg.resolved, b.resolved); Object.assign(this.bg.sessions, b.sessions); }
+        if (!b.error) { Object.assign(this.bg.runs, b.runs); Object.assign(this.bg.sessions, b.sessions); }
         if (s.error) return;
         Object.assign(this.stats.calls, s.calls); Object.assign(this.stats.runs, s.runs); Object.assign(this.stats.finished, s.finished ?? {});
+        for (const r of want) this.stats.pending[r.dir] = s.pending?.[r.dir] ?? {};
         for (const r of want) if (!r.live) this.statsFor.add(r.dir);
       } finally {
         this.statsBusy = false;
@@ -453,8 +476,8 @@ export default class Dispatch extends View {
     const folded = this.fold.has(r.dir) ? this.fold.get(r.dir) : !r.live;
     const other = this.repo && r.repo !== this.repo;
     const cards = this.stats.runs[r.dir], stages = r.calls.map((c) => callStage(c, cards?.status?.[c.call]));
-    const claudeLive = Boolean(r.parent) && (terminals() ?? []).some((x) => x.address === r.parent && x.state === "live");
-    const bg = bgView(this.tasksOf(r), claudeLive, this.bgMore.get(r.dir) ?? 0);
+    const mainLive = Boolean(r.parent) && (terminals() ?? []).some((x) => x.address === r.parent && x.state === "live");
+    const bg = bgView(this.tasksOf(r), mainLive, this.bgMore.get(r.dir) ?? 0);
     // One line: what the run is, then its pause / resume / stop as icons. Its stage counts are the
     // group headers below; its spend, the stats under the head.
     const head = h_flex().id(`run-${r.dir}`).h(36).flex_none().pl(10).pr(6).gap(8).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
@@ -475,6 +498,8 @@ export default class Dispatch extends View {
     if (ctl) card.child(ctl);
     const take = this.renderTakeover(t, r);
     if (take) card.child(take);
+    const asks = this.renderAsks(t, r);
+    if (asks) card.child(asks);
     if (!folded) {
       const totals = runTotals(r, this.stats.calls, this.stats.runs[r.dir]);
       if (totals.known || totals.cards) card.child(this.renderStats(t, r, totals));
@@ -574,7 +599,32 @@ export default class Dispatch extends View {
           later(cx, (cx) => this.refresh(cx));
         });
       })
-      .child(icon(op, 13, t.muted))];
+      .child(icon(op, 13, t.muted)),
+    ...(op === "unarchive" ? [this.deleteButton(t, r)] : [])];
+  }
+
+  // An archived run's Delete, beside Unarchive: a "delete" dialog to confirm, then hd_dispatch.py delete.
+  deleteButton(t, r) {
+    return h_flex().id(`delete-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Delete: remove the run and everything kept of it").on_mouse_down("left", stop)
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        const open = r.calls.filter((c) => c.state === "live").map((c) => c.name);
+        openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 500, height: 360,
+          props: { role: "delete", on: this.ctx?.on ?? null, run: { dir: r.dir, hd: r.hd, id: r.id }, helpers: r.calls.length, open } });
+      })
+      .child(icon("trash", 13, t.ansi1));
+  }
+
+  // Retire a run left handing off that no main agent will adopt: a "control" dialog with op retire.
+  confirmRetire(r) {
+    return (_e, cx) => {
+      cx.stop_propagation();
+      const open = r.calls.filter((c) => c.state === "live").map((c) => c.name);
+      const working = r.calls.filter((c) => c.state === "live" && c.status === "working").map((c) => c.name);
+      openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 500, height: 330,
+        props: { role: "control", op: "retire", on: this.ctx?.on ?? null, run: { dir: r.dir, hd: r.hd, id: r.id }, open, working } });
+    };
   }
 
   // Under the head (folded or not): the run's paused / stopping / stopped / handing-off line.
@@ -602,7 +652,8 @@ export default class Dispatch extends View {
             this.copied = r.dir; cx.notify();
             cx.timer.after(2000, (cx) => { if (this.copied === r.dir) { this.copied = null; cx.notify(); } });
           });
-        }, { color: t.accent })));
+        }, { color: t.accent }))
+        .child(action(`retire-${r.dir}`, "Retire", "archive", t, this.confirmRetire(r), { color: t.muted })));
   }
 
   // Under the head: a run whose main agent is gone and that is not done. Copy resume prompt puts the
@@ -622,9 +673,60 @@ export default class Dispatch extends View {
       }, { color: t.accent }));
   }
 
+  // The run's open items (model.js pendingItems), under its head whether folded or not: what the main agent
+  // waits on you for. One row each (decision or question, its options with the recommended one starred, the
+  // card it is about); a row opens the "decide" dialog. Answered ones stay, muted, until the main agent closes them.
+  itemsOf(r) {
+    return pendingItems(r, this.stats.runs[r.dir]?.cards ?? {}, this.stats.pending?.[r.dir] ?? {});
+  }
+
+  // The run's main agent, if its terminal runs an agent now: who an answer is sent to.
+  mainAgentOf(r) {
+    const term = r.control?.owner || r.parent;
+    return term ? (agents() ?? []).find((a) => a.address === term) ?? null : null;
+  }
+
+  openDecide(r, x) {
+    const to = this.mainAgentOf(r), call = x.card ? r.calls.find((c) => c.call === x.card) : null;
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 640, height: 600,
+      props: { role: "decide", on: this.ctx?.on ?? null, run: { dir: r.dir, id: r.id }, item: x,
+        to: to ? { address: to.address, name: to.program?.name ?? to.address } : null,
+        reportPath: call?.reportPath ?? null, reportBackup: call?.agentDir ? `${call.agentDir}/report-r${call.round}.json` : null } });
+  }
+
+  renderAsks(t, r) {
+    const items = this.itemsOf(r);
+    if (!items.length) return null;
+    const open = items.filter((x) => !x.answer).length, z = S();
+    const key = `asks|${r.dir}`, folded = this.groupFold.get(key) ?? false;
+    const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.background)
+      .child(h_flex().id(`asks-${r.dir}`).h(28).flex_none().pl(12).pr(10).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
+        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+        .child(icon("decide", 11, open ? t.ansi3 : t.muted))
+        .child(div().flex_1().min_w(0).truncate().text_size(z.label).font_semibold().text_color(open ? t.ansi3 : t.muted)
+          .child(open ? "Needs you" : "Answered · waiting for the main agent"))
+        .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(open ? t.ansi3 : t.selected)
+          .text_size(z.label).text_color(open ? t.background : t.foreground).child(String(open || items.length))));
+    if (folded) return box;
+    box.children(items.map((x) => {
+      const done = Boolean(x.answer), color = done ? t.muted : t.foreground;
+      return v_flex().id(`item-${r.dir}|${x.id}`).flex_none().pl(28).pr(10).py(5).gap(2).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", stop).on_click(() => this.openDecide(r, x))
+        .child(h_flex().gap(7).items_center()
+          .child(done ? icon("check", 11, t.done) : icon(x.kind === "decision" ? "decide" : "question", 11, x.kind === "decision" ? t.ansi3 : t.accent))
+          .child(div().flex_1().min_w(0).truncate().text_size(z.small).text_color(color).child(x.title))
+          .when(Boolean(x.card), (el) => el.child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected)
+            .font_family(mono()).text_size(z.label - 1.5).text_color(t.muted).child(x.card)))
+          .when(Boolean(x.asked), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(ago(x.asked)))))
+        .child(div().pl(18).truncate().text_size(z.label).text_color(t.muted).child(itemLine(x)));
+    }));
+    return box;
+  }
+
   // The run's background tasks, all the main agent's: a lighter list between the spend and the helpers.
   tasksOf(r) {
-    const all = assignTasks(this.runs, this.bg.resolved, this.bg.sessions);
+    const all = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
     return all[r.dir] ?? [];
   }
 
@@ -637,11 +739,12 @@ export default class Dispatch extends View {
       const word = running ? age : task.status === "completed" ? `done · ${age}` : task.status;
       const sub = running ? (task.event || task.tail?.[task.tail.length - 1] || "") : (task.status === "completed" ? "" : bgSummary(task));
       return v_flex().id(`bg-${task.id}`).flex_none().pl(28).pr(10).py(4).gap(1)
-        .when(Boolean(task.output), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => running && task.kind !== "agent"
+        // An output file (Claude Code) opens live while running, else its end; a log (Codex) is shown as is.
+        .when(Boolean(task.output || task.log), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => running && task.kind !== "agent" && task.output
             ? openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 860, height: 620,
               props: { role: "bgtask", title: task.title, output: task.output, on, task: { started: task.started, command: task.command } } })
-            : this.showText(cx, `${task.title} · output`, () => loadOutput(io(on), task.output), "No output.",
+            : this.showText(cx, `${task.title} · output`, async () => (task.output ? await loadOutput(io(on), task.output) : null) ?? task.log ?? null, "No output.",
               (text) => `~~~~\n${text.replace(/\s+$/, "")}\n~~~~`)))
         .child(h_flex().min_w(0).gap(8).items_center()
           .child(running && task.kind !== "agent" ? icon("ring", 11, t.working).spin(1400) : icon(kindIcon[task.kind] ?? "terminal", 11, running ? t.working : t.muted))
@@ -741,7 +844,7 @@ export default class Dispatch extends View {
   renderActions(t, c) {
     const on = this.ctx?.on ?? null, live = c.state === "live";
     const card = this.stats.runs[c.runDir]?.cards?.[c.call] ?? null;
-    const asks = handoffAsks(c, card), to = asks.length ? this.receiver(c) : null;
+    const asks = handoffAsks(c, card), to = asks.length && !asks.includes("decide") ? this.receiver(c) : null;
     // Two rows of separate outlined buttons, both ending in a 28px square column so their edges line up.
     // Row one: Result (its report and, for write and net helpers, the worktree's changes), Task (its
     // rounds: events and task files), Peek (live only), then Clean up as an icon in the square. Row two,
@@ -771,12 +874,15 @@ export default class Dispatch extends View {
       mod: "cc-dispatch", kind: "dialog", width: 440, height: 220,
       props: { role: "cleanup", address: c.address, call: c.call, name: c.name } }), t.ansi1));
     // Ask: a message to its main agent. A card parked for you offers your two answers instead.
-    const ASK_LABEL = { resume: "Carry on…", drop: "Drop…", accept: "Ask to review" };
-    const askCells = to ? asks.map((ask) => cell(`ask-${ask}-${c.key}`, ASK_LABEL[ask] ?? "Ask", ask === "drop" ? "trash" : "send", () => openOverlay({
-      mod: "cc-dispatch", kind: "dialog", width: 480, height: 300,
-      props: { role: "handoff", address: to.address, name: to.program?.name ?? to.address, text: handoffText(c, ask) } }), ask === "drop" ? t.ansi1 : t.accent)) : [];
     // Hand over: freeze it and start another agent (or a fresh session of the same one) on its task.
     const run = this.runs.find((r) => r.dir === c.runDir) ?? null;
+    const ASK_LABEL = { accept: "Ask to review" };
+    const item = asks.includes("decide") && run ? this.itemsOf(run).find((x) => x.card === c.call) ?? null : null;
+    const askCells = asks.includes("decide")
+      ? (item ? [cell(`decide-${c.key}`, item.answer ? "Answered · change…" : "Decide…", "decide", () => this.openDecide(run, item), t.ansi3)] : [])
+      : to ? asks.map((ask) => cell(`ask-${ask}-${c.key}`, ASK_LABEL[ask] ?? "Ask", "send", () => openOverlay({
+        mod: "cc-dispatch", kind: "dialog", width: 480, height: 300,
+        props: { role: "handoff", address: to.address, name: to.program?.name ?? to.address, text: handoffText(c, ask) } }), t.accent)) : [];
     const parentLive = Boolean(c.parent && (terminals() ?? []).find((x) => x.address === c.parent && x.state === "live"));
     const handIt = canHandOver(c, run) && cell(`handover-${c.key}`, "Hand over…", "handover", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 500, height: 360,
@@ -843,11 +949,13 @@ export default class Dispatch extends View {
     const all = this.split().mine, runs = all.filter((r) => !archivedAway(r, this.stats.runs[r.dir]?.status)), archived = all.length - runs.length;
     const live = runs.filter((r) => r.live).length;
     const helpers = runs.reduce((n, r) => n + r.calls.filter((c) => c.state === "live").length, 0);
+    const waiting = runs.reduce((n, r) => n + this.itemsOf(r).filter((x) => !x.answer).length, 0);
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
       .child(div().flex_1().truncate().child(runs.length
         ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ${live} active · ${helpers} helper${helpers === 1 ? "" : "s"} live${archived ? ` · ${archived} archived` : ""}`
         : archived ? `${archived} archived` : "No runs"))
+      .when(waiting > 0, (el) => el.child(div().flex_none().pl(8).text_color(t.ansi3).font_semibold().child(`${waiting} need${waiting === 1 ? "s" : ""} you`)))
       .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().text_color(t.ansi3).child(this.statsError)));
   }
 
@@ -901,6 +1009,78 @@ export default class Dispatch extends View {
       .child(nav.h_full())
       .child(div().id(`doc-${p.title ?? ""}-${sel ?? "all"}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().px(18).py(14)
         .rounded(8).border_1().border_color(t.border).bg(t.background).text_color(t.foreground).child(content));
+  }
+
+  // Answer one open item: pick an option (a decision's, or a question's suggested answer) and/or write. Send
+  // appends the answer to <run>/answers.jsonl (hd_dispatch.py wait returns on it) and, when the run's main
+  // agent runs and is not waiting on a question, sends it the message shown; else the next one reads it.
+  renderDecide(t, p, close) {
+    const x = p.item ?? {}, z = S(), run = p.run ?? {}, text = this.answerBox?.value() ?? "";
+    const decision = x.kind === "decision", opts = x.options ?? [];
+    const agent = p.to ? (agents() ?? []).find((a) => a.address === p.to.address) ?? null : null;
+    const reach = !agent ? "gone" : agent.status === "blocked" ? "blocked" : "ok";
+    const ready = decision ? Boolean(this.choice) : Boolean(this.choice || text.trim());
+    const ans = { choice: this.choice, text };
+    const msg = ready ? answerText({ dir: run.dir }, x, ans) : "";
+    const badge = (label, color) => h_flex().h(18).px(7).flex_none().items_center().rounded(9).border_1().border_color(color)
+      .text_size(z.label).text_color(color).child(label);
+    const option = (o) => {
+      const on = this.choice === o.key, rec = o.key === x.recommend;
+      return h_flex().id(`opt-${o.key}`).flex_none().px(12).py(8).gap(10).items_start().rounded(8).border_1()
+        .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.background).cursor_pointer().hover((s) => s.bg(on ? t.selected : t.hover))
+        .on_click((_e, cx) => { this.choice = on ? null : o.key; cx.notify(); })
+        .child(div().mt(3).size(12).flex_none().rounded_full().border(on ? 4 : 1.5).border_color(on ? t.accent : t.muted))
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(h_flex().gap(8).items_center()
+            .child(div().flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(o.key))
+            .child(div().flex_1().min_w(0).text_size(z.body).font_semibold().text_color(t.foreground).child(o.label))
+            .when(rec, (el) => el.child(badge("Recommended", t.accent))))
+          .when(Boolean(o.detail), (el) => el.child(div().text_size(z.small).text_color(t.muted).child(o.detail)))
+          .when(rec && Boolean(x.why), (el) => el.child(div().text_size(z.small).text_color(t.accent).child(`Why: ${x.why}`))));
+    };
+    const context = [x.context, this.extra?.length ? `**The helper's open questions**\n\n${this.extra.map((q) => `- ${q}`).join("\n")}` : null,
+      x.blocks?.length ? `Waiting on this: ${x.blocks.join(", ")}` : null].filter(Boolean).join("\n\n");
+    const go = (_e, cx) => {
+      if (!ready || this.sending) return;
+      this.sending = true; this.failed = null; cx.notify();
+      cx.spawn(async (cx) => {
+        const saved = await saveAnswer(io(p.on ?? null), run.dir, answerRecord(x, ans));
+        if (!saved.ok) { this.sending = false; this.failed = `Could not save the answer: ${saved.error}`; cx.notify(); return; }
+        if (reach === "ok") {
+          const r = await hc(["send", p.to.address, msg]).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
+          if (r.code === 0) { close(); return; }
+          this.failed = `Saved, but not sent: ${(r.stderr || r.stdout || "hc send failed").trim().split("\n").pop()}. The main agent sees it at its next wait.`;
+        }
+        this.sending = false; this.saved = true; cx.notify();
+      });
+    };
+    const where = reach === "ok" ? `Saved in the run (answers.jsonl) and sent to the main agent, ${p.to.name} (${p.to.address}).`
+      : reach === "blocked" ? `Saved in the run. ${p.to?.name} is waiting on a question, so nothing is typed into it; its next wait or collect shows your answer.`
+      : "Saved in the run. Its main agent is not running: whoever takes the run over sees your answer (hd_dispatch.py ask --list, wait, collect).";
+    const body = [
+      h_flex().flex_none().gap(8).items_center()
+        .child(badge(decision ? "Decision" : "Question", decision ? t.ansi3 : t.accent))
+        .when(Boolean(x.card), (el) => el.child(badge(`card ${x.card}`, t.muted)))
+        .child(div().flex_1().min_w(0).truncate().text_size(z.label).text_color(t.muted).child(`${run.id ?? ""}${x.asked ? ` · asked ${ago(x.asked)}` : ""}`)),
+      x.answer && note(t, `Answered ${ago(x.answer.at * 1000)}: ${answerWords(x.answer)}. Sending again replaces it.`, t.done),
+      v_flex().id("decide-body").flex_1().min_h(0).overflow_y_scrollbar().gap(10)
+        .when(Boolean(context), (el) => el.child(div().flex_none().px(14).py(10).rounded(8).border_1().border_color(t.border).bg(t.background)
+          .text_size(z.body).child(TextView.markdown("decide-context", context).selectable(true))))
+        .when(opts.length > 0, (el) => el
+          .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "Pick one" : "Suggested answers (optional)"))
+          .children(opts.map(option)))
+        .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "Note (optional)" : "Your answer"))
+        .child(div().id("answer").flex_none().on_mouse_down("left", stop)
+          .child(Textarea.new(this.answerBox).h(78).w_full().px(10).py(8).rounded(8).border_1()
+            .border_color(this.typing ? t.accent : t.input).bg(t.background).text_size(z.body).text_color(t.foreground)))
+        .when(Boolean(msg), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`The main agent gets: ${msg}`))),
+      note(t, this.saved ? (this.failed ?? where) : where, this.saved ? t.done : t.muted),
+      this.failed && !this.saved && note(t, this.failed, t.ansi1),
+    ];
+    return dialogFrame(t, "decide", x.title ?? "", body, [
+      dialogButton("cancel", this.saved ? "Close" : "Cancel", t, close, this.saved ? "primary" : "secondary"),
+      !this.saved && dialogButton("go", this.sending ? "Sending…" : reach === "ok" ? "Send" : "Save answer", t, go, "primary", ready && !this.sending),
+    ], close);
   }
 
   renderDialog() {
@@ -991,6 +1171,29 @@ export default class Dispatch extends View {
         this.failed && note(t, this.failed, t.ansi1),
       ], [dialogButton("cancel", "Cancel", t, close), dialogButton("go", this.sending ? "Starting…" : `Hand over to ${label}`, t, go, "primary", !this.sending)], close);
     }
+    if (p.role === "decide") return this.renderDecide(t, p, close);
+    if (p.role === "delete") {
+      const run = p.run ?? {};
+      const go = (_e, cx) => {
+        if (this.sending) return;
+        this.sending = true; this.failed = null; cx.notify();
+        cx.spawn(async (cx) => {
+          const r = await controlRun(io(p.on ?? null), run, "delete").catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
+          if (r.ok && /DELETED=/.test(r.text)) { close(); return; }
+          this.sending = false;
+          this.failed = (r.text || "Could not run hd_dispatch.py").split("\n").filter((l) => !/^FAILURE=/.test(l)).slice(-2).join(" ");
+          cx.notify();
+        });
+      };
+      return dialogFrame(t, "delete", `Delete ${run.id}?`, [
+        note(t, `Removes the run folder (${p.helpers} helper${p.helpers === 1 ? "" : "s"}: meta.json, events, task files, screens, kept reports, asks and answers, handoff packages), the reports and progress notes under $CC_HD_HOME, its worktree snapshots (refs/cc-dispatch/${baseName(run.dir)}/*), the panel's spend and task caches for it and its retro ledger entry.`, t.foreground),
+        p.open?.length ? note(t, `Closes the terminals still open: ${p.open.join(", ")}.`, t.foreground) : null,
+        note(t, "Code stays: worktrees and cc/<run>/* branches are not touched, nor Codex's and Claude Code's own session logs."),
+        note(t, "This cannot be undone.", t.ansi1),
+        this.failed && note(t, this.failed, t.ansi1),
+      ], [dialogButton("cancel", "Cancel", t, close),
+        dialogButton("go", this.sending ? "Deleting…" : "Delete run", t, go, "danger", !this.sending)], close);
+    }
     if (p.role === "control") {
       const run = p.run ?? {}, op = p.op;
       const list = (names) => names?.length ? names.join(", ") : "none";
@@ -1002,14 +1205,19 @@ export default class Dispatch extends View {
         resume: [
           `Tells the held helpers (${list(p.held)}) to carry on with their task, not redoing what they did. Then the run goes on and the main agent collects as usual.`,
         ],
+        retire: [
+          `Ends ${run.id} for good: nobody adopts its handoff. ${p.open?.length ? `Closes the helpers' terminals still open (${list(p.open)}); their reports stay.` : "No helper terminal is open."}`,
+          "Marks the run finished in state.json and archives it. The handoff package, reports and worktrees stay; unarchive shows it again, and dispatching to it again carries it on.",
+          p.working?.length ? `${list(p.working)} still working: retire refuses until they settle.` : "No main agent is told.",
+        ],
         stop: [
           `Asks every helper without a good report (${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}) to stop and write what it has done so far into its report, giving them up to 3 minutes, then closes their terminals. Worktrees and the run folder stay.`,
           p.parentLive ? "Then the main agent gets stop.md, sums up what was done and what was not, and asks you what to do next. It dispatches nothing until you decide."
             : "The main agent is not running, so nobody is told; the summary is in stop.md.",
         ],
       }[op] ?? [];
-      const title = { pause: `Pause ${run.id}?`, resume: `Resume ${run.id}?`, stop: `Stop ${run.id}?` }[op] ?? "";
-      const label = { pause: "Pause", resume: "Resume", stop: "Stop run" }[op];
+      const title = { pause: `Pause ${run.id}?`, resume: `Resume ${run.id}?`, stop: `Stop ${run.id}?`, retire: `Retire ${run.id}?` }[op] ?? "";
+      const label = { pause: "Pause", resume: "Resume", stop: "Stop run", retire: "Retire run" }[op];
       const go = (_e, cx) => {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();

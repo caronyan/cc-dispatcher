@@ -1,6 +1,6 @@
 ---
 name: cc-herdr-dispatch-review
-description: "herdr 内的方案/代码审查：Claude 与 Codex 子 agent 交叉审查，再由子 agent 找反例并用测试复现，Claude 分诊补强"
+description: "herdr 内的方案/代码审查：Claude 与 Codex 子 agent（旁路加一个 Gemini 4 Neon）交叉审查，再由子 agent 找反例并用测试复现，Claude 分诊补强"
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "<方案文件路径 | diff/分支/PR | 审查主题> [--no-fix]"
@@ -8,7 +8,7 @@ argument-hint: "<方案文件路径 | diff/分支/PR | 审查主题> [--no-fix]"
 
 ## 角色
 
-你是**防守方**兼**裁判**，按 shared/herdr.md 的分工，你的精力放在全局判断和分诊上，补强的实现在小活之外交给子 agent。审查分两段：**交叉审查**中你和 Codex 子 agent 是平级的审查者，背对背各审一遍；**反例测试**阶段子 agent 是验证工程师，专找对象在什么条件下不满足需求、能复现的写成复现测试，你负责分诊反例、补强对象，再交给子 agent 复查。你的立场是让对象经得起反例，不是捍卫原有写法：反例是否成立看证据，不看措辞，也不看最后谁让步。
+你是**防守方**兼**裁判**，按 shared/herdr.md 的分工，你的精力放在全局判断和分诊上，补强的实现在小活之外交给子 agent。审查分两段：**交叉审查**中你、Codex 子 agent 和旁路的 Gemini 子 agent 是平级的审查者，背对背各审一遍，由你搜集、整合、裁决；**反例测试**阶段子 agent 是验证工程师，专找对象在什么条件下不满足需求、能复现的写成复现测试，你负责分诊反例、补强对象，再交给子 agent 复查。你的立场是让对象经得起反例，不是捍卫原有写法：反例是否成立看证据，不看措辞，也不看最后谁让步。
 
 发给子 agent 的一切都按 [references/counterexample.md](references/counterexample.md) 的"措辞"写：攻击性说法会被 OpenAI 的内容过滤拦下。
 
@@ -23,10 +23,10 @@ state.json         模式、fix（on/off）、对象、快照 sha、各调用的
                    codex（available/unavailable）、degraded_stages、children（调用过的 fix/test/dev 运行目录）
 target.md          审查对象的描述（方案路径，或 diff 范围 + 文件列表）
 claude-review.md   你的独立审查
-cross.md           交叉审查合并结果
+cross.md           交叉审查合并结果（Codex、Gemini 旁路审查和你三方）
 rounds/r<k>.md     第 k 轮反例的分诊表与补强记录
 followup.md        需要重新设计、列为后续任务的问题（交给 cc-herdr-dispatch-dev 时作为输入）
-agents/            hd_dispatch.py 的调用记录（reviewer、stress-r1、checks-r1、stress-r2…）
+agents/            hd_dispatch.py 的调用记录（reviewer、reviewer-gemini、stress-r1、checks-r1、stress-r2…）
 ```
 
 ## 流程
@@ -52,14 +52,23 @@ agents/            hd_dispatch.py 的调用记录（reviewer、stress-r1、check
      --dir "$ROOT" --schema "$SKILL_DIR/references/review.schema.json" --prompt $RD/reviewer-prompt.md
    ```
    reviewer-prompt：严格的技术审查者，从正确性、可行性、完整性、边界条件、安全、性能、架构、可维护性、过度设计这些角度审查 `<target>`；每条意见要有位置、证据和建议。代码模式下告诉它审查 `git diff <base>..$SNAP`。告诉它先读 target 列出的文件，只为核实具体问题才扩大阅读范围，不遍历仓库，不跑全量测试。
-   改动不到约 300 行（或方案不到约 3 页）时用 `--effort medium`。派出后启动 `wait`。
-2. **在子 agent 运行期间，你独立完成审查**，写入 `claude-review.md`，使用同样的字段（位置/问题/证据/建议/严重度）。写完之前不读审查者的回报（`wait` 报回了也先放着），这是背对背的意义所在。你审的是全局：需求是否达成、架构与模块边界、契约和跨模块影响、方案层面的遗漏；逐行细节由审查者覆盖。代码模式下先看 `git diff --stat`，改动超过约 300 行时只细读核心路径上的文件。
-3. **合并**：两份结论逐条对齐，写入 `cross.md`（你只审了全局，审查者的逐行意见没有你的对应项是正常的，按"单方提出"核实）：
-   - **共识**（双方都提出）：高置信，直接进入待修复清单。
-   - **单方提出**：回到代码或方案中核实（只读那一段），结论只能是"成立"或"不成立"（附理由）；一条要读的超出小活范围时，`send` 给审查者让它补证据，不自己通读；核实不了的标为"存疑"，交给用户。
+   改动不到约 300 行（或方案不到约 3 页）时用 `--effort medium`。
+   **同时派 Gemini 旁路审查者**：同一份 reviewer-prompt、同一个 schema、同样的 effort，交给 Antigravity 的 Gemini 4 Neon，与 Codex 审查者背对背：
+   ```bash
+   python3 $HD run --run $RD --call reviewer-gemini --agent agy --fallback none --mode read --effort high \
+     --dir "$ROOT" --schema "$SKILL_DIR/references/review.schema.json" --prompt $RD/reviewer-prompt.md \
+     --title "gemini review"
+   ```
+   它是旁路，不顶替 Codex：`--fallback none` 让它在 agy 不可用（输出 `AGENT_UNAVAILABLE`，原因在同一行）时不派，运行中途失败时也不换成 Codex。不可用或失败时不重试、不改派，在 `state.json.gemini` 记 `unavailable` 和原因，继续只用 Codex 和你的两方结论，报告里注明。两个都派出后启动 `wait`，它们的 `NAME` 都写进 `state.json`。
+2. **在子 agent 运行期间，你独立完成审查**，写入 `claude-review.md`，使用同样的字段（位置/问题/证据/建议/严重度）。写完之前不读两个审查者的回报（`wait` 报回了也先放着），这是背对背的意义所在。你审的是全局：需求是否达成、架构与模块边界、契约和跨模块影响、方案层面的遗漏；逐行细节由审查者覆盖。代码模式下先看 `git diff --stat`，改动超过约 300 行时只细读核心路径上的文件。
+3. **合并**：你、Codex 审查者、Gemini 旁路审查者（有回报时）的结论逐条对齐、去重（同一位置同一问题算一条，记下哪几方提出），写入 `cross.md`，每条标来源（Claude / Codex / Gemini）。你只审了全局，审查者的逐行意见没有你的对应项是正常的，按"单方提出"核实：
+   - **共识**（两方或三方都提出）：高置信，直接进入待修复清单。
+   - **单方提出**：回到代码或方案中核实（只读那一段），结论只能是"成立"或"不成立"（附理由）；一条要读的超出小活范围时，`send` 给提出它的审查者让它补证据，不自己通读；核实不了的标为"存疑"。
+   - **审查者之间矛盾**（例如 Codex 认为有问题、Gemini 认为没问题，或严重度、修法相反）：看证据裁决，写明采信哪一方和理由；证据不足以裁决时标为"存疑"。
+   - **向用户确认**：存疑项、以及成立与否取决于只有用户知道的信息（需求意图、业务取舍、部署环境、可接受的风险）的条目，合并完一次性用 AskUserQuestion 问用户（每题说清是哪条意见、各方怎么说、你倾向哪边），同时按 shared/herdr.md「待决项」写成 `question` 或 `decision`。用户答复前，这些条目不进入修复清单。
 4. **修复交叉审查发现的问题**，按第 4 步"补强"的分工和回归做（代码模式：小活自己改，其余交给 cc-herdr-dispatch-fix，改完调 cc-herdr-dispatch-test 回归并重新冻结 `$SNAP`），然后进入反例测试。高严重度问题必须修，低严重度问题可以记录下来留待以后。`fix=off` 时跳过这一步。
 
-完成标准：`cross.md` 中每条意见都有明确结论；`fix=on` 时所有成立的 high 级问题都已修复。审查者用完后 `cleanup --call reviewer`。
+完成标准：`cross.md` 中每条意见都有明确结论（存疑项已问过用户并记下答复）；`fix=on` 时所有成立的 high 级问题都已修复。审查者用完后 `cleanup --call reviewer` 和 `cleanup --call reviewer-gemini`。
 
 ### 2. 反例测试
 
@@ -127,7 +136,7 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 <一句话：现在的状态能不能放心往下走，还剩什么风险>
 
 ### 交叉审查
-- 共识 N 条 / 仅 Claude a 条 / 仅 Codex b 条 → 成立 x、不成立 y、存疑 z
+- 共识 N 条 / 仅 Claude a 条 / 仅 Codex b 条 / 仅 Gemini c 条 → 成立 x、不成立 y、存疑 z（Gemini 旁路未参与时写明原因）
 - 已修复：<要点>
 
 ### 反例测试（共 K 轮，最终 HOLDS | FAILS | 僵持）
@@ -147,7 +156,7 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 
 收尾后的下一步：
 
-- `followup.md` 不为空（代码模式）：用 AskUserQuestion 问用户怎么处理这些需要重新设计的问题：**交给 cc-herdr-dispatch-dev，中途确认 / 交给 cc-herdr-dispatch-dev，自主执行 / 先放着**。选了交给它时，用 Skill 工具调用 cc-herdr-dispatch-dev，参数写 `.cc-dispatch/review-$RUN/followup.md --parent .cc-dispatch/review-$RUN --checkpoints on|off`，运行目录记进 `state.json.children`；它把改动应用到工作区后，在报告末尾补一行它的结论。这部分改动没有经过本次反例测试，提示用户需要时再审一轮。
+- `followup.md` 不为空（代码模式）：用 AskUserQuestion 问用户怎么处理这些需要重新设计的问题：**交给 cc-herdr-dispatch-dev，中途确认 / 交给 cc-herdr-dispatch-dev，自主执行 / 先放着**。同时按 shared/herdr.md「待决项」写成一条 `decision`（id `followup`），让面板上也能选。选了交给它时，用 Skill 工具调用 cc-herdr-dispatch-dev，参数写 `.cc-dispatch/review-$RUN/followup.md --parent .cc-dispatch/review-$RUN --checkpoints on|off`，运行目录记进 `state.json.children`；它把改动应用到工作区后，在报告末尾补一行它的结论。这部分改动没有经过本次反例测试，提示用户需要时再审一轮。
 - `fix=off`：报告末尾提示用户，要修的话可以说"修复 C1、C3"（交给 cc-herdr-dispatch-fix），需要重新设计的交给 cc-herdr-dispatch-dev。
 - 方案模式下如果下一步是实现，提示用户可以用 `/cc-herdr-dispatch-dev <方案文件>` 开始实现。
 

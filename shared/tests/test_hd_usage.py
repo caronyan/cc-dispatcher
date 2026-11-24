@@ -57,6 +57,14 @@ class Usage(unittest.TestCase):
             f.unlink()
         self.assertIsNone(json.loads(self.sh("quota", "claude").stdout))  # nothing known
 
+    def test_agy_reads_the_antigravity_subscription_with_its_window_names_turned_round(self):
+        (self.root / "quota.json").write_text(json.dumps([
+            {"provider": "antigravity-bridge", "kind": "subscription", "windows": [
+                {"name": "Gemini · 5 hours", "used": 12}, {"name": "Claude & GPT · 7 days", "used": 40}]}]))
+        q = json.loads(self.sh("quota", "agy").stdout)
+        self.assertEqual([(w["name"], w["used"]) for w in q["windows"]],
+                         [("5 hours · Gemini", 12), ("7 days · Claude & GPT", 40)])
+
     def test_a_window_for_another_model_does_not_prompt(self):
         self.magpie(50, 20, fable=95)
         self.assertIsNone(self.hook(model="claude-opus-5-5"))

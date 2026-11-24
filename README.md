@@ -2,7 +2,7 @@
 
 仓库：<https://github.com/caronyan/cc-dispatcher>
 
-在 [herdr](https://herdr.dev/) 里，让 Claude Code 把调研、审查、实现、修复、测试派给 Codex 子 agent 执行、收回报并验收的一组 Claude Code skill。
+在 [herdr](https://herdr.dev/) 里，让 Claude Code 把调研、审查、实现、修复、测试派给子 agent（默认 Codex，调研默认 Antigravity 的 Gemini 4 Neon）执行、收回报并验收的一组 Claude Code skill。
 
 子 agent 由 herdr-core（`hc`）托管：它们以 Claude Code 的子终端出现在 herdr 侧栏，状态（干活 / 完成 / 出错 / 等人）由 herdr 跟踪，出错和等人时 herdr 把通知送进 Claude 的对话。Claude 只负责拆分、派发、看状态、验收，不做用量计量。
 
@@ -24,7 +24,7 @@
 ```
 shared/herdr.md              共用约定：分工、派发与回报、失败处理、守则
 shared/survey.md             代码摸底的做法
-shared/scripts/hd_dispatch.py  派发脚本：probe / run / send / wait / collect / status / diagnose / cleanup，以及 pause / resume / stop / handoff / adopt / recover / takeover / runs
+shared/scripts/hd_dispatch.py  派发脚本：probe / run / send / wait / collect / status / diagnose / cleanup，以及 pause / resume / stop / handoff / adopt / recover / takeover / runs / ask（待决项）
 shared/scripts/hd_check.py   按 schema 检查回报 JSON
 shared/scripts/hd_handoff.py 交接包：子 agent 移交（handover）和主 agent 交接（handoff / adopt）用的材料
 shared/scripts/hd_usage.py   主 agent 的账号额度：优先从 magpie 读，面板运行卡片上显示，超过阈值时提示主 agent 先问你要不要交接
@@ -42,8 +42,8 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
-- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（report ok / merged / done / parked / ended，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「n archived · show」里能看到并取消归档；之后再向这个运行派发会自动取消归档。
-- 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的 Claude：`parent`（终端）、`space`（herdr space）、`session`（Claude Code 会话，面板据此读它的后台任务）、`claude_cwd`。
+- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（report ok / merged / done / parked / ended，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「n archived · show」里能看到并取消归档；之后再向这个运行派发会自动取消归档。已归档的运行在取消归档按钮旁还有一个删除按钮，确认后运行 `hd_dispatch.py delete`：关掉还开着的子 agent 终端，删除运行文件夹（meta、事件流、任务文件、屏幕、回报备份、待决项、交接包）、`$CC_HD_HOME` 下的回报和进度笔记、worktree 快照 `refs/cc-dispatch/<run>/*`、面板缓存和复盘台账里的条目，不能撤销；worktree、`cc/<run>/*` 分支和 Codex / Claude Code 自己的会话日志不动。
+- 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的主 agent：`parent`（终端）、`space`（herdr space）、`dispatcher_agent`、`session`（Claude Code 会话或 Codex 线程，面板据此读它的后台任务；没记下时按运行目录去找）、`claude_cwd`。面板对每种主 agent 程序各有一个读会话日志的适配器（目前 Claude Code、Codex），后台任务按同一种样子显示。
 
 ## Herdr 面板
 
@@ -56,6 +56,8 @@ Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"�
 - **Stop**：优雅终止：让还没交合格回报的子 agent 停手，把已完成部分写进回报（最多等 3 分钟），收回报、关终端（worktree 保留），写 `stop.md`，再请派发方汇总给你并等你决定下一步。
 
 暂停是运行这一层的状态，和子 agent 自己的状态分开显示：运行圆点换成暂停标记，卡片边框变黄，标题下有一行"Paused · 多久前 · 挂起几个"；被挂起的子 agent 的圆点从转圈换成暂停标记，归入 `paused` 组。终止中和已终止也各有一行，已终止的可直接打开 `stop.md`。`./install.sh` 会一并安装（装了 Herdr app 时），然后切到 `herdr-cc-dispatch` layout。
+
+**Needs you（待决项）**：主 agent 需要你拍板或只有你知道答案的事，列在运行卡片里的 Needs you 下（运行折叠时也显示）。分两种：**decision** 是在 2–4 个具体做法里选一个，每个选项写明代价，主 agent 标出推荐（★）和理由；**question** 是要你提供的信息，可能附几个猜测的答案。点开后能看到上下文（含子 agent 回报里的 open questions）、选项和要发给主 agent 的消息，选一个、写补充，Send 后答案记进运行目录的 `answers.jsonl` 并发给主 agent；主 agent 不在时只保存，接手的主 agent 会读到。主 agent 处理完用 `hd_dispatch.py ask --resolve` 关掉这一项。搁置等你决定的卡没有写待决项时，面板给它补一个"继续做 / 不做了"。
 
 断网时，子 agent 在面板上标为 waiting for network；因断网停下的不占自动重试次数，网络恢复后自动接着做，主 agent 不用处理。
 
@@ -79,15 +81,25 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 
 主 agent 的会话不在了（终端被关、程序退出、herdr 重启），运行还没做完时，开一个新会话接着做，不用记命令：
 
-- **面板**：这样的运行卡片头下有一行「The main agent (…) is gone」和 **Copy resume prompt** 按钮。在 herdr 里新开终端，启动 Claude Code 或 Codex（Codex 用 `codex --sandbox danger-full-access`），粘贴复制的提示词。
+- **面板**：这样的运行卡片头下有一行「The main agent (…) is gone」和 **Copy resume prompt** 按钮。在 herdr 里新开终端，启动 Claude Code、Codex 或 Antigravity（Codex 用 `codex --sandbox danger-full-access`，Antigravity 用 `agy --dangerously-skip-permissions`），粘贴复制的提示词。
 - **直接说**：在新会话里说"用 cc-herdr-dispatch-dev 接着之前的运行"（research、review 同理）。skill 运行 `hd_dispatch.py runs` 列出本仓库没做完的运行，问你接哪个。
 - 新主 agent 运行 `hd_dispatch.py takeover --run <dir>`：一步完成恢复中断的子 agent 和接手（`recover` + `adopt`），运行先处于暂停；再向你复述现状，你确认后才继续派发。原主 agent 还开着时会拒绝，除非你明确让它接手（`--force`）。
-- 新旧主 agent 是什么程序都可以（Claude Code、Codex，之后的 Antigravity 等）。主 agent 程序登记在 `hd_dispatch.py` 的 `MAIN_AGENTS` 里（会话变量、续上原会话的命令）；没登记的程序照样能接手，只是不给续上原会话的命令。
+- 新旧主 agent 是什么程序都可以（Claude Code、Codex、Antigravity 等）。主 agent 程序登记在 `hd_dispatch.py` 的 `MAIN_AGENTS` 里（会话变量、续上原会话的命令）；没登记的程序照样能接手，只是不给续上原会话的命令。
 - 主 agent 给出最终结论后会在 `state.json` 写 `finished`，这样的运行不再出现在 `runs` 和面板的接手提示里。
+
+## 子 agent 默认是谁
+
+按 skill 场景选默认子 agent（`hd_dispatch.py run --agent auto`，按运行目录类型；SKILL.md 里不用写）：
+
+- **research**：Antigravity（`agy`），模型 `gemini-4-neon-<effort>`（`--model` 或 `CC_HD_AGY_MODEL` 可改）。派出前检查 agy 是否装了、`agy models` 里有没有该模型（缓存 1 小时）、magpie 读到的 Gemini 额度窗口是否用完；不行就直接派 Codex（全局默认模型），输出 `FALLBACK=agy→codex why=…`。运行中途因额度、登录、模型不可用停下或退出、又没交合格回报的 agy 子 agent，`wait`/`collect` 自动移交给 Codex 接着做（同一任务和回报，下一轮）。
+- **review**：Codex 审查者照旧，另派一个 Gemini 4 Neon 旁路审查者（`--agent agy --fallback none`，不可用就跳过、不换人），主 agent 合并三方意见、裁决分歧，需要确认的问用户。
+- **dev、fix、test、retro** 等：Codex，不变。
+
+agy 子 agent 没有 Codex 的沙箱（弱隔离），只读调用只靠任务文件的规则约束。
 
 ## 子 agent 的权限
 
-三种模式都用 Codex 的 `workspace-write` 沙箱，靠工作目录区分能写哪里：
+Codex 子 agent 的三种模式都用它的 `workspace-write` 沙箱，靠工作目录区分能写哪里（agy、Claude Code 子 agent 只靠任务文件的规则）：
 
 - **read**：在 `/tmp/cc-dispatch/<run>/<call>/` 里运行，仓库或 worktree 只能读不能写。
 - **write**：在指定 worktree 里运行，改动只落在那里；终端不联网。
@@ -103,6 +115,7 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 
 - [herdr](https://herdr.dev/)，带 herdr-core（`hc` 在 PATH 上）；要面板的话还需要 Herdr app
 - Codex CLI，已 `codex login`
+- 可选：Antigravity CLI（`agy`，已登录），research 默认派它、review 用它做旁路审查；没有时这两处自动用 Codex / 跳过旁路
 - Python 3、git
 - 可选：[magpie](https://usemagpie.ai)，面板上的主 agent 额度和额度交接提醒靠它（没有时 Codex 退回读会话日志，Claude Code 不显示）
 
@@ -130,6 +143,7 @@ echo 'source ~/cc-dispatcher/shared/herdr-shell.zsh' >> ~/.zshrc
 
 - `~/.claude/skills/cc-herdr-dispatch-*` → `skills/` 下对应目录
 - `~/.codex/skills/cc-herdr-dispatch-*`（以及 `~/.codex-api/skills/`，存在时）→ 同上，让 Codex 也能作主 agent 加载这组 skill。Codex 作主 agent 要能运行 `hc`、建 worktree、写 `/tmp/cc-dispatch`，需用 `codex --sandbox danger-full-access` 启动；工具上的差异见 `shared/herdr.md` 的"不是 Claude Code 时"
+- `~/.gemini/config/skills/cc-herdr-dispatch-*`（存在 `~/.gemini` 或装了 `agy` 时；`AGY_SKILLS_DIR` 可改）→ 同上，让 Antigravity（`agy`）作主 agent。子 agent 也可移交给 agy（`handover --to agy`，弱隔离，任务和规则从命令行 `-i` 传入；`CC_HD_AGY_MODEL` 改默认模型）
 - `~/.config/herdr-core/templates/cc-hd-*.md` → `shared/templates/` 下对应文件
 
 装了 Herdr app（`~/.config/herdr-app`）时，还会复制 `herdr/cc-dispatch/mods/cc-dispatch` 到 `mods/`（Herdr 不跟随软链接加载 mod 图标；复制品带 `.cc-dispatcher` 标记，重跑会刷新），并链接 `herdr-cc-dispatch` layout。

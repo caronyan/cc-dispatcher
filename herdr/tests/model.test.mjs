@@ -6,6 +6,7 @@ import {
   CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, activeRuns, callTags,
   ARCHIVE_SEP, parseArchived, canArchive, archivedAway, cardView, parkedWhy, handoffAsks,
   agentIn, mainLive, needsTakeover, takeoverPrompt, takeoverBanner, skillOf,
+  ASKS_SEP, ANSWERS_SEP, parseAsks, pendingItems, itemLine, answerRecord, answerText, LIST_SCRIPT,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
@@ -57,6 +58,14 @@ test("buildCall: labels win while live, meta.json after", () => {
     [{ address: "t9", state: "live", parent: "t1" }]);
   assert.equal(adopted.parent, "t5");
   assert.equal(adopted.adoptedFrom, "t1");
+});
+
+test("buildCall: a helper hd_dispatch.py closed is gone, though the app's terminal list still has it", () => {
+  const term = { address: "t9", name: "dev-a", state: "live", status: "working", labels: { "cc.round": "2" } };
+  const c = buildCall(meta("a", { address: "t9", name: "dev-a", open: false, report_check: "ok" }), RUN, [term]);
+  assert.deepEqual([c.state, c.status, c.lost, c.round], ["gone", null, false, 1]);
+  // still open: the terminal is its own
+  assert.equal(buildCall(meta("a", { address: "t9", open: true }), RUN, [term]).state, "live");
 });
 
 test("buildCall finds a live terminal by name when the address is unknown, and reads object status", () => {
@@ -149,6 +158,7 @@ test("prettyReport and taskPath", () => {
   assert.equal(taskPath({ agentDir: "/x", round: 3 }), "/x/task-3.md");
 });
 
+import { runMains, mainKey } from "../cc-dispatch/mods/cc-dispatch/model.js";
 import { jsonMarkdown, reportMarkdown, diffMarkdown, MARKDOWN_LIMIT } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 test("jsonMarkdown: fields become sections, item lists numbered sub-sections, logs code blocks", () => {
@@ -349,7 +359,7 @@ test("helper agents: the label wins, then meta.json, else codex; Claude Code is 
   assert.equal(live.agent, "claude");
   assert.equal(live.handingTo, "codex");
   assert.match(callDetail(live), /handing over to Codex/);
-  assert.deepEqual(Object.keys(AGENTS), ["codex", "claude"]);
+  assert.deepEqual(Object.keys(AGENTS), ["codex", "claude", "agy"]);
   assert.equal(agentLabel("claude"), "Claude Code");
 });
 
@@ -371,6 +381,7 @@ test("the quota shown is the subscription the main agent's terminal runs now", (
   assert.equal(quotaAgent("claude"), "claude");
   assert.equal(quotaAgent("/opt/homebrew/bin/codex"), "codex");
   assert.equal(quotaAgent("nvim"), null);
+  assert.equal(quotaAgent("/opt/homebrew/bin/agy"), "agy");
   const r = { parent: "t1", mainAgent: "claude" };
   assert.equal(runQuotaAgent(r, [{ address: "t1", state: "live", program: { key: "codex" } }]), "codex");
   assert.equal(runQuotaAgent(r, [{ address: "t1", state: "live", argv: ["/usr/bin/codex", "-s", "x"] }]), "codex");
@@ -472,20 +483,72 @@ test("parkedWhy: state.json's reason, else read from the note, else the person d
   assert.equal(parkedWhy({ status: "parked", note: "3 rounds failed" }), "user");
 });
 
-test("handoffAsks: review a good report on an unreviewed card; carry on or drop a card parked for you", () => {
+test("handoffAsks: review a good report on an unreviewed card; decide on a card parked for you", () => {
   const ok = { call: "T1", state: "gone", report: "ok" };
   assert.deepEqual(handoffAsks(ok, { status: "running" }), ["accept"]);
-  assert.deepEqual(handoffAsks(ok, { status: "parked" }), ["resume", "drop"]);
+  assert.deepEqual(handoffAsks(ok, { status: "parked" }), ["decide"]);
   assert.deepEqual(handoffAsks(ok, { status: "parked", parked_why: "superseded" }), []);
   assert.deepEqual(handoffAsks(ok, { status: "merged" }), []);
   assert.deepEqual(handoffAsks({ ...ok, report: "bad" }, { status: "accepting" }), ["bad"]);
-  assert.match(handoffText({ ...ok, runDir: "/r/.cc-dispatch/dev-1" }, "drop"), /parked_why=dropped/);
+});
+
+test("parseAsks reads asks.json and answers.jsonl ahead of the other dumps", () => {
+  const D = "/r/.cc-dispatch/dev-1";
+  const out = `\n${ASKS_SEP}${D}/asks.json\n{"api":{"kind":"decision","title":"409 or 410"}}\n${ANSWERS_SEP}${D}/answers.jsonl\n`
+    + `{"id":"api","at":1,"choice":"B"}\nnot json\n\n${ARCHIVE_SEP}${D}/archived\n5\n\n${CONTROL_SEP}${D}/control.json\n{"state":"paused"}\n${SEP}${D}/agents/a/meta.json\n{}`;
+  assert.deepEqual(parseAsks(out), { [D]: { asks: { api: { kind: "decision", title: "409 or 410" } }, answers: [{ id: "api", at: 1, choice: "B" }] } });
+  assert.deepEqual(parseArchived(out), { [D]: 5000 });
+  assert.equal(parseControls(out)[D].state, "paused");
+  assert.match(LIST_SCRIPT, /asks\.json/);
+});
+
+test("pendingItems: asks, cards parked for you (with older pending_decisions folded in), answers", () => {
+  const r = { dir: "/r/.cc-dispatch/dev-1", asks: {
+    api: { kind: "decision", title: "409 or 410", options: [{ key: "A", label: "409" }, { key: "B", label: "410", detail: "gone for good" }], recommend: "B", why: "the client treats 410 as final", asked: 100 },
+    env: { kind: "question", title: "Which staging?", context: "two exist", asked: 50 },
+    junk: { kind: "maybe", title: "x" },
+    about: { kind: "decision", title: "split T3?", card: "T3", options: [{ key: "y", label: "yes" }, { key: "n", label: "no" }] },
+  }, answers: [{ id: "env", at: 200, text: "stg-2" }] };
+  const cards = { T1: { status: "parked", note: "3 rounds failed", title: "Redact headers" }, T2: { status: "parked", note: "superseded by T1" },
+    T3: { status: "parked", parked_why: "user" }, T4: { status: "merged" } };
+  const items = pendingItems(r, cards, { "T1-redaction": "must redact quoted values", "pg": "which PG version" });
+  assert.deepEqual(items.map((x) => x.id), ["about", "card:T1", "api", "pending:pg", "env"]);
+  const t1 = items.find((x) => x.id === "card:T1");
+  assert.match(t1.context, /Redact headers[\s\S]*3 rounds failed[\s\S]*T1-redaction.*quoted values/);
+  assert.deepEqual(t1.options.map((o) => o.key), ["resume", "drop"]);
+  assert.equal(itemLine(items.find((x) => x.id === "api")), "409 / ★ 410");
+  assert.equal(itemLine(items.find((x) => x.id === "env")), "answered · stg-2");
+  assert.equal(items.find((x) => x.id === "env").answer.text, "stg-2");
+  assert.equal(pendingItems({ asks: {}, answers: [] }, {}, {}).length, 0);
+  // asked again after the answer: the old answer no longer counts
+  const again = pendingItems({ ...r, asks: { env: { ...r.asks.env, asked: 300 } } }, {}, {});
+  assert.equal(again[0].answer, null);
+});
+
+test("answerRecord and answerText: what is saved and what the main agent gets", () => {
+  const r = { dir: "/r/.cc-dispatch/dev-1" };
+  const api = { id: "api", kind: "decision", title: "409 or 410", source: "ask", options: [{ key: "A", label: "409" }, { key: "B", label: "410" }] };
+  assert.deepEqual(answerRecord(api, { choice: "B", text: " keep docs " }, 5000), { id: "api", at: 5, kind: "decision", choice: "B", label: "410", text: "keep docs", by: "panel" });
+  const msg = answerText(r, api, { choice: "B", text: "keep docs" });
+  assert.match(msg, /待决项 api「409 or 410」我选 B「410」。补充：keep docs/);
+  assert.match(msg, /ask --resolve api/);
+  const q = { id: "env", kind: "question", title: "Which staging?", source: "ask", options: [] };
+  assert.match(answerText(r, q, { choice: null, text: "stg-2" }), /我的回答：stg-2/);
+  const card = pendingItems(r, { T1: { status: "parked" } }, {})[0];
+  assert.match(answerText(r, card, { choice: "drop", text: "" }), /T1 我决定不做了.*parked_why=dropped.*call=T1/);
+  assert.match(answerText(r, card, { choice: "resume", text: "try a smaller scope" }), /改回 pending.*补充：try a smaller scope/);
 });
 
 test("canArchive: a queued card keeps the run open", () => {
   const ok = { call: "T1", state: "gone", report: "ok" };
   assert.equal(canArchive({ calls: [ok] }, { T1: "merged", T2: "pending" }), false);
   assert.equal(canArchive({ calls: [ok] }, { T1: "merged", T2: "parked" }), true);
+});
+
+test("canArchive: a retired run stays archived whatever its cards say, but not while handing off", () => {
+  const ok = { call: "T1", state: "gone", report: "ok" }, cards = { T1: "accepting", T2: "pending" };
+  assert.equal(canArchive({ calls: [ok], control: { state: "running", retired: { at: 1 } } }, cards), true);
+  assert.equal(canArchive({ calls: [ok], control: { state: "handoff", retired: { at: 1 } } }, cards), false);
 });
 
 test("agentIn: herdr's program key, else the program in front; a bare shell or a gone terminal is none", () => {
@@ -525,11 +588,30 @@ test("takeoverPrompt names the skill, the run and the takeover command, for any 
   assert.equal(takeoverBanner({}), "The main agent is gone · give a new one the prompt");
 });
 
-test("buildRuns keeps only Claude Code main agents' sessions for background tasks", () => {
+test("buildRuns lists every main agent of a run, newest first, whatever its program", () => {
   const runs = buildRuns([
-    { path: `${RUN}/agents/a/meta.json`, meta: meta("a", { session: "s-claude", dispatcher_agent: "claude", started_at: 100 }) },
-    { path: `${RUN}/agents/b/meta.json`, meta: meta("b", { session: "th-codex", dispatcher_agent: "codex", started_at: 200 }) },
+    { path: `${RUN}/agents/a/meta.json`, meta: meta("a", { session: "s-claude", dispatcher_agent: "claude-code", started_at: 100 }) },
+    { path: `${RUN}/agents/b/meta.json`, meta: meta("b", { session: "th-codex", dispatcher_agent: "/opt/bin/codex", started_at: 200 }) },
+    { path: `${RUN}/agents/c/meta.json`, meta: meta("c", { session: "s-claude", dispatcher_agent: "claude", started_at: 300 }) },
   ], []);
-  assert.deepEqual(runs[0].sessions, ["s-claude"]);
-  assert.equal(runs[0].session, "s-claude");
+  assert.deepEqual(runs[0].mains, [{ agent: "claude", session: "s-claude" }, { agent: "codex", session: "th-codex" }]);
+});
+
+test("runMains: a session-less entry only for a program with no recorded session", () => {
+  const call = (mainAgent, session, startedAt) => ({ mainAgent, session, startedAt, earlierMains: [] });
+  assert.deepEqual(runMains([call("codex", null, 3), call("claude", "s1", 2), call("claude", null, 1)]),
+    [{ agent: "codex", session: null }, { agent: "claude", session: "s1" }]);
+  assert.deepEqual(runMains([call(null, null, 1)]), [{ agent: "claude", session: null }]);
+  assert.equal(mainKey("Codex CLI"), "codex");
+  assert.equal(mainKey("agy"), "agy");
+  assert.equal(mainKey("Antigravity"), "agy");
+});
+
+test("buildRuns keeps the main agent a takeover replaced (meta.json mains)", () => {
+  const runs = buildRuns([
+    { path: `${RUN}/agents/a/meta.json`, meta: meta("a", { session: "th-codex", dispatcher_agent: "codex", started_at: 100,
+      adopted: { from: "t1", by: "t2" }, mains: [{ terminal: "t1", agent: "claude", session: "s-old" }] }) },
+  ], []);
+  assert.deepEqual(runs[0].mains, [{ agent: "codex", session: "th-codex" }, { agent: "claude", session: "s-old" }]);
+  assert.equal(runs[0].adopted, true);
 });

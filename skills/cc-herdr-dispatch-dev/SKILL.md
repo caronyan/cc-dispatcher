@@ -108,9 +108,9 @@ python3 $HD run --run $RD --call T<n> --mode write --effort high \
 **4.5 修复路由**：
 - **小修**：只限小活（一个文件、约 20 行以内、修法已确定）。你直接在 worktree 里改，然后重新跑验收命令。
 - **返工**：在同一个 worktree 里 `send` 给这张卡的子 agent，提示格式见 acceptance.md，然后启动 `wait`。每张卡最多返工 3 轮。
-- **搁置**：3 轮后仍不通过、回报 `blocked`、或者问题出在契约本身。这时停止这张卡，写 `status: parked`、`parked_why: user`、`note`（原因），说明原因和选项，交给用户决定。契约有错会影响其他卡，要先改 `contracts.md` 再处理受影响的卡。被另一张卡取代的写 `parked_why: superseded`、`by`，不用问用户。
+- **搁置**：3 轮后仍不通过、回报 `blocked`、或者问题出在契约本身。这时停止这张卡，写 `status: parked`、`parked_why: user`、`note`（原因），再按 shared/herdr.md「待决项」写一条 `decision`（`card` 填这张卡，`blocks` 填依赖它的卡）：选项是具体的去路（如放宽验收、改契约后返工、换做法、不做了），每个写清代价，并给出推荐和理由；同时在对话里问用户。契约有错会影响其他卡，要先改 `contracts.md` 再处理受影响的卡。被另一张卡取代的写 `parked_why: superseded`、`by`，不用问用户。
 
-**搁置之后**：用户的决定可能在对话里给，也可能来自面板（消息以 `[cc-dispatch 面板]` 开头，带 `run=` 和 `call=`）：
+**搁置之后**：用户的决定可能在对话里给，也可能来自面板（消息以 `[cc-dispatch 面板]` 开头；`wait` 返回 `WAIT=answer`，输出带 `ANSWER <id>:`）。按选中的选项落实，然后 `ask --resolve <id> --decision "…"` 关掉这一项（没写待决项、用的是面板补的默认项时 id 是 `card:<卡片>`）：
 - 继续做：卡改回 `pending`，`parked_why` 删掉、`note` 记下用户的决定；按你的判断在原 worktree 里返工（子 agent 还在用 `send`，已结束用 `run` 开新调用），或者需要改契约时先改 `contracts.md`、拿不准就先问用户。返工轮数重新计。
 - 不做了：写 `parked_why: dropped`、`note`，它的 worktree 和分支先问用户是否保留。依赖它的卡要么改依赖，要么一起搁置并说明。
 

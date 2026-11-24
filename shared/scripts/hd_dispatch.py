@@ -5,6 +5,7 @@ usage:
   hd_dispatch.py probe
   hd_dispatch.py run      --run DIR --call ID --mode read|write|net --effort medium|high
                           --dir DIR --prompt FILE --schema FILE [--title WORDS]
+                          [--agent auto|codex|claude|agy] [--model NAME] [--fallback codex|none]
   hd_dispatch.py send     --run DIR --call ID --prompt FILE
   hd_dispatch.py wait     --run DIR [--timeout SECONDS] [--stall SECONDS]
   hd_dispatch.py collect  --run DIR [--call ID]
@@ -15,13 +16,15 @@ usage:
   hd_dispatch.py resume   --run DIR
   hd_dispatch.py stop     --run DIR [--wait SECONDS]
   hd_dispatch.py freeze   --run DIR --call ID [--ask SECONDS] [--why WORD]
-  hd_dispatch.py handover --run DIR --call ID [--to codex|claude] [--effort E] [--ask S] [--why WORD]
+  hd_dispatch.py handover --run DIR --call ID [--to codex|claude|agy] [--effort E] [--ask S] [--why WORD]
                           [--note TEXT] [--notify]
   hd_dispatch.py handoff  --run DIR [--why manual|usage] [--no-notes]
   hd_dispatch.py adopt    --run DIR --from PACKAGE
   hd_dispatch.py recover  --run DIR [--call NAME] [--fresh]
   hd_dispatch.py takeover --run DIR [--force]
   hd_dispatch.py runs     [--repo DIR] [--all] [--json]
+  hd_dispatch.py retire   --run DIR [--keep] [--force]
+  hd_dispatch.py ask      --run DIR (--add FILE | --resolve ID --decision TEXT | --list)
 
 freeze stops a helper and keeps what another agent needs: a progress note it is asked to write (to
 $CC_HD_HOME/<tag>/<call>/progress-r<k>.md, up to --ask s), its screen (agents/<call>/screen-r<k>.txt), a
@@ -30,6 +33,17 @@ session logs and report; closes its terminal and writes the package agents/<call
 hd_handoff.py). collect freezes a helper whose conversation is full (context_limit) by itself.
 handover freezes (unless frozen this round) and starts --to (AGENTS) as the call's next round in the same
 folder, report and schema, its task file pointing at the package. Labels add cc.agent=<agent>.
+
+run starts the helper as --agent; auto (the default) picks by the run's kind (DEFAULT_AGENT): Antigravity
+for a research run, Codex for every other. agy runs on --model, else $CC_HD_AGY_MODEL, else
+gemini-4-neon-<effort>; Codex and Claude Code on their own default model. Before an agy start run checks it
+can: agy on PATH, the model among `agy models` (cached an hour), no Gemini window of its quota (magpie) used
+up. If not, with --fallback codex (the default) it starts Codex instead and adds FALLBACK=agy→codex why=<why>;
+with --fallback none it fails AGENT_UNAVAILABLE (FAILURE=agent_unavailable, exit 3). run outputs AGENT= and,
+for agy, MODEL=. Later, when an agy helper with --fallback codex stops on quota, auth, model_unavailable or by
+exiting without a good report, collect / wait hand the call over to Codex (handover --why fallback:<failure>)
+and print FALLBACK=<call> agy→codex why= round= name=: the call goes on, keep waiting. FALLBACK_FAILED=<call>
+when that handover could not start.
 
 handoff is the dispatcher's own: it hands the run to the next main agent. It needs <run>/handoff-notes.md
 (the dispatcher's account: the user's request, what is done and decided, what is under way, what next),
@@ -61,13 +75,37 @@ first: RUN= skill= state= main=live|gone|none(<agent>) helpers= cards= last= ope
 when its state.json says so ("finished": <epoch s>) or nothing is open: no paused / stopped / handoff state,
 no lost helper, no card left (merged, done or parked other than for the user), no helper at work.
 
+delete removes an archived run for good (the panel's Delete on an archived card): it closes helpers' terminals
+still open, removes their reports and progress notes ($CC_HD_HOME/<tag>), worktree snapshots
+(refs/cc-dispatch/<run>/*), the panel's cache entries and the retro ledger's entry, then the run folder.
+Worktrees, cc/<run>/* branches and Codex's / Claude Code's own session logs stay. NOT_ARCHIVED: archive first.
+Output DELETED=<run> HELPERS= CLOSED= REPORTS= SNAPSHOTS=.
+
+retire ends a run nobody will carry on (left handing off with no one adopting it, or its results already taken
+by another run): closes its helpers' open terminals (reports stay), restores control.json to the state before
+the handoff with a `retired` mark, writes "finished" in state.json and archives it (--keep: not). Dispatching
+to it again (run / send) undoes the mark and that finished. HELPERS_AT_WORK / MAIN_LIVE refuse; --force.
+Output RETIRED=<run> WAS=<control state> CLOSED=<calls|-> ARCHIVED=yes|no.
+
+ask keeps what the main agent waits on the person for, in <run>/asks.json ({id: item}; the panel lists it
+under "Needs you"). An item: kind decision (pick one of 2-4 options: {key, label, detail}, maybe a recommend
+key and why) or question (facts or a preference only the person has; options, if any, are suggested answers);
+title, context (markdown), card, blocks (cards waiting on it). --add FILE adds or replaces items (a JSON
+object {id: item}, or one item with "id"), stamping asked. Besides asks.json, open items include each card
+parked for the person (id card:<card>) and the run's older state.json pending_decisions (id pending:<key>).
+The person's answers from the panel are appended to <run>/answers.jsonl ({id, at, choice, label, text});
+wait returns as soon as one comes, and wait and collect print ANSWERS=<id>,... with each answer while its
+item is open. --resolve ID --decision TEXT closes an item: drops it from asks.json (pending:<key> from
+pending_decisions) and records state.json decisions[ID] = TEXT; a parked card is closed by its new status.
+--list prints the open items and their answers.
+
 --run is the skill's run directory (<repo>/.cc-dispatch/<kind>-<run>); each call keeps its state in
 <run>/agents/<call>/ (meta.json, task-<k>.md). Reports live under $CC_HD_HOME (default /tmp/cc-dispatch),
 the one place Codex's workspace-write sandbox can write besides its working directory.
 A read-mode helper works in its own folder there, so it can read the repo but cannot change it.
 
 Output is KEY=value lines. probe and run end with
-FAILURE=none|quota|context_limit|auth|refused|capacity|rate_limit|other. quota is the account's usage
+FAILURE=none|quota|context_limit|auth|refused|model_unavailable|capacity|rate_limit|other. quota is the account's usage
 running out (wait for it to reset, or hand the work to another agent); context_limit is one helper's
 conversation filling up while the account still has room (hand the work to a fresh session).
 Neither is retried.
@@ -92,7 +130,7 @@ The same verdicts are kept in meta.json (report_check, failure) so finished runs
 
 Each call also keeps <run>/agents/<call>/events.jsonl, one JSON object per line, appended and never
 rewritten: {"t": <epoch s>, "ev": <kind>, "round": <n>, ...}. Kinds:
-  dispatch  mode effort dir name title task sent           run
+  dispatch  mode effort dir name title task sent agent model fell_back  run
   send      why=rework task sent | why=retry kind n task sent  send / a due retry (kind network: it is back)
   offline   n                                              stopped while the network is down; waits for it
   retry     kind n max at                                  a retry scheduled
@@ -131,6 +169,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import ssl
 import subprocess
@@ -152,7 +191,11 @@ PATTERNS = [
     # The helper's own conversation is full: its session cannot go on, but the account still can.
     ("context_limit", r"context window|context_length_exceeded|maximum context length|ran out of room|"
                       r"exceeds? the context|context limit|prompt is too long|too many tokens"),
-    ("quota", r"usage limit|quota|insufficient_quota|exceeded your|billing|out of credits|plan limit|upgrade to"),
+    # The model it was started with is not one its account may use (agy --model, a Codex model setting).
+    ("model_unavailable", r"model[^\n]{0,40}(not found|not available|not supported|does not exist|no access)|"
+                          r"unknown model|invalid model"),
+    ("quota", r"usage limit|quota|insufficient_quota|exceeded your|billing|out of credits|plan limit|upgrade to|"
+              r"resource_exhausted|resource exhausted"),
     ("rate_limit", r"\b429\b|rate limit|rate_limit|ratelimit|too many requests|try again in"),
     ("capacity", r"at capacity|overloaded|high demand|temporarily unavailable|service unavailable|"
                  r"(status|http|error)[^\n]{0,20}\b50[0234]\b|internal server error|bad gateway|stream disconnected|stream error|connection reset|error sending request"),
@@ -242,8 +285,17 @@ def ensure_home():
 # ---- run state -------------------------------------------------------------------------------------
 
 def unarchive(run: Path):
-    """A run the user archived in the panel (<run>/archived) shows again once something is dispatched to it."""
+    """A run the user archived in the panel (<run>/archived) shows again once something is dispatched to it;
+    one retire ended is carried on again: its retired mark and the finished it wrote go."""
     (run / "archived").unlink(missing_ok=True)
+    c = control(run)
+    if c.get("retired"):
+        at = c.pop("retired").get("at")
+        set_control(run, **c)
+        st = read_json(run / "state.json", {})
+        if st.get("finished") == at:
+            st.pop("finished")
+            write_json(run / "state.json", st)
 
 
 def run_tag(run: Path) -> str:
@@ -599,11 +651,23 @@ def compose(meta: dict, prompt: str, round_no: int) -> Path:
     return task
 
 
+TRUST_RE = re.compile(r"Trust this (folder|workspace)|Do you trust", re.I)
+
+
+def trust(name: str, tries: int = 4):
+    """Confirm a folder trust question on a just-started helper's screen, if one comes up within a few seconds."""
+    for _ in range(tries):
+        time.sleep(1.5)
+        if TRUST_RE.search(hc("read", name, "--lines", "0").stdout or ""):
+            hc("keys", name, "enter")
+            return
+
+
 def deliver(name: str, msg: str) -> bool:
     """Get a helper that has not taken its first message ready, then send it. Trust dialogs are confirmed."""
     for _ in range(3):
         screen = hc("read", name, "--lines", "0").stdout
-        if "Trust this folder" in screen or "Do you trust" in screen:
+        if TRUST_RE.search(screen or ""):
             hc("keys", name, "enter")
             time.sleep(2)
         hc("wait", name, "--timeout", "60")
@@ -616,14 +680,20 @@ def deliver(name: str, msg: str) -> bool:
 
 # The programs a main agent can be: its name, the environment variable that holds its session id, and how
 # the person reopens that session in a new herdr terminal ({session}; resume_any when the id is unknown).
-# Another main agent (Antigravity, …) is one entry. Without one it still works (dispatch, hand off, take
-# over); only RESUME_MAIN, the command to reopen its own session, is missing.
+# Another main agent is one entry. Without one it still works (dispatch, hand off, take over); only
+# RESUME_MAIN, the command to reopen its own session, is missing. names: what its program, path or herdr
+# app id contains (the key itself when not given).
 MAIN_AGENTS = {
     "claude": {"label": "Claude Code", "session_env": "CLAUDE_CODE_SESSION_ID",
                "resume": "claude --resume {session}", "resume_any": "claude --continue"},
     "codex": {"label": "Codex", "session_env": "CODEX_THREAD_ID",
               "resume": "codex resume --sandbox danger-full-access {session}",
               "resume_any": "codex resume --sandbox danger-full-access"},
+    # Antigravity CLI. Its conversation id reaches its tools as ANTIGRAVITY_CONVERSATION_ID when it does
+    # (else it is found by the run folder its conversation names, agy_conversation).
+    "agy": {"label": "Antigravity", "names": ("agy", "antigravity"), "session_env": "ANTIGRAVITY_CONVERSATION_ID",
+            "resume": "agy --dangerously-skip-permissions --conversation {session}",
+            "resume_any": "agy --dangerously-skip-permissions --continue"},
 }
 SHELLS = {"zsh", "bash", "sh", "fish", "login", "nu", "dash", "tcsh", "csh", "ksh"}
 
@@ -631,7 +701,7 @@ SHELLS = {"zsh", "bash", "sh", "fish", "login", "nu", "dash", "tcsh", "csh", "ks
 def main_key(program) -> str | None:
     """MAIN_AGENTS' key for a program name, path or herdr app id (claude-code → claude), else None."""
     name = Path(str(program or "")).name.lower()
-    return next((k for k in MAIN_AGENTS if k in name), None)
+    return next((k for k, v in MAIN_AGENTS.items() if any(n in name for n in v.get("names", (k,)))), None)
 
 
 def dispatcher():
@@ -676,7 +746,15 @@ def agent_on(g) -> str | None:
 AGENTS = {
     "codex": {"label": "Codex", "isolation": "sandbox"},
     "claude": {"label": "Claude Code", "isolation": "weak"},
+    "agy": {"label": "Antigravity", "isolation": "weak"},
 }
+# Antigravity's own folder (conversations/<id>.db). Its model: the call's (run --model), else $CC_HD_AGY_MODEL,
+# else agy's own default. A call that run sends to agy by default gets AGY_DEFAULT_MODEL at its effort.
+AGY_HOME = Path(os.environ.get("CC_HD_AGY_HOME") or Path.home() / ".gemini" / "antigravity-cli")
+AGY_DEFAULT_MODEL = "gemini-4-neon-{effort}"
+# Which agent run starts when it is not told (--agent auto): by the run's kind (run_kind); anything else is Codex.
+DEFAULT_AGENT = {"research": "agy"}
+FALLBACK_ON = ("quota", "auth", "model_unavailable", "exited")  # an agy helper that stopped on these goes to Codex
 TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 
 
@@ -697,6 +775,34 @@ def claude_argv(meta: dict, session: str, msg: str) -> list:
     if rules:
         argv += ["--append-system-prompt", rules]
     return argv + ["--", msg]
+
+
+def agy_argv(meta: dict, msg: str) -> list:
+    """Antigravity as a helper: no sandbox and no system-prompt flag, so its standing rules lead its first
+    message (-i: that prompt, then the session stays open for send)."""
+    argv = ["agy", "--dangerously-skip-permissions", "--effort", meta["effort"]]
+    model = meta.get("model") or os.environ.get("CC_HD_AGY_MODEL")
+    if model:
+        argv += ["--model", model]
+    if meta["mode"] == "read":  # the folder it may read
+        argv += ["--add-dir", meta["dir"]]
+    rules = role_text(meta["mode"], meta["effort"])
+    return argv + ["-i", f"{rules}\n\n---\n\n{msg}" if rules and msg else msg]
+
+
+def agy_conversation(needle: str, since: float = 0):
+    """The newest Antigravity conversation (<AGY_HOME>/conversations/<id>.db, with its -wal) changed since
+    `since` that names `needle` (a helper's task folder, a main agent's run folder), else None."""
+    dbs = [p for p in (AGY_HOME / "conversations").glob("*.db") if p.stat().st_mtime >= since - 600]
+    want = needle.encode()
+    for db in sorted(dbs, key=lambda p: max(x.stat().st_mtime for x in (p, p.with_name(p.name + "-wal")) if x.exists()), reverse=True):
+        for f in (db.with_name(db.name + "-wal"), db):
+            try:
+                if want in f.read_bytes():
+                    return db.stem
+            except OSError:
+                continue
+    return None
 
 
 def codex_thread(meta: dict):
@@ -741,6 +847,11 @@ def resume_argv(meta: dict):
         i = argv.index("--session-id")
         argv[i] = "--resume"
         return argv, session
+    if meta.get("agent") == "agy":
+        session = meta.get("agent_session") or agy_conversation(str(Path(meta["agent_dir"]) / "task-"), meta.get("started_at") or 0)
+        if not session:
+            return None, None
+        return agy_argv(meta, "")[:-2] + ["--conversation", session], session
     tid, home = codex_thread(meta)
     if not tid:
         return None, None
@@ -771,6 +882,9 @@ def start(run: Path, meta: dict, agent: str, msg: str) -> bool:
         meta["agent_session"] = str(uuid.uuid4())
         meta.setdefault("claude_sessions", []).append(meta["agent_session"])  # every one, for its spend
         r = hc(*head, "--", *claude_argv(meta, meta["agent_session"], msg))
+    elif agent == "agy":  # its conversation id is known only once it starts (agy_conversation)
+        meta["agent_session"] = None
+        r = hc(*head, "--", *agy_argv(meta, msg))
     else:
         meta["agent_session"] = None
         r = hc(*head, f"cc-hd-{meta['mode']}-{meta['effort']}", msg)
@@ -784,7 +898,51 @@ def start(run: Path, meta: dict, agent: str, msg: str) -> bool:
     save(run, meta)
     if agent == "claude":  # the message is its command-line prompt
         return True
+    if agent == "agy":  # the same; a folder trust question in front of it is confirmed
+        trust(meta["name"])
+        return True
     return bool((launched.get("first_message") or {}).get("sent")) or deliver(meta["name"], msg)
+
+
+def agy_models():
+    """The model names `agy models` lists (cached an hour in CC_HD_HOME), or None when it cannot tell."""
+    cache = HOME / "agy-models.json"
+    c = read_json(cache, {})
+    if time.time() - c.get("at", 0) < 3600 and c.get("models"):
+        return c["models"]
+    try:
+        r = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    models = sorted(set(re.findall(r"\b[a-z][a-z0-9]*(?:[-.][a-z0-9]+)+\b", r.stdout.lower())))
+    if r.returncode != 0 or not models:
+        return None
+    try:
+        HOME.mkdir(parents=True, exist_ok=True)
+        write_json(cache, {"at": int(time.time()), "models": models})
+    except OSError:
+        pass
+    return models
+
+
+def agy_ready(model: str) -> str | None:
+    """None when Antigravity can take a call on `model`, else why not: not installed, the model not among
+    those `agy models` lists, or a Gemini window of its quota (from magpie) used up and not reset yet.
+    What it cannot tell (agy models fails, no quota reading) does not count against it: a helper that then
+    fails on it falls back at collect."""
+    if not shutil.which("agy"):
+        return "agy_missing"
+    models = agy_models()
+    if models is not None and model and model.lower() not in models:
+        return "model_unavailable"
+    try:
+        u = usage_lib()
+        spent = [w for w in u.windows_for(u.quota("agy", slow=True), model) if w["used"] >= 100]
+    except Exception:  # the quota is a convenience: never let it stop a dispatch
+        spent = []
+    if spent:
+        return "quota:" + "+".join(u.short(w["name"]).replace(" ", "_") for w in spent)
+    return None
 
 
 def cmd_run(a):
@@ -798,6 +956,17 @@ def cmd_run(a):
         old = json.loads(meta_path(run, a.call).read_text())
         if observe(old)["state"] == "live":
             fail(f"ALREADY_RUNNING: {a.call} is live as {old['name']}; use send, or cleanup first")
+    agent = DEFAULT_AGENT.get(run_kind(run), "codex") if a.agent == "auto" else a.agent
+    model = None  # Codex and Claude helpers run on their own default model
+    if agent == "agy":
+        model = a.model or os.environ.get("CC_HD_AGY_MODEL") or AGY_DEFAULT_MODEL.format(effort=a.effort)
+    fell_back = None
+    if agent == "agy":
+        why = agy_ready(model)
+        if why and a.fallback == "none":
+            fail(f"AGENT_UNAVAILABLE: agy cannot take {a.call} on {model} ({why})", "agent_unavailable", 3)
+        if why:
+            fell_back, agent, model = why, "codex", None  # Codex on its own default model
     agent_dir.mkdir(parents=True, exist_ok=True)
     report_dir = HOME / tag / a.call
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -808,8 +977,11 @@ def cmd_run(a):
         "report": str(report_dir / "report.json"), "schema": str(Path(a.schema).resolve()),
         "agent_dir": str(agent_dir), "round": 1, "acked": None, "started_at": int(time.time()),
         "hd": str(Path(__file__).resolve()),  # the panel runs pause/resume/stop with it
-        "agent": "codex", "open": True,  # open: its terminal should be there (closed by cleanup/stop/freeze)
+        "agent": agent, "open": True,  # open: its terminal should be there (closed by cleanup/stop/freeze)
+        "model": model, "fallback": a.fallback if agent == "agy" else None,
     }
+    if fell_back:
+        meta["fell_back"] = {"from": "agy", "to": "codex", "why": fell_back, "at": int(time.time())}
     if a.mode != "read":  # where its work started, for a handoff's "since" diff
         meta["base"] = (subprocess.run(["git", "-C", meta["dir"], "rev-parse", "HEAD"], capture_output=True,
                                        text=True).stdout.strip() or None)
@@ -817,11 +989,15 @@ def cmd_run(a):
     meta.update(dispatcher())
     Path(meta["report"]).unlink(missing_ok=True)
     task = compose(meta, Path(a.prompt).read_text(), 1)
-    sent = launch(run, meta, "codex", task)
+    sent = launch(run, meta, agent, task)
     event(meta, "dispatch", mode=a.mode, effort=a.effort, dir=meta["dir"], name=name, title=a.title,
-          task=str(task), sent=bool(sent))
-    out(call=a.call, name=name, address=meta["address"], report=meta["report"],
-        first_message="sent" if sent else "failed")
+          task=str(task), sent=bool(sent), agent=agent, model=model, fell_back=fell_back)
+    out(call=a.call, name=name, address=meta["address"], report=meta["report"], agent=agent)
+    if model:
+        out(model=model)
+    if fell_back:
+        out(fallback=f"agy→codex why={fell_back}")
+    out(first_message="sent" if sent else "failed")
     if not sent:
         print("----- screen -----")
         print(tail(hc("read", name, "--lines", "0").stdout, 20))
@@ -947,6 +1123,33 @@ def collect_one(run: Path, meta: dict, o: dict):
     if meta["failure"] == "context_limit" and meta.get("open", True):
         # Its session cannot go on: keep what it did now, while the terminal and logs are there.
         out(handoff=freeze(run, meta, 0, "context_limit"))
+    elif (meta.get("agent") == "agy" and meta.get("fallback") == "codex" and meta["failure"] in FALLBACK_ON
+          and meta["report_check"] != "ok"):
+        fall_back(run, meta)
+
+
+def fall_back(run: Path, meta: dict):
+    """An agy helper that stopped on its quota, its sign-in, its model or by exiting, without a good report:
+    hand the call over to Codex on its default model (handover: freeze, then the next round), and say so."""
+    import argparse as ap
+    import contextlib
+    import io
+    why = meta["failure"]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            cmd_handover(ap.Namespace(run=str(run), call=meta["call"], to="codex", effort=None, ask=0,
+                                      why=f"fallback:{why}", note=None, notify=False))
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    kv = dict(l.split("=", 1) for l in buf.getvalue().splitlines() if "=" in l and l.split("=", 1)[0].isupper())
+    if code == 0 and kv.get("FIRST_MESSAGE") == "sent":
+        print(f"FALLBACK={meta['call']} agy→codex why={why} round={kv.get('ROUND')} name={kv.get('NAME')}"
+              " (Codex carries on with the same task and report: keep waiting)")
+    else:
+        print(f"FALLBACK_FAILED={meta['call']} why={why}")
+        print(tail(buf.getvalue(), 6))
 
 
 def retry_kind(meta: dict, o: dict):
@@ -1093,7 +1296,11 @@ def cmd_collect(a):
 def cmd_wait(a):
     run = Path(a.run).resolve()
     deadline = time.time() + a.timeout
+    heard = answers_size(run)
     while True:
+        if answers_size(run) > heard and open_answers(run):
+            out(wait="answer")  # the person answered in the panel; main() prints ANSWERS=
+            return
         c = control(run)
         state = "adopted" if not_mine(c) else c["state"]
         if state in ("stopped", "handoff", "adopted") or (state != "running" and time.time() >= deadline):
@@ -1132,7 +1339,7 @@ def cmd_wait(a):
             out(wait="timeout", working=",".join(m["call"] for m, _ in working), retrying=retrying_line(retrying), **net_kv())
             return
         due = [m["retry"]["at"] - now for m in retrying if m["retry"].get("key")]
-        hc("wait", "--children", "any", "--timeout", str(int(max(5, min(60, deadline - now, *due)))))
+        hc("wait", "--children", "any", "--timeout", str(int(max(5, min(30, deadline - now, *due)))))
         time.sleep(1)
 
 
@@ -1173,7 +1380,7 @@ def cmd_cleanup(a):
 FREEZE_MSG = ("负责人要把你手上的工作移交给另一个 agent。立刻停下手上的工作，不要再修改工作区的文件或运行命令。"
               "把交接说明写进 {progress}（Markdown，只写这一个文件）：已完成什么（文件、要点）；正在做什么、做到哪一步；"
               "还剩什么；试过但走不通的路；验收命令最近一次的结果；接手的人要注意的坑。写完就结束这一轮。")
-NO_ASK = ("context_limit", "quota", "auth", "refused")  # it cannot answer: freeze without asking
+NO_ASK = ("context_limit", "quota", "auth", "refused", "model_unavailable")  # it cannot answer: freeze without asking
 
 
 def usage_lib():
@@ -1216,6 +1423,8 @@ def helper_digest(meta: dict) -> dict:
     lib = handoff_lib()
     if (meta.get("agent") or "codex") == "claude":
         return lib.claude_digest(lib.claude_transcript(meta.get("agent_session"), meta.get("workdir")))
+    if meta.get("agent") == "agy":  # its conversation is not readable here: the screen and its note carry it
+        return {"plan": None, "commands": [], "files": [], "messages": [], "asked": []}
     paths = [p for p in (meta.get("rollouts") or []) if os.path.exists(p)] or codex_rollouts(meta)
     meta["rollouts"] = paths
     return lib.codex_digest(paths)
@@ -1464,7 +1673,10 @@ def main_of(run: Path, c: dict = None) -> dict:
                  default={})
     term = c.get("owner") or newest.get("parent")
     now = agent_on(hc_json("get", term)) if term else None
-    return {"terminal": term, "agent": newest.get("dispatcher_agent"), "session": newest.get("session"),
+    session = newest.get("session")
+    if not session and main_key(newest.get("dispatcher_agent")) == "agy":  # its id may not reach its tools
+        session = agy_conversation(str(run), newest.get("started_at") or 0)
+    return {"terminal": term, "agent": newest.get("dispatcher_agent"), "session": session,
             "space": newest.get("space"), "cwd": newest.get("claude_cwd") or str(run.parent.parent),
             "live": bool(now), "now": now}
 
@@ -1535,6 +1747,18 @@ ADOPT_NOTE_LIVE = ("herdr 仍把这些子 agent 的通知（<hc>…</hc>）发�
                    "所以你只靠 wait/collect 获知它们的状态。")
 
 
+def earlier_mains(meta: dict, frm, me: dict) -> list:
+    """The main agents this call had before the one adopting it, oldest first: [{terminal, agent, session}].
+    Their sessions stay readable after adopt rewrites parent / dispatcher_agent / session (the panel reads
+    an earlier Claude Code main agent's transcript for its background tasks)."""
+    mains = [m for m in meta.get("mains") or [] if isinstance(m, dict)]
+    for m in ({"terminal": meta.get("parent"), "agent": meta.get("dispatcher_agent"), "session": meta.get("session")},
+              {k: (frm or {}).get(k) for k in ("terminal", "agent", "session")}):
+        if m["session"] and m["session"] != me.get("session") and all(x.get("session") != m["session"] for x in mains):
+            mains.append(m)
+    return mains
+
+
 def adopt_package(run: Path, data: dict, me: dict, c: dict) -> dict:
     """Record this main agent as every call's parent and put the run back in its state before the handoff,
     owned by this terminal. → what to print (KEY=value)."""
@@ -1544,6 +1768,7 @@ def adopt_package(run: Path, data: dict, me: dict, c: dict) -> dict:
         meta = load(run, call)
         meta["adopted"] = {"from": meta.get("parent"), "by": me["parent"], "at": int(time.time()),
                            "package": data["_dir"]}
+        meta["mains"] = earlier_mains(meta, data.get("from"), me)
         meta.update(me)
         save(run, meta)
         event(meta, "adopt", frm=old, by=me["parent"], agent=me["dispatcher_agent"], package=data["_dir"])
@@ -1659,6 +1884,182 @@ def parked_why(card: dict) -> str:
     return "user"
 
 
+# ---- asks: what the main agent waits on the person for, and the person's answers from the panel ----------
+
+ASK_KINDS = ("decision", "question")
+
+
+def read_json(path: Path, default):
+    try:
+        v = json.loads(path.read_text())
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path: Path, value):
+    tmp = path.with_name(path.name + f".{os.getpid()}")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def check_ask(i: str, item) -> str | None:
+    """Why an asks.json item is malformed, or None."""
+    if not isinstance(item, dict):
+        return f"{i}: not an object"
+    if item.get("kind") not in ASK_KINDS:
+        return f"{i}: kind must be decision or question"
+    if not isinstance(item.get("title"), str) or not item["title"].strip():
+        return f"{i}: title is required"
+    opts = item.get("options") or []
+    if not isinstance(opts, list) or any(not isinstance(o, dict) or not o.get("key") or not o.get("label") for o in opts):
+        return f"{i}: options are [{{key, label, detail}}]"
+    if len({o["key"] for o in opts}) != len(opts):
+        return f"{i}: option keys repeat"
+    if item["kind"] == "decision" and len(opts) < 2:
+        return f"{i}: a decision needs at least 2 options"
+    if item.get("recommend") and item["recommend"] not in {o["key"] for o in opts}:
+        return f"{i}: recommend is not an option key"
+    return None
+
+
+def open_items(run: Path) -> dict:
+    """id -> item: asks.json, cards parked for the person (card:<id>) and state.json pending_decisions
+    (pending:<key>), as the panel's pendingItems lists them."""
+    items = {k: v for k, v in read_json(run / "asks.json", {}).items() if isinstance(v, dict)}
+    st = read_json(run / "state.json", {})
+    tasks = st.get("tasks") if isinstance(st.get("tasks"), dict) else {}
+    asked_cards = {v.get("card") for v in items.values()}
+    parked = [k for k, v in tasks.items() if isinstance(v, dict) and v.get("status") == "parked" and parked_why(v) == "user"]
+    for k in parked:
+        if k not in asked_cards:
+            items[f"card:{k}"] = {"kind": "decision", "title": f"搁置的卡 {k}：继续还是不做", "card": k}
+    for k, v in pending_decisions(st).items():
+        text = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+        card = legacy_card(k, parked)
+        if card and f"card:{card}" in items:  # the same matter as a parked card: one item
+            items[f"card:{card}"].setdefault("pending", []).append(k)
+            items[f"card:{card}"]["context"] = text
+        elif not card or card not in asked_cards:
+            items[f"pending:{k}"] = {"kind": "question", "title": k, "context": text}
+    return items
+
+
+def pending_decisions(st: dict) -> dict:
+    """Older runs' own list of what waits on the person: state.json pending_decisions {key: text}."""
+    v = st.get("pending_decisions")
+    return v if isinstance(v, dict) else {}
+
+
+def legacy_card(key: str, cards: list) -> str | None:
+    """The parked card a pending_decisions key is about: the card id itself or <card>-<what>, longest first."""
+    for c in sorted(cards, key=len, reverse=True):
+        if key == c or key.startswith(c + "-"):
+            return c
+    return None
+
+
+def answers(run: Path) -> list:
+    out = []
+    try:
+        for line in (run / "answers.jsonl").read_text().splitlines():
+            try:
+                a = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(a, dict) and a.get("id"):
+                out.append(a)
+    except OSError:
+        pass
+    return out
+
+
+def open_answers(run: Path) -> list:
+    """The newest answer to each item still open, given since it was (last) asked."""
+    items, last = open_items(run), {}
+    for a in answers(run):
+        if a["id"] in items and (a.get("at") or 0) >= (items[a["id"]].get("asked") or 0):
+            last[a["id"]] = a
+    return list(last.values())
+
+
+def answer_words(a: dict) -> str:
+    pick = f"{a.get('choice')}. {a.get('label')}" if a.get("choice") else ""
+    return "；".join(x for x in (pick, (a.get("text") or "").strip()) if x) or "(empty)"
+
+
+def answers_check(run: Path):
+    """After wait / collect: the person's answers from the panel that the main agent has not acted on."""
+    got = open_answers(run)
+    if not got:
+        return
+    out(answers=",".join(a["id"] for a in got))
+    for a in got:
+        print(f"ANSWER {a['id']}: {answer_words(a)}")
+    print("NOTE: the person answered in the panel; act on it as shared/herdr.md 待决项 says, then ask --resolve.")
+
+
+def answers_size(run: Path) -> int:
+    try:
+        return (run / "answers.jsonl").stat().st_size
+    except OSError:
+        return 0
+
+
+def cmd_ask(a):
+    run = Path(a.run).resolve()
+    if not run.is_dir():
+        fail(f"no run folder {run}", code=2)
+    path = run / "asks.json"
+    if a.add:
+        try:
+            got = json.loads(Path(a.add).read_text())
+        except (OSError, ValueError) as e:
+            fail(f"cannot read {a.add}: {e}", code=2)
+        if isinstance(got, dict) and "id" in got and "kind" in got:
+            got = {got.pop("id"): got}
+        if not isinstance(got, dict) or not got:
+            fail("--add wants {id: item} or one item with id", code=2)
+        bad = [x for x in (check_ask(i, v) for i, v in got.items()) if x]
+        if bad:
+            fail("ASK_INVALID " + "; ".join(bad), code=2)
+        asks = read_json(path, {})
+        now = int(time.time())
+        for i, v in got.items():
+            v["asked"] = now  # asked again: an earlier answer no longer counts
+            asks[i] = v
+        write_json(path, asks)
+        out(asked=",".join(got))
+        return
+    if a.resolve:
+        if not a.decision:
+            fail("--resolve needs --decision TEXT", code=2)
+        asks = read_json(path, {})
+        found = asks.pop(a.resolve, None) is not None
+        if found:
+            write_json(path, asks)
+        stp = run / "state.json"
+        st = read_json(stp, {})
+        pend = pending_decisions(st)
+        if a.resolve.startswith("pending:"):
+            found = pend.pop(a.resolve[len("pending:"):], None) is not None or found
+        elif a.resolve.startswith("card:"):  # an older run's pending_decisions about the card go with it
+            for k in [k for k in pend if legacy_card(k, [a.resolve[len("card:"):]])]:
+                pend.pop(k)
+        found = found or a.resolve.startswith("card:")
+        if not isinstance(st.get("decisions"), dict):
+            st["decisions"] = {}
+        st["decisions"][a.resolve] = a.decision
+        write_json(stp, st)
+        out(resolved=a.resolve, found="yes" if found else "no")
+        return
+    items, got = open_items(run), {x["id"]: x for x in open_answers(run)}
+    out(open=len(items))
+    for i, v in items.items():
+        print(f"ASK {i}\t{v.get('kind')}\t{v.get('title')}" + (f"\tcard={v['card']}" if v.get("card") else "")
+              + (f"\tANSWERED: {answer_words(got[i])}" if i in got else ""))
+
+
 def run_summary(run: Path, terms: dict) -> dict:
     """What `runs` shows of one run; `terms` maps terminal addresses and names to `hc ls` entries."""
     c = control(run)
@@ -1699,8 +2100,9 @@ def run_summary(run: Path, terms: dict) -> dict:
         why.append(f"{lost} lost")
     if cards and cards["open"]:
         why.append(f"{cards['open']} cards open")
-    if cards and cards["decide"]:
-        why.append(f"{cards['decide']} parked for you")
+    asks = open_items(run)
+    if asks:
+        why.append(f"{len(asks)} waiting on you")
     if not cards and live > ok and live:
         why.append("helpers at work")
     finished = bool(st.get("finished")) or not why
@@ -1709,7 +2111,7 @@ def run_summary(run: Path, terms: dict) -> dict:
             "main": "live" if main_now else "gone" if term else "none", "main_agent": main_now or newest.get("dispatcher_agent"),
             "main_terminal": term, "calls": len(metas), "live": live, "lost": lost, "cards": cards,
             "finished": finished, "why": why, "archived": (run / "archived").exists(),
-            "last": int(max(times)) if times else 0, "parent": st.get("parent")}
+            "last": int(max(times)) if times else 0, "parent": st.get("parent"), "asks": len(asks)}
 
 
 def cmd_runs(a):
@@ -1739,6 +2141,131 @@ def cmd_runs(a):
                          f"helpers={r['calls']} live={r['live']} lost={r['lost']}", f"cards={cards}",
                          f"last={last}", "open=" + (", ".join(r["why"]) or ("finished" if r["finished"] else "-")),
                          *([f"parent={r['parent']}"] if r["parent"] else [])]))
+
+
+def drop_cache_keys(path: Path, drop):
+    """Remove the entries `drop(section, key)` names from one of the panel's JSON caches, if it is there."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for name, section in data.items():
+        if isinstance(section, dict):
+            for k in [k for k in section if drop(name, k)]:
+                section.pop(k)
+    tmp = path.with_name(path.name + f".{os.getpid()}")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
+
+
+def cmd_delete(a):
+    """Delete an archived run and what this script and the panel keep of it: its helpers' terminals (still
+    open ones), reports and progress notes ($CC_HD_HOME/<tag>), worktree snapshots (refs/cc-dispatch/<run>/*),
+    the panel's cache entries, the retro ledger's entry, then the run folder itself (meta.json, events,
+    screens, tasks, control, asks, handoff packages). Code is not touched: worktrees and cc/<run>/* branches
+    stay, and so do Codex's and Claude Code's own session logs."""
+    run = Path(a.run).resolve()
+    if not run.is_dir() or run.parent.name != ".cc-dispatch" or not ((run / "agents").is_dir() or (run / "state.json").exists()):
+        fail(f"NO_RUN: {run} is not a cc-dispatch run folder (<repo>/.cc-dispatch/<run>)", code=2)
+    if not (run / "archived").exists():
+        fail(f"NOT_ARCHIVED: archive {run.name} first; only an archived run is deleted", code=2)
+    state = control(run)["state"]
+    if state in ("paused", "stopping", "handoff"):
+        fail(f"RUN_BUSY: {run.name} is {state}", code=2)
+    repo = run.parent.parent
+    metas = []
+    for c in calls(run):
+        try:
+            metas.append(json.loads(meta_path(run, c).read_text()))
+        except (OSError, ValueError):
+            pass
+    closed = 0
+    for meta in metas:
+        if meta.get("open") and observe(meta)["state"] != "gone":
+            hc("kill", meta.get("address") or meta["name"])
+            hc("rm", meta.get("address") or meta["name"])
+            closed += 1
+    # Reports: $CC_HD_HOME/<tag>/<call>/ (only ever below HOME).
+    tags = {(run / "agents" / "tag").read_text().strip()} if (run / "agents" / "tag").exists() else set()
+    tags |= {Path(m["report"]).parent.parent.name for m in metas if m.get("report")}
+    home = HOME.resolve()
+    for tag in tags:
+        d = (HOME / tag).resolve()
+        if tag and d.parent == home and d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+    # Worktree snapshots.
+    refs = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)", f"refs/cc-dispatch/{run.name}/"],
+                          capture_output=True, text=True).stdout.split()
+    for ref in refs:
+        subprocess.run(["git", "-C", str(repo), "update-ref", "-d", ref], capture_output=True)
+    # The panel's caches: helpers' session logs (spend), the run's main-agent lookups and handoff packages.
+    rollouts = {p for m in metas for p in (m.get("rollouts") or [])}
+    drop_cache_keys(HOME / ".panel-stats.json", lambda _s, k: k in rollouts)
+    drop_cache_keys(HOME / ".panel-bg.json", lambda s, k: (s in ("resolved", "missed") and k.endswith("|" + str(run)))
+                    or (s == "packages" and k.startswith(str(run) + os.sep)))
+    ledger = repo / ".cc-dispatch" / ".retro-reviewed.json"
+    try:
+        led = json.loads(ledger.read_text())
+        if isinstance(led, dict) and led.pop(run.name, None) is not None:
+            ledger.write_text(json.dumps(led, ensure_ascii=False, indent=1))
+    except (OSError, ValueError):
+        pass
+    shutil.rmtree(run)
+    out(deleted=run, helpers=len(metas), closed=closed, reports=len(tags), snapshots=len(refs))
+
+
+def cmd_retire(a):
+    """End a run nobody will carry on: one left handing off that no main agent adopted, or one whose results
+    another run already took. Closes its helpers' terminals still open (reports stay, as cleanup does), puts
+    control.json back to the state before a handoff (or pause / stop) with `retired`, writes "finished" in
+    state.json, and archives it unless --keep. Refuses while a helper is at work or a live main agent other
+    than the caller still has the run (not handing off), unless --force."""
+    run = Path(a.run).resolve()
+    if not run.is_dir() or run.parent.name != ".cc-dispatch" or not ((run / "agents").is_dir() or (run / "state.json").exists()):
+        fail(f"NO_RUN: {run} is not a cc-dispatch run folder (<repo>/.cc-dispatch/<run>)", code=2)
+    c = control(run)
+    if c["state"] == "stopping":
+        fail(f"RUN_BUSY: {run.name} is stopping; retire it once that is done", code=2)
+    metas = [load(run, k) for k in calls(run)]
+    seen = {m["call"]: observe(m) for m in metas if m.get("open")}
+    if not a.force:
+        working = [k for k, o in seen.items() if o["state"] == "live" and o["status"] == "working"]
+        if working:
+            fail(f"HELPERS_AT_WORK: {', '.join(working)} still working; wait, stop the run, or --force", code=3)
+        if c["state"] != "handoff":
+            newest = max(metas, key=lambda m: m.get("started_at") or 0, default={})
+            term = c.get("owner") or newest.get("parent")
+            if term and term != os.environ.get("HC_TERMINAL_ID") and agent_on(hc_json("get", term)):
+                fail(f"MAIN_LIVE: its main agent ({term}) still has the run; ask it, or --force", code=3)
+    closed = []
+    for m in metas:
+        if m["call"] not in seen:
+            continue
+        backup_report(m)
+        if seen[m["call"]]["state"] != "gone":
+            hc("kill", m.get("address") or m["name"])
+            hc("rm", m.get("address") or m["name"])
+            closed.append(m["call"])
+        m["open"] = False
+        m.pop("lost", None)
+        save(run, m)
+        event(m, "cleanup", why="retire")
+    now = int(time.time())
+    before = (c.get("prev") if c["state"] == "handoff" else None) or {"state": "running"}
+    if before.get("state") not in ("running", "stopped"):
+        before = {"state": "running"}  # nothing is held or stopping any more
+    keep = {k: c[k] for k in ("owner", "adopted") if k in c}
+    set_control(run, **{k: v for k, v in before.items() if k not in ("at",)}, **keep,
+                retired={"at": now, "from": c["state"], "by": os.environ.get("HC_TERMINAL_ID") or "panel",
+                         **({"package": c["package"]} if c.get("package") else {})})
+    st = read_json(run / "state.json", {})
+    st["finished"] = now
+    write_json(run / "state.json", st)
+    if not a.keep:
+        (run / "archived").write_text(f"{now}\n")
+    out(retired=run, was=c["state"], closed=",".join(closed) or "-", archived="no" if a.keep else "yes")
 
 
 # ---- run control commands --------------------------------------------------------------------------
@@ -1945,6 +2472,11 @@ def main():
     r.add_argument("--mode", required=True, choices=["read", "write", "net"])
     r.add_argument("--effort", default="high", choices=["medium", "high"])
     r.add_argument("--title", help="a few English words on the task, shown in herdr's agent list")
+    r.add_argument("--agent", default="auto", choices=["auto", *AGENTS],
+                   help="auto: agy for a research run, Codex for every other kind")
+    r.add_argument("--model", help="agy's model (default $CC_HD_AGY_MODEL, else gemini-4-neon-<effort>)")
+    r.add_argument("--fallback", default="codex", choices=["codex", "none"],
+                   help="when agy cannot take the call or stops on its quota, sign-in or model: Codex, or fail")
     s = sub.add_parser("send")
     for flag in ("--run", "--call", "--prompt"):
         s.add_argument(flag, required=True)
@@ -1990,20 +2522,34 @@ def main():
     tk = sub.add_parser("takeover")
     tk.add_argument("--run", required=True)
     tk.add_argument("--force", action="store_true", help="even while the old main agent still runs (the user said so)")
+    dl = sub.add_parser("delete")
+    dl.add_argument("--run", required=True)
+    rt = sub.add_parser("retire")
+    rt.add_argument("--run", required=True)
+    rt.add_argument("--keep", action="store_true", help="do not archive it")
+    rt.add_argument("--force", action="store_true", help="even with a helper at work or its main agent live")
     rs = sub.add_parser("runs")
     rs.add_argument("--repo", help="a folder in the repository (default: here)")
     rs.add_argument("--all", action="store_true", help="also finished and archived runs")
     rs.add_argument("--json", action="store_true")
+    ak = sub.add_parser("ask")
+    ak.add_argument("--run", required=True)
+    g = ak.add_mutually_exclusive_group(required=True)
+    g.add_argument("--add", metavar="FILE", help="JSON: {id: item} or one item with id")
+    g.add_argument("--resolve", metavar="ID")
+    g.add_argument("--list", action="store_true")
+    ak.add_argument("--decision", help="with --resolve: what was decided, recorded in state.json decisions")
     hf = sub.add_parser("handoff")
     hf.add_argument("--run", required=True)
     hf.add_argument("--why", default="manual", help="manual (the user asked) or usage (this agent is near its limit)")
     hf.add_argument("--no-notes", action="store_true", help="hand off without <run>/handoff-notes.md")
     a = p.parse_args()
-    {"recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
+    {"recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "delete": cmd_delete, "retire": cmd_retire, "ask": cmd_ask, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
      "status": cmd_status, "diagnose": cmd_diagnose, "cleanup": cmd_cleanup, "freeze": cmd_freeze,
      "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop}[a.cmd](a)
     if a.cmd in ("wait", "collect"):
         usage_check(Path(a.run).resolve())
+        answers_check(Path(a.run).resolve())
 
 
 if __name__ == "__main__":

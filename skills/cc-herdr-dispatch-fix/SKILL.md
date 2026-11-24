@@ -78,7 +78,7 @@ python3 $HD run --run $RD --call fix --mode write --effort high \
 2. **范围**：`git -C "$FIX_WT" status --porcelain` 应当只有这些问题相关的文件和新测试；越界的改动撤销。
 3. **测试**：跑回报里的测试命令，只看结果（shared/herdr.md"核对用最便宜的信号"）。
 4. **diff**：先看 `git -C "$FIX_WT" diff --stat`，再细看每个问题对应的那几段修复，确认修的是根因、回归测试断言的是行为、没有弱化已有测试。
-5. 回报说某个问题需要改契约（`open_questions` 里提到、`status` 为 `partial`），这个问题改标为"需要重新设计"。
+5. 回报说某个问题需要改契约（`open_questions` 里提到、`status` 为 `partial`），这个问题改标为"需要重新设计"。其余 `open_questions` 里需要用户回答的（复现不出来缺的信息、范围外是否要修），按 shared/herdr.md「待决项」写成待决项。
 
 每个问题最多返工 2 轮，仍然没修好就标为"未解决"，写明卡在哪里。
 
