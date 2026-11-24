@@ -86,3 +86,11 @@ test("panel text keeps technical nouns in English", async () => {
   }
   assert.doesNotMatch(main, /renderRun\b|renderGroups\b|还没有子 agent|no helper yet|Needs you/);
 });
+
+test("panel toggle and header are named Dispatch", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  // 插件名保留英文 Dispatch：右上角开关和面板标题都用它，不译成“派发”。
+  assert.equal(main.match(/\.child\("Dispatch"\)/g)?.length, 2, "开关和面板标题都应写 .child(\"Dispatch\")");
+  assert.doesNotMatch(main, /\.child\("派发"\)/);
+});

@@ -222,7 +222,7 @@ function toggle() {
       .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(() => run("layout.toggle", { id: PANEL }))
-      .child(mark(14, on ? t.foreground : t.muted)).child("派发")
+      .child(mark(14, on ? t.foreground : t.muted)).child("Dispatch")
       .when(live.length > 0, (el) => el.child(h_flex().h(16).px(5).items_center().rounded(8).bg(busy ? t.working : t.selected)
         .text_size(11).text_color(busy ? t.background : t.muted).child(String(busy || live.length)))));
 }
@@ -479,7 +479,7 @@ export default class Dispatch extends View {
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(S().body)
       .child(h_flex().h(42).flex_none().pl(14).pr(8).gap(8).items_center().border_b(1).border_color(t.border)
         .child(mark(17, t.accent))
-        .child(div().text_size(S().title).font_semibold().child("派发"))
+        .child(div().text_size(S().title).font_semibold().child("Dispatch"))
         .child(div().flex_1())
         .when(Boolean(this.repo), (el) => el.child(action("new-topic", "新建 Topic", "task", t, () => {
           const owner = this.receiver({});
