@@ -505,14 +505,6 @@ class Topics(unittest.TestCase):
         self.assertEqual(json.loads(self.start(topic, task)["DETAIL"]), text)
         self.assertFalse(marker.exists())
 
-    def test_placeholders_are_registered(self):
-        topic = self.init()
-        for name in ("deliver", "pause", "resume", "stop", "archive", "unarchive", "delete"):
-            args = [] if name == "deliver" else ["--topic", topic]
-            r = self.w.hd("topic", name, "--repo", str(self.w.repo), *args)
-            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertEqual(r.stdout, "not implemented\nFAILURE=other\n")
-
     def test_argument_errors_use_argparse(self):
         topic = self.init()
         task = self.task(topic)

@@ -2387,16 +2387,278 @@ def cmd_topic_refined(a):
     out(tasks=",".join(task_ids))
 
 
-def cmd_topic_unimplemented(a):
-    fail("not implemented", failure="other")
+def topic_runs(repo, data):
+    root = Path(repo) / ".cc-dispatch"
+    return [root / name for name in dict.fromkeys(
+        task["run"] for task in data["tasks"].values() if task.get("run"))]
+
+
+def topic_task_done(task, run):
+    c = control(run)
+    return (task.get("finished_at") is not None
+            or read_json(run / "state.json", {}).get("finished") is not None
+            or c["state"] == "stopped" or bool(c.get("retired")))
+
+
+def clear_topic_requests(data, backlog):
+    for task in data["tasks"].values():
+        task["request"] = None
+    for item in backlog["items"]:
+        if item.get("request"):
+            item.update(request=None, status="open", updated_at=time.time())
+
+
+def cmd_topic_pause(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        if data.get("paused_at") is None:
+            data["paused_at"] = time.time()
+        save_topic(repo, a.topic, data)
+        paused = data.setdefault("paused_runs", [])
+        for run in topic_runs(repo, data):
+            if not run.is_dir() or control(run)["state"] != "running":
+                continue
+            cmd_pause(argparse.Namespace(run=str(run)))
+            if control(run)["state"] == "paused" and run.name not in paused:
+                paused.append(run.name)
+                save_topic(repo, a.topic, data)
+    out(paused=",".join(paused))
+
+
+def cmd_topic_resume(a):
+    repo = topic_repo(a)
+    resumed = []
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        data["paused_at"] = None
+        save_topic(repo, a.topic, data)
+        bound = {run.name: run for run in topic_runs(repo, data)}
+        for name in list(data.get("paused_runs") or []):
+            run = bound.get(name)
+            if run and run.is_dir():
+                cmd_resume(argparse.Namespace(run=str(run)))
+                resumed.append(name)
+            # activate_run updates this same Topic, so never save the pre-resume snapshot.
+            data = load_topic(repo, a.topic)
+            data["paused_runs"] = [n for n in data.get("paused_runs", []) if n != name]
+            save_topic(repo, a.topic, data)
+    out(resumed=",".join(resumed))
+
+
+def cmd_topic_stop(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        backlog = load_backlog(repo, a.topic)
+        clear_topic_requests(data, backlog)
+        save_topic(repo, a.topic, data)
+        save_backlog(repo, a.topic, backlog)
+        runs = [run for run in topic_runs(repo, data) if run.is_dir() and any(
+            task.get("run") == run.name and not topic_task_done(task, run)
+            for task in data["tasks"].values())]
+    stopped = []
+    for run in runs:
+        cmd_stop(argparse.Namespace(run=str(run), wait=getattr(a, "wait", 180)))
+        stopped.append(run.name)
+    out(stopped=",".join(stopped))
+
+
+def cmd_topic_archive(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        runs = topic_runs(repo, data)
+        reasons = [f"{tid} ({task['run']}): task unfinished" for tid, task in data["tasks"].items()
+                   if task.get("run") and not topic_task_done(
+                       task, Path(repo) / ".cc-dispatch" / task["run"])]
+        for run in runs:
+            answered = {answer["id"] for answer in open_answers(run)}
+            pending = [key for key in open_items(run) if key not in answered]
+            if pending:
+                reasons.append(f"{run.name}: unanswered {','.join(pending)}")
+        if reasons:
+            fail("cannot archive: " + "; ".join(reasons), failure="ARCHIVE_BLOCKED", code=3)
+        backlog = load_backlog(repo, a.topic)
+        clear_topic_requests(data, backlog)
+        data["archived"] = time.time()
+        for run in runs:
+            if run.is_dir():
+                (run / "archived").write_text(f"{data['archived']}\n")
+        save_topic(repo, a.topic, data)
+        save_backlog(repo, a.topic, backlog)
+    out(archived=a.topic)
+
+
+def cmd_topic_unarchive(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        data["archived"] = None
+        for run in topic_runs(repo, data):
+            (run / "archived").unlink(missing_ok=True)
+        save_topic(repo, a.topic, data)
+    out(unarchived=a.topic)
+
+
+def cmd_topic_delete(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        if data.get("archived") is None:
+            fail(f"archive topic {a.topic} first", failure="NOT_ARCHIVED", code=3)
+        runs = topic_runs(repo, data)
+        reasons = []
+        for run in runs:
+            if not run.exists():
+                continue
+            if not run.is_dir() or not ((run / "agents").is_dir() or (run / "state.json").exists()):
+                reasons.append(f"{run.name}: invalid run folder")
+            if not (run / "archived").exists():
+                reasons.append(f"{run.name}: not archived")
+            state = control(run)["state"]
+            if state in ("paused", "stopping", "handoff"):
+                reasons.append(f"{run.name}: {state}")
+            for call in calls(run):
+                meta = load(run, call)
+                if not meta.get("open"):
+                    continue
+                seen = observe(meta)
+                if seen["state"] == "live" and seen["status"] == "working":
+                    reasons.append(f"{run.name}/{call}: HELPERS_AT_WORK")
+        if reasons:
+            fail("cannot delete: " + "; ".join(reasons), failure="DELETE_BLOCKED", code=3)
+        if data.get("deleting") is None:
+            data["deleting"] = time.time()
+        save_topic(repo, a.topic, data)
+        for run in runs:
+            if run.exists():
+                cmd_delete(argparse.Namespace(run=str(run)))
+        shutil.rmtree(topic_dir(repo, a.topic))
+    out(deleted=a.topic, runs=len(runs))
+
+
+def topic_pending_requests(data, backlog):
+    requests = []
+    for tid, task in data["tasks"].items():
+        req = task.get("request")
+        if (not task.get("run") and req and req.get("type") == "dispatch"
+                and req.get("target") == "owner" and req.get("delivered_at") is None):
+            requests.append((req, tid, None))
+    refining = {}
+    for item in backlog["items"]:
+        req = item.get("request")
+        if (req and req.get("type") == "refine" and req.get("target") == "owner"
+                and req.get("delivered_at") is None):
+            group = refining.setdefault(req["id"], (req, None, []))
+            group[2].append(item["id"])
+    requests.extend(refining.values())
+    return sorted(requests, key=lambda entry: entry[0]["at"])
+
+
+def topic_owner_busy(repo, terminal):
+    for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
+        with topic_lock(repo, path.parent.name):
+            data = read_json(path, {})
+            if (data.get("owner") or {}).get("terminal") != terminal:
+                continue
+            for task in data.get("tasks", {}).values():
+                if task.get("run") and not topic_task_done(task, Path(repo) / ".cc-dispatch" / task["run"]):
+                    return True
+    return False
+
+
+def deliver_topic_request(repo, data, request, task_id, item_ids):
+    owner = data.get("owner") or {}
+    terminal = owner.get("terminal")
+    if not terminal:
+        return None
+    info = hc_json("get", terminal)
+    if (not info or info.get("state") != "live"
+            or (info.get("status") or {}).get("state") not in ("idle", "done")):
+        return None
+    if owner.get("agent") == "claude":
+        screen = hc("read", terminal)
+        prompts = re.findall(r"❯ ([^\r\n]*)", screen.stdout)
+        if screen.returncode or (prompts and prompts[-1].strip()):
+            return None
+    # Delivery always uses the actual owner; --agent also serves requests for a new tab.
+    message = topic_message(repo, data, {**request, "agent": owner.get("agent")}, task_id, item_ids)
+    if owner.get("agent") == "claude" and request["type"] == "dispatch":
+        result = hc("keys", terminal, *("space" if ch == " " else ch for ch in message), "enter")
+    else:
+        result = hc("send", terminal, message, "--if", "idle", "--json")
+    if result.returncode:
+        return None
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError:
+        reply = {}
+    if isinstance(reply, dict) and (reply.get("error") or reply.get("started") is False):
+        return None
+    return info.get("address") or terminal
+
+
+def cmd_topic_deliver(a):
+    repo = topic_repo(a)
+    root = Path(repo) / ".cc-dispatch" / "topics"
+    root.mkdir(parents=True, exist_ok=True)
+    delivered, owners = [], set()
+    with (root / ".deliver.lock").open("a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            out(delivered="")
+            return
+        for path in sorted(root.glob("*/topic.json")):
+            tid = path.parent.name
+            with topic_lock(repo, tid):
+                data = read_json(path, {})
+                terminal = (data.get("owner") or {}).get("terminal")
+            # Scan other Topics without holding this Topic's lock.
+            busy = bool(terminal) and topic_owner_busy(repo, terminal)
+            with topic_lock(repo, tid):
+                data = read_json(path, {})
+                if not data or any(data.get(k) is not None for k in ("archived", "paused_at", "deleting")):
+                    continue
+                owner = data.get("owner") or {}
+                if owner.get("terminal") != terminal or terminal in owners:
+                    continue
+                backlog = load_backlog(repo, tid)
+                pending = topic_pending_requests(data, backlog)
+                if not pending:
+                    continue
+                request, task_id, item_ids = pending[0]
+                if request["type"] == "dispatch" and busy:
+                    continue
+                info = hc_json("get", terminal) if terminal else None
+                if (info or {}).get("address") in owners:
+                    continue
+                address = deliver_topic_request(repo, data, request, task_id, item_ids)
+                if not address:
+                    continue
+                now = time.time()
+                if task_id:
+                    data["tasks"][task_id]["request"]["delivered_at"] = now
+                    save_topic(repo, tid, data)
+                else:
+                    for item in backlog["items"]:
+                        if (item.get("request") or {}).get("id") == request["id"]:
+                            item["request"]["delivered_at"] = now
+                    save_backlog(repo, tid, backlog)
+                owners.update((terminal, address))
+                delivered.append(f"{tid}:{request['id']}")
+    out(delivered=",".join(delivered))
 
 
 def cmd_topic(a):
     handlers = {"init": cmd_topic_init, "request": cmd_topic_request, "start": cmd_topic_start,
-                "finish": cmd_topic_finish, "refined": cmd_topic_refined}
+                "finish": cmd_topic_finish, "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
+                "pause": cmd_topic_pause, "resume": cmd_topic_resume, "stop": cmd_topic_stop,
+                "archive": cmd_topic_archive, "unarchive": cmd_topic_unarchive, "delete": cmd_topic_delete}
     handler = (cmd_topic_task if a.topic_cmd.startswith("task-") else
                cmd_topic_backlog if a.topic_cmd.startswith("backlog-") else
-               handlers.get(a.topic_cmd, cmd_topic_unimplemented))
+               handlers[a.topic_cmd])
     handler(a)
 
 

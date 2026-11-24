@@ -2,7 +2,9 @@
 """A stand-in for herdr-core's `hc`, enough for hd_dispatch.py's tests.
 
 State is $FAKE_HC (a JSON file): {"terminals": {name: {address, state, status, turn, screen, labels,
-foreground, cwd, argv}}, "calls": [[arg, ...], ...]}. Every call is appended to "calls". `send` to a
+foreground, cwd, argv}}, "calls": [[arg, ...], ...]}. Calls are appended to "calls" except a `send`
+whose `--if` condition fails (exit 10, status_mismatch). `keys` submits text when it reaches `enter`;
+`read` returns the terminal's configured "screen". `send` to a
 live terminal answers {"started": true} unless the terminal has "refuse": true; `run --bg` adds a
 live terminal. A terminal's "on_send" ({"status": ..., "turn": +1, "write": [path, text]}) is applied
 when it is sent a message, to play a helper that answers.
@@ -24,6 +26,16 @@ def find(st, ref):
         if ref in (name, t.get("address")):
             return name, t
     return None, None
+
+
+def send(t, text):
+    t.setdefault("sent", []).append(text)
+    act = t.get("on_send") or {}
+    if "status" in act:
+        t["status"] = act["status"]
+    t["turn"] = t.get("turn", 0) + act.get("turn", 0)
+    if act.get("write"):
+        Path(act["write"][0]).write_text(act["write"][1])
 
 
 def main(argv):
@@ -51,17 +63,33 @@ def main(argv):
         _, t = find(st, rest[0])
         sys.stdout.write((t or {}).get("screen", ""))
     elif cmd == "send":
+        condition = None
+        if "--if" in rest:
+            index = rest.index("--if")
+            condition = rest[index + 1]
+            rest = rest[:index] + rest[index + 2:]
+        _, t = find(st, rest[0])
+        ok = bool(t) and t.get("state", "live") == "live" and not t.get("refuse")
+        if condition is not None and t and t.get("status", "idle") != condition:
+            st["calls"].pop()
+            reply, code = {"error": "status_mismatch"}, 10
+        else:
+            if ok:
+                send(t, rest[1] if len(rest) > 1 else "")
+            reply = {"started": ok}
+    elif cmd == "keys":
         _, t = find(st, rest[0])
         ok = bool(t) and t.get("state", "live") == "live" and not t.get("refuse")
         if ok:
-            t.setdefault("sent", []).append(rest[1] if len(rest) > 1 else "")
-            act = t.get("on_send") or {}
-            if "status" in act:
-                t["status"] = act["status"]
-            t["turn"] = t.get("turn", 0) + act.get("turn", 0)
-            if act.get("write"):
-                Path(act["write"][0]).write_text(act["write"][1])
-        reply = {"started": ok}
+            text = t.get("key_draft", "")
+            for key in rest[1:]:
+                if key == "enter":
+                    send(t, text)
+                    text = ""
+                else:
+                    text += " " if key == "space" else key
+            t["key_draft"] = text
+        reply, code = {"ok": ok}, 0 if ok else 3
     elif cmd == "interrupt":
         _, t = find(st, rest[0])
         if t:
