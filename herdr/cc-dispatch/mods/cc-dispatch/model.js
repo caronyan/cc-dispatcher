@@ -263,7 +263,7 @@ export const AGENTS = {
 };
 export const agentLabel = (a) => AGENTS[a]?.label ?? a;
 /** How the panel names a run's main agent: "the main agent (Codex)", or just "the main agent". */
-export const mainAgentName = (r) => r?.mainAgent ? `the main agent (${agentLabel(r.mainAgent)})` : "the main agent";
+export const mainAgentName = (r) => r?.mainAgent ? `主 agent（${agentLabel(r.mainAgent)}）` : "主 agent";
 export const weakIsolation = (c) => AGENTS[c?.agent]?.isolation === "weak";
 
 /** Whether the panel offers to hand a helper over: its run is running and it has no good report. */
@@ -368,8 +368,8 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}, asks
 
 /** "2 working · 1 report bad · 3 done" in urgency order. */
 export function summary(counts) {
-  const words = { blocked: "waiting on you", error: "failed", offline: "waiting for network", retry: "retrying", held: "paused", bad: "report bad", working: "working", review: "to collect", done: "done", gone: "ended" };
-  return URGENCY.filter((k) => counts?.[k]).map((k) => `${counts[k]} ${words[k]}`).join(" · ");
+  const words = { blocked: "等你", error: "失败", offline: "等网络", retry: "重试中", held: "已暂停", bad: "回报不合格", working: "进行中", review: "待收回报", done: "已完成", gone: "已结束" };
+  return URGENCY.filter((k) => counts?.[k]).map((k) => `${words[k]} ${counts[k]}`).join(" · ");
 }
 
 // A helper's mode and effort as two letters (write·high → "wh"), and its round past the first ("r2").
@@ -386,17 +386,28 @@ export function agentTag(c) {
   return { text: c.agent, weak: weakIsolation(c) };
 }
 
+/** A failure category (hd_dispatch.py) in words; unknown ones as they are. */
+export const FAILURE_WORDS = { quota: "额度用完", auth: "登录失效", context_limit: "上下文满", refused: "被拦截", timeout: "超时",
+  network: "网络问题", net: "网络问题", net_down: "网络断开", rate_limit: "限流", capacity: "服务繁忙", model_unavailable: "模型不可用",
+  other: "其他错误", exited: "已退出", blocked: "等确认", lost: "已中断", error: "出错" };
+export const failureWord = (k) => FAILURE_WORDS[k] ?? String(k ?? "");
+/** A retry label ("capacity 1/4") with its category in words. */
+export const retryWords = (s) => String(s ?? "").replace(/^([a-z_]+)\s*(.*)$/, (_m, k, rest) => `${failureWord(k)} 重试 ${rest}`.trim());
+/** A terminal's state or status (herdr) in words. */
+const STATE_WORDS = { working: "在干活", idle: "空闲", blocked: "等确认", done: "已完成", error: "出错", gone: "已关闭", finished: "已结束", live: "在线" };
+export const stateWord = (s) => STATE_WORDS[s] ?? String(s ?? "");
+
 /** The line under a call's name, after its stage: what the stage word does not already say. */
 export function callDetail(c) {
   const parts = [[c.mode, c.effort].filter(Boolean).join("·")];
-  if (c.round > 1) parts.push(`round ${c.round}`);
-  if (c.report === "missing") parts.push("no report");
-  if (c.failure && !["exited", "blocked", "lost"].includes(c.failure)) parts.push(c.failure);
-  if (c.retry) parts.push(`retry ${c.retry}`);
-  if (c.agent && c.agent !== "codex") parts.push(agentLabel(c.agent) + (weakIsolation(c) ? " (weak isolation)" : ""));
-  if (c.handingTo) parts.push(`handing over to ${agentLabel(c.handingTo)}`);
-  if (c.lost) parts.push("terminal vanished");
-  else if (c.state !== "live") parts.push("closed");
+  if (c.round > 1) parts.push(`第 ${c.round} 轮`);
+  if (c.report === "missing") parts.push("没有回报");
+  if (c.failure && !["exited", "blocked", "lost"].includes(c.failure)) parts.push(failureWord(c.failure));
+  if (c.retry) parts.push(retryWords(c.retry));
+  if (c.agent && c.agent !== "codex") parts.push(agentLabel(c.agent) + (weakIsolation(c) ? "（弱隔离）" : ""));
+  if (c.handingTo) parts.push(`正在移交给 ${agentLabel(c.handingTo)}`);
+  if (c.lost) parts.push("终端消失了");
+  else if (c.state !== "live") parts.push("已关闭");
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -409,8 +420,8 @@ export function callDetail(c) {
 /** Most urgent first. */
 export const STAGES = ["blocked", "lost", "failed", "offline", "retrying", "paused", "working", "bad", "collect", "await", "review", "ok", "merged", "done", "parked", "ended"];
 export const STAGE_WORDS = {
-  blocked: "waiting on you", lost: "interrupted", failed: "failed", offline: "waiting for network", retrying: "retrying", paused: "paused", working: "working", bad: "report bad", collect: "to collect",
-  await: "awaiting review", review: "in review", ok: "report ok", merged: "merged", done: "done", parked: "parked", ended: "ended",
+  blocked: "等你", lost: "已中断", failed: "失败", offline: "等网络", retrying: "重试中", paused: "已暂停", working: "进行中", bad: "回报不合格", collect: "待收回报",
+  await: "待验收", review: "验收中", ok: "回报合格", merged: "已合并", done: "已完成", parked: "已搁置", ended: "已结束",
 };
 
 /** One helper's stage; `card` is its card's status in state.json, if it has one. */
@@ -452,13 +463,13 @@ export function groupByStage(calls, stageOf) {
 export function stageSummary(stages) {
   const n = {};
   for (const s of stages) n[s] = (n[s] ?? 0) + 1;
-  return STAGES.filter((s) => n[s]).map((s) => `${n[s]} ${STAGE_WORDS[s]}`).join(" · ");
+  return STAGES.filter((s) => n[s]).map((s) => `${STAGE_WORDS[s]} ${n[s]}`).join(" · ");
 }
 
 /** A dev run's cards by status, for the cards bar: [[status, n]] in a fixed order. */
 export const CARD_ORDER = ["merged", "done", "accepting", "running", "pending", "parked"];
 /** The words for card statuses, kept apart from the helpers' stages ("working" is a helper's terminal). */
-export const CARD_WORDS = { merged: "merged", done: "done", accepting: "reviewing", running: "in progress", pending: "queued", parked: "parked" };
+export const CARD_WORDS = { merged: "已合并", done: "已完成", accepting: "验收中", running: "进行中", pending: "排队中", parked: "已搁置" };
 const CARD_FINAL = new Set(["merged", "done", "parked"]);
 
 /**
@@ -502,10 +513,10 @@ export function cardCounts(cards) {
 export function ago(ms, now = Date.now()) {
   if (!ms) return "";
   const s = Math.max(0, Math.round((now - ms) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
 }
 
 /** The newest task file of a call: task-<round>.md. */
@@ -514,7 +525,7 @@ export const taskPath = (c) => `${c.agentDir}/task-${c.round}.md`;
 /** The script for a write-mode helper's changes: stat and short status of its worktree. */
 export const DIFF_SCRIPT = [
   'cd "$1" || exit 1',
-  'git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "not a git worktree: $1"; exit 0; }',
+  'git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "不是 git 工作树：$1"; exit 0; }',
   'echo "## $(git rev-parse --abbrev-ref HEAD 2>/dev/null) @ $1"',
   'git status --short | head -200',
   'echo',
@@ -606,13 +617,13 @@ export function pendingItems(r, cards = {}, pending = {}) {
 
 /** One line under an item's title: its options (the recommended one marked), or what it asks. */
 export function itemLine(x) {
-  if (x.answer) return `answered · ${answerWords(x.answer)}`;
+  if (x.answer) return `已回答 · ${answerWords(x.answer)}`;
   if (x.options.length) return x.options.map((o) => `${o.key === x.recommend ? "★ " : ""}${o.label}`).join(" / ");
   return (x.context || "").replace(/\s+/g, " ").slice(0, 140);
 }
 
 /** What the person chose and said, in a few words. */
-export const answerWords = (a) => [a?.choice && a?.label ? a.label : null, (a?.text ?? "").trim() || null].filter(Boolean).join(" · ") || "answered";
+export const answerWords = (a) => [a?.choice && a?.label ? a.label : null, (a?.text ?? "").trim() || null].filter(Boolean).join(" · ") || "已回答";
 
 /** The line hd_dispatch.py reads back: { id, at (s), kind, choice, label, text, by }. */
 export function answerRecord(x, { choice = null, text = "" } = {}, now = Date.now()) {
@@ -657,7 +668,7 @@ const fence = (text, lang = "") => { const f = /```/.test(text) ? "````" : "```"
 function scalarMd(v, pad = "") {
   if (v === null || v === undefined) return "—";
   if (typeof v !== "string") return `\`${String(v)}\``;
-  if (!v) return "*(empty)*";
+  if (!v) return "*（空）*";
   if (/^[\w./:#@-]{1,60}$/.test(v) && !/^\d+$/.test(v)) return `\`${v}\``; // enums, ids, paths
   // Several lines inside a list are output or logs: a code block under the item.
   if (v.includes("\n")) return `\n\n${fence(v.replace(/\s+$/, "")).split("\n").map((l) => `${pad}  ${l}`).join("\n")}\n`;
@@ -671,11 +682,11 @@ function listMd(v, depth) {
   const pad = "  ".repeat(depth);
   if (isScalar(v)) return [`${pad}- ${scalarMd(v, pad)}`];
   if (Array.isArray(v)) {
-    if (!v.length) return [`${pad}- *(none)*`];
+    if (!v.length) return [`${pad}- *（无）*`];
     return v.flatMap((x) => (isScalar(x) ? [`${pad}- ${scalarMd(x, pad)}`] : objectItemMd(x, depth)));
   }
   const entries = Object.entries(v);
-  if (!entries.length) return [`${pad}- *(none)*`];
+  if (!entries.length) return [`${pad}- *（无）*`];
   return entries.flatMap(([k, x]) => isScalar(x)
     ? [`${pad}- **${k}**: ${scalarMd(x, pad)}`]
     : [`${pad}- **${k}**${Array.isArray(x) ? ` (${x.length})` : ""}`, ...listMd(x, depth + 1)]);
@@ -697,7 +708,7 @@ function objectItemMd(o, depth) {
 export const MARKDOWN_LIMIT = 300000; // longer reports show as source: rendering them is slow
 
 export function jsonMarkdown(text) {
-  if (text != null && String(text).length > MARKDOWN_LIMIT) return `*Too long to render (${String(text).length} characters): showing the source.*\n\n${fence(String(text), "json")}`;
+  if (text != null && String(text).length > MARKDOWN_LIMIT) return `*内容太长（${String(text).length} 个字符），直接显示原文。*\n\n${fence(String(text), "json")}`;
   const v = parseJSON(text);
   if (v === null) return text == null ? "" : fence(String(text));
   if (isScalar(v) || Array.isArray(v)) return listMd(v, 0).join("\n");
@@ -709,7 +720,7 @@ export function jsonMarkdown(text) {
     else if (Array.isArray(x) && x.length && x.every((i) => i && typeof i === "object" && !Array.isArray(i))) {
       x.forEach((item, i) => {
         const key = itemTitle(item);
-        out.push(`### ${i + 1}. ${key ? item[key] : `item ${i + 1}`}`);
+        out.push(`### ${i + 1}. ${key ? item[key] : `第 ${i + 1} 项`}`);
         const rest = Object.fromEntries(Object.entries(item).filter(([kk]) => kk !== key));
         if (Object.keys(rest).length) out.push(listMd(rest, 0).join("\n"));
       });
@@ -720,14 +731,14 @@ export function jsonMarkdown(text) {
 
 /** The report dialog: verdict and paths, then the report. */
 export function reportMarkdown(c, text, older = []) {
-  const verdict = { ok: "passes the schema", bad: "**fails the schema**", missing: "no report file" }[c.report] ?? "not checked yet (`hd_dispatch.py collect` checks it)";
+  const verdict = { ok: "通过 schema 检查", bad: "**没通过 schema 检查**", missing: "没有回报文件" }[c.report] ?? "还没检查（`hd_dispatch.py collect` 时检查）";
   const head = [
-    `- **verdict**: ${verdict}`,
-    `- **file**: \`${c.reportPath}\``,
-    `- **schema**: \`${c.schema}\``,
-    older.length ? `- **earlier rounds**: ${older.map((p) => `\`${baseName(p)}\``).join(", ")}` : null,
+    `- **结论**：${verdict}`,
+    `- **文件**：\`${c.reportPath}\``,
+    `- **schema**：\`${c.schema}\``,
+    older.length ? `- **之前各轮**： ${older.map((p) => `\`${baseName(p)}\``).join(", ")}` : null,
   ].filter(Boolean).join("\n");
-  return `${head}\n\n---\n\n${text == null ? "*No report written yet.*" : jsonMarkdown(text)}`;
+  return `${head}\n\n---\n\n${text == null ? "*还没写回报。*" : jsonMarkdown(text)}`;
 }
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -736,29 +747,29 @@ const tok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e
 
 /** One events.jsonl line (hd_dispatch.py) in words. */
 export function eventWords(e) {
-  const unsent = e.sent === false ? " — **not delivered**" : "";
+  const unsent = e.sent === false ? " — **没送达**" : "";
   switch (e.ev) {
-    case "dispatch": return `dispatched ${[e.mode, e.effort].filter(Boolean).join("·")}${e.title ? ` "${e.title}"` : ""}${unsent}`;
-    case "send": return e.why !== "retry" ? `sent round ${e.round}${unsent}`
-      : e.kind === "network" ? `network back: told to carry on${unsent}` : `told to carry on (${e.kind} retry ${e.n})${unsent}`;
-    case "offline": return "**network down**: waiting for it, no retry used";
-    case "retry": return `${e.kind}: retry ${e.n}/${e.max} at ${clock(e.at).slice(6)}`;
-    case "settle": return ["settled: " + (e.state === "live" ? e.status : e.state), e.report && `report ${e.report}`,
-      e.failure && `**${e.failure}**`, e.retried && `after ${e.retried} retr${e.retried === 1 ? "y" : "ies"}`,
-      e.nested && `started ${e.nested.length} terminal(s) itself`].filter(Boolean).join(", ");
-    case "stall": return `no progress for ${e.minutes} min in turn ${e.turn}`;
-    case "codex": return [`Codex so far: ${e.tokens ? `${tok(e.tokens.input + e.tokens.output)} tok` : "no tokens"}`,
-      `${e.commands ?? 0} cmd`, `${e.files ?? 0} files`, e.model].filter(Boolean).join(" · ");
-    case "cleanup": return "cleaned up";
-    case "pause": return e.interrupted ? "**paused**: stopped mid-turn" : "**paused**: its retry dropped";
-    case "resume": return `resumed: told to carry on${unsent}`;
-    case "stop": return e.asked ? "**run stopped**: asked to report what it has" : "**run stopped**";
-    case "freeze": return [`**frozen** (${e.why ?? "manual"})`, e.progress ? "wrote a progress note" : e.asked ? "asked for a note, none came" : null,
-      e.snapshot && `worktree saved \`${String(e.snapshot).slice(0, 10)}\``].filter(Boolean).join(", ");
-    case "lost": return "**interrupted**: its terminal vanished before it reported";
-    case "recover": return `**recovered**: ${e.how === "resume" ? "its own session reopened" : "a new session read the task"}, held until resumed`;
-    case "adopt": return `**adopted** by the main agent in ${e.by ?? "?"}${e.agent ? ` (${e.agent})` : ""}${e.frm ? `, was ${e.frm}` : ""}`;
-    case "handover": return `**handed over** ${e.frm ?? "?"} → ${e.to}${e.why ? ` (${e.why})` : ""}${e.isolation === "weak" ? ", weak isolation" : ""}${unsent}`;
+    case "dispatch": return `已派发 ${[e.mode, e.effort].filter(Boolean).join("·")}${e.title ? `「${e.title}」` : ""}${unsent}`;
+    case "send": return e.why !== "retry" ? `发出第 ${e.round} 轮${unsent}`
+      : e.kind === "network" ? `网络恢复，已让它继续${unsent}` : `已让它继续（${failureWord(e.kind)}，第 ${e.n} 次重试）${unsent}`;
+    case "offline": return "**网络断开**：等网络恢复，不占重试次数";
+    case "retry": return `${failureWord(e.kind)}：${clock(e.at).slice(6)} 第 ${e.n}/${e.max} 次重试`;
+    case "settle": return ["停下：" + stateWord(e.state === "live" ? e.status : e.state), e.report && `回报${{ ok: "合格", bad: "不合格", missing: "缺失" }[e.report] ?? ` ${e.report}`}`,
+      e.failure && `**${failureWord(e.failure)}**`, e.retried && `重试过 ${e.retried} 次`,
+      e.nested && `自己开了 ${e.nested.length} 个终端`].filter(Boolean).join("，");
+    case "stall": return `第 ${e.turn} 轮 ${e.minutes} 分钟没有进展`;
+    case "codex": return [`Codex 累计：${e.tokens ? `${tok(e.tokens.input + e.tokens.output)} tok` : "没有 token 记录"}`,
+      `${e.commands ?? 0} 条命令`, `${e.files ?? 0} 个文件`, e.model].filter(Boolean).join(" · ");
+    case "cleanup": return "已清理";
+    case "pause": return e.interrupted ? "**已暂停**：中途打断" : "**已暂停**：取消了它的重试";
+    case "resume": return `已继续：让它接着做${unsent}`;
+    case "stop": return e.asked ? "**运行已终止**：已让它交代做到哪了" : "**运行已终止**";
+    case "freeze": return [`**已冻结**（${e.why === "manual" || !e.why ? "手动" : e.why}）`, e.progress ? "写了进度说明" : e.asked ? "要过进度说明，没有交" : null,
+      e.snapshot && `已保存工作树 \`${String(e.snapshot).slice(0, 10)}\``].filter(Boolean).join("，");
+    case "lost": return "**已中断**：交回报之前终端消失了";
+    case "recover": return `**已恢复**：${e.how === "resume" ? "重新打开了原会话" : "新会话读了任务"}，等继续`;
+    case "adopt": return `**已接手**：${e.by ?? "?"} 里的主 agent${e.agent ? `（${e.agent}）` : ""}${e.frm ? `，原来是 ${e.frm}` : ""}`;
+    case "handover": return `**已移交** ${e.frm ?? "?"} → ${e.to}${e.why ? `（${e.why === "manual" ? "手动" : e.why}）` : ""}${e.isolation === "weak" ? "，弱隔离" : ""}${unsent}`;
     default: return e.ev;
   }
 }
@@ -766,7 +777,7 @@ export function eventWords(e) {
 /** A call's events.jsonl as a markdown list, oldest first. */
 export function timelineMarkdown(text) {
   const evs = String(text ?? "").split("\n").map((l) => l.trim() && parseJSON(l)).filter((e) => e && e.ev);
-  if (!evs.length) return "*No events recorded. Helpers dispatched before hd_dispatch.py kept events.jsonl have none.*";
+  if (!evs.length) return "*没有事件记录。hd_dispatch.py 开始记 events.jsonl 之前派出的子 agent 没有记录。*";
   return evs.map((e) => `- \`${clock(e.t)}\` · r${e.round ?? 1} · ${eventWords(e)}`).join("\n");
 }
 
@@ -776,7 +787,7 @@ export function timelineMarkdown(text) {
  */
 export function resultMarkdown(c, text, older = [], diff = null) {
   const parts = [reportMarkdown(c, text, older)];
-  if (diff != null) parts.push(`## Changes in the worktree\n\n${diffMarkdown(diff).replace(/^### /, "")}`);
+  if (diff != null) parts.push(`## 工作树里的改动\n\n${diffMarkdown(diff).replace(/^### /, "")}`);
   return parts.join("\n\n---\n\n");
 }
 
@@ -793,12 +804,12 @@ export function roundsMarkdown(c, eventsText, tasks = {}) {
   const out = [];
   for (let k = rounds; k >= 1; k--) {
     const mine = evs.filter((e) => (e.round ?? 1) === k);
-    const how = mine.find((e) => e.ev === "handover") ? "handed over" : k === 1 ? "dispatched" : "rework";
-    out.push(`## Round ${k}${k === c.round ? " · current" : ""} · ${how}`);
+    const how = mine.find((e) => e.ev === "handover") ? "已移交" : k === 1 ? "首次派发" : "返工";
+    out.push(`## 第 ${k} 轮${k === c.round ? " · 当前" : ""} · ${how}`);
     if (mine.length) out.push(mine.map((e) => `- \`${clock(e.t)}\` · ${eventWords(e)}`).join("\n"));
-    else if (!evs.length && k === rounds) out.push("*No events recorded. Helpers dispatched before hd_dispatch.py kept events.jsonl have none.*");
+    else if (!evs.length && k === rounds) out.push("*没有事件记录。hd_dispatch.py 开始记 events.jsonl 之前派出的子 agent 没有记录。*");
     const task = tasks[k];
-    out.push(task == null ? `*No task file for round ${k}.*` : `### Task file \`task-${k}.md\`\n\n${demote(task, 3)}`);
+    out.push(task == null ? `*第 ${k} 轮没有任务文件。*` : `### 任务文件 \`task-${k}.md\`\n\n${demote(task, 3)}`);
   }
   return out.join("\n\n");
 }
@@ -808,7 +819,7 @@ export function diffMarkdown(text) {
   const lines = String(text ?? "").split("\n");
   const head = lines[0]?.startsWith("## ") ? lines.shift().slice(3) : null;
   const body = lines.join("\n").replace(/^\n+|\s+$/g, ""); // keep git status's leading column
-  return [head && `### \`${head}\``, body ? fence(body) : "*No changes.*"].filter(Boolean).join("\n\n");
+  return [head && `### \`${head}\``, body ? fence(body) : "*没有改动。*"].filter(Boolean).join("\n\n");
 }
 
 // ---- Structured documents for the Result and Task dialogs ----
@@ -856,13 +867,13 @@ function fieldBlocks(o) {
     if (isScalar(v) && !(typeof v === "string" && (v.length > 100 || v.includes("\n")))) {
       if (!kv) blocks.push(kv = { t: "kv", rows: [] });
       const str = typeof v === "string" ? v : v == null ? "—" : String(v);
-      kv.rows.push({ k: label(k), v: str || "(empty)", tone: TONE_KEYS.includes(k) ? wordTone(v) : null,
+      kv.rows.push({ k: label(k), v: str || "（空）", tone: TONE_KEYS.includes(k) ? wordTone(v) : null,
         mono: typeof v !== "string" || /^[\w./:#@-]{1,100}$/.test(v) });
       continue;
     }
     kv = null;
     if (typeof v === "string") blocks.push(LOG_KEY.test(k) || /\n\s{2,}|\t/.test(v) ? { t: "code", label: label(k), text: v.replace(/\s+$/, "") } : { t: "md", label: label(k), text: v });
-    else if (Array.isArray(v) && !v.length) blocks.push({ t: "kv", rows: [{ k: label(k), v: "none", tone: "muted" }] });
+    else if (Array.isArray(v) && !v.length) blocks.push({ t: "kv", rows: [{ k: label(k), v: "无", tone: "muted" }] });
     else blocks.push({ t: "md", label: `${label(k)}${Array.isArray(v) ? ` (${v.length})` : ""}`, text: listMd(v, 0).join("\n") });
   }
   return blocks;
@@ -873,12 +884,12 @@ function fieldNode(k, v, id) {
   const node = { id, title: label(k), blocks: [], children: [] };
   if (Array.isArray(v)) {
     node.badge = String(v.length);
-    if (!v.length) { node.blocks.push({ t: "kv", rows: [{ k: "items", v: "none", tone: "muted" }] }); node.tone = "muted"; return node; }
+    if (!v.length) { node.blocks.push({ t: "kv", rows: [{ k: "条目", v: "无", tone: "muted" }] }); node.tone = "muted"; return node; }
     if (v.every((x) => x && typeof x === "object" && !Array.isArray(x))) {
       v.forEach((item, i) => {
         const key = itemTitle(item);
         const rest = Object.fromEntries(Object.entries(item).filter(([kk]) => kk !== key));
-        node.children.push({ id: `${id}.${i}`, title: `${i + 1}. ${key ? item[key] : `item ${i + 1}`}`, depth: 0,
+        node.children.push({ id: `${id}.${i}`, title: `${i + 1}. ${key ? item[key] : `第 ${i + 1} 项`}`, depth: 0,
           tone: itemTone(item), blocks: fieldBlocks(rest), children: [] });
       });
     } else node.blocks.push({ t: "md", text: listMd(v, 0).join("\n") });
@@ -886,7 +897,7 @@ function fieldNode(k, v, id) {
     return node;
   }
   if (v && typeof v === "object") { node.blocks = fieldBlocks(v); node.tone = itemTone(v); return node; }
-  node.blocks.push(typeof v === "string" ? { t: "md", text: v || "*(empty)*" } : { t: "kv", rows: [{ k: label(k), v: String(v), mono: true }] });
+  node.blocks.push(typeof v === "string" ? { t: "md", text: v || "*（空）*" } : { t: "kv", rows: [{ k: label(k), v: String(v), mono: true }] });
   return node;
 }
 
@@ -915,32 +926,32 @@ export function parseDiff(text) {
   return { head, files, stat, total, note: note.join("\n").trim() };
 }
 
-const KIND_WORD = { added: "added", modified: "modified", deleted: "deleted", renamed: "renamed", untracked: "new", conflict: "conflict" };
+const KIND_WORD = { added: "新增", modified: "修改", deleted: "删除", renamed: "改名", untracked: "未跟踪", conflict: "冲突" };
 
 /** The Result dialog as a doc: overview (verdict, conclusion), the report's fields, then the worktree's changes. */
 export function resultDoc(c, text, older = [], diff = null) {
   const v = text == null || String(text).length > MARKDOWN_LIMIT ? null : parseJSON(text);
-  const check = { ok: ["passes the schema", "ok"], bad: ["fails the schema", "bad"], missing: ["no report file", "bad"] }[c.report]
-    ?? ["not checked yet (hd_dispatch.py collect checks it)", "muted"];
-  const over = { id: "overview", title: "Overview", blocks: [], children: [] };
+  const check = { ok: ["通过", "ok"], bad: ["没通过", "bad"], missing: ["没有回报文件", "bad"] }[c.report]
+    ?? ["还没检查（hd_dispatch.py collect 时检查）", "muted"];
+  const over = { id: "overview", title: "概览", blocks: [], children: [] };
   const obj = v && typeof v === "object" && !Array.isArray(v) ? v : null;
   const verdictKey = obj && VERDICT_KEYS.find((k) => typeof obj[k] === "string");
   if (verdictKey) { over.blocks.push({ t: "lead", label: label(verdictKey), text: obj[verdictKey], tone: wordTone(obj[verdictKey]) ?? "accent", short: true }); over.tone = wordTone(obj[verdictKey]); }
   for (const k of LEAD_KEYS) if (obj && typeof obj[k] === "string" && obj[k]) over.blocks.push({ t: "lead", label: label(k), text: obj[k], tone: over.tone ?? "accent" });
   if (obj?.recommendation && typeof obj.recommendation === "object") {
     const r = obj.recommendation, key = itemTitle(r) ?? Object.keys(r).find((k) => typeof r[k] === "string");
-    if (key) over.blocks.push({ t: "lead", label: "recommendation", text: r[key], tone: "accent" });
+    if (key) over.blocks.push({ t: "lead", label: "建议", text: r[key], tone: "accent" });
   }
   over.blocks.push({ t: "kv", rows: [
-    { k: "schema check", v: check[0], tone: check[1] },
-    { k: "report", v: c.reportPath || "—", mono: true },
+    { k: "schema 检查", v: check[0], tone: check[1] },
+    { k: "回报", v: c.reportPath || "—", mono: true },
     { k: "schema", v: c.schema || "—", mono: true },
-    ...(older.length ? [{ k: "earlier rounds", v: older.map(baseName).join(", "), mono: true }] : []),
+    ...(older.length ? [{ k: "之前各轮", v: older.map(baseName).join(", "), mono: true }] : []),
   ] });
   if (!over.tone && check[1] === "bad") over.tone = "bad";
   const nodes = [over];
-  if (text == null) over.blocks.push({ t: "kv", rows: [{ k: "report", v: "not written yet", tone: "warn" }] });
-  else if (!obj) over.blocks.push({ t: v === null ? "code" : "md", label: "report", text: v === null ? String(text) : listMd(v, 0).join("\n") });
+  if (text == null) over.blocks.push({ t: "kv", rows: [{ k: "回报", v: "还没写", tone: "warn" }] });
+  else if (!obj) over.blocks.push({ t: v === null ? "code" : "md", label: "回报", text: v === null ? String(text) : listMd(v, 0).join("\n") });
   else {
     const skip = new Set([verdictKey, ...LEAD_KEYS.filter((k) => typeof obj[k] === "string")]);
     Object.entries(obj).forEach(([k, x], i) => { if (!skip.has(k)) nodes.push(fieldNode(k, x, `f${i}`)); });
@@ -948,13 +959,13 @@ export function resultDoc(c, text, older = [], diff = null) {
   if (diff != null) {
     const d = parseDiff(diff), counts = {};
     for (const f of d.files) counts[f.kind] = (counts[f.kind] ?? 0) + 1;
-    const changes = { id: "changes", title: "Changes in the worktree", badge: String(d.files.length), tone: d.files.some((f) => f.kind === "conflict") ? "bad" : "info", blocks: [], children: [] };
-    if (d.head) changes.blocks.push({ t: "kv", rows: [{ k: "branch @ dir", v: d.head, mono: true }] });
+    const changes = { id: "changes", title: "工作树里的改动", badge: String(d.files.length), tone: d.files.some((f) => f.kind === "conflict") ? "bad" : "info", blocks: [], children: [] };
+    if (d.head) changes.blocks.push({ t: "kv", rows: [{ k: "分支 @ 目录", v: d.head, mono: true }] });
     if (d.note) changes.blocks.push({ t: "code", text: d.note });
-    if (d.files.length) changes.children.push({ id: "changes.files", title: "Files", depth: 0,
-      badge: Object.entries(counts).map(([k, n]) => `${n} ${KIND_WORD[k]}`).join(" · "), blocks: [{ t: "files", rows: d.files }], children: [] });
-    if (d.stat.length) changes.children.push({ id: "changes.stat", title: "Lines changed", depth: 0, badge: d.total ?? "", blocks: [{ t: "stat", rows: d.stat, total: d.total }], children: [] });
-    if (!d.files.length && !d.stat.length && !d.note) changes.blocks.push({ t: "kv", rows: [{ k: "changes", v: "none", tone: "muted" }] });
+    if (d.files.length) changes.children.push({ id: "changes.files", title: "文件", depth: 0,
+      badge: Object.entries(counts).map(([k, n]) => `${KIND_WORD[k]} ${n}`).join(" · "), blocks: [{ t: "files", rows: d.files }], children: [] });
+    if (d.stat.length) changes.children.push({ id: "changes.stat", title: "改动行数", depth: 0, badge: d.total ?? "", blocks: [{ t: "stat", rows: d.stat, total: d.total }], children: [] });
+    if (!d.files.length && !d.stat.length && !d.note) changes.blocks.push({ t: "kv", rows: [{ k: "改动", v: "无", tone: "muted" }] });
     nodes.push(changes);
   }
   return { nodes };
@@ -996,37 +1007,37 @@ export function taskDoc(c, eventsText, tasks = {}) {
   const evs = String(eventsText ?? "").split("\n").map((l) => l.trim() && parseJSON(l)).filter((e) => e && e.ev);
   const rounds = Math.max(c.round ?? 1, ...evs.map((e) => e.round ?? 1), ...Object.keys(tasks).map(Number));
   const first = evs.find((e) => e.ev === "dispatch");
-  const how = (k, mine) => mine.find((e) => e.ev === "handover") ? "handed over" : k === 1 ? "dispatched" : "rework";
-  const over = { id: "overview", title: "Overview", blocks: [], children: [] };
+  const how = (k, mine) => mine.find((e) => e.ev === "handover") ? "已移交" : k === 1 ? "首次派发" : "返工";
+  const over = { id: "overview", title: "概览", blocks: [], children: [] };
   over.blocks.push({ t: "kv", rows: [
-    { k: "call", v: c.call, mono: true },
-    first?.title || c.title ? { k: "title", v: first?.title || c.title } : null,
-    { k: "mode · effort", v: [c.mode || first?.mode, c.effort || first?.effort].filter(Boolean).join(" · ") || "—", mono: true },
+    { k: "调用", v: c.call, mono: true },
+    first?.title || c.title ? { k: "标题", v: first?.title || c.title } : null,
+    { k: "模式 · 档位", v: [c.mode || first?.mode, c.effort || first?.effort].filter(Boolean).join(" · ") || "—", mono: true },
     { k: "agent", v: c.agent || "codex", tone: c.agent && c.agent !== "codex" ? "warn" : null },
-    { k: "round", v: `${c.round ?? 1} of ${rounds}`, mono: true },
-    { k: "report", v: c.report ?? "not checked", tone: wordTone(c.report) ?? "muted" },
-    c.failure ? { k: "failure", v: c.failure, tone: c.failure === "exited" ? "muted" : c.failure === "blocked" ? "warn" : "bad" } : null,
-    c.dir ? { k: "worktree", v: c.dir, mono: true } : null,
+    { k: "轮次", v: `${c.round ?? 1} / ${rounds}`, mono: true },
+    { k: "回报", v: { ok: "合格", bad: "不合格", missing: "缺失" }[c.report] ?? "还没检查", tone: wordTone(c.report) ?? "muted" },
+    c.failure ? { k: "失败", v: failureWord(c.failure), tone: c.failure === "exited" ? "muted" : c.failure === "blocked" ? "warn" : "bad" } : null,
+    c.dir ? { k: "工作树", v: c.dir, mono: true } : null,
   ].filter(Boolean) });
   const summary = [];
   for (let k = 1; k <= rounds; k++) {
     const mine = evs.filter((e) => (e.round ?? 1) === k), settle = [...mine].reverse().find((e) => e.ev === "settle");
     const start = mine.find((e) => e.ev === "dispatch" || e.ev === "send" || e.ev === "handover");
-    summary.push({ k: `round ${k}`, v: [how(k, mine), start && clock(start.t), settle ? plain(eventWords(settle)) : k === (c.round ?? 1) ? "in progress" : null].filter(Boolean).join(" · "),
+    summary.push({ k: `第 ${k} 轮`, v: [how(k, mine), start && clock(start.t), settle ? plain(eventWords(settle)) : k === (c.round ?? 1) ? "进行中" : null].filter(Boolean).join(" · "),
       tone: settle ? eventTone(settle) : k === (c.round ?? 1) ? "accent" : "muted" });
   }
-  over.blocks.push({ t: "kv", label: "rounds", rows: summary });
+  over.blocks.push({ t: "kv", label: "各轮", rows: summary });
   const nodes = [over];
   for (let k = rounds; k >= 1; k--) {
     const mine = evs.filter((e) => (e.round ?? 1) === k), settle = [...mine].reverse().find((e) => e.ev === "settle");
-    const node = { id: `r${k}`, title: `Round ${k} · ${how(k, mine)}`, badge: k === (c.round ?? 1) ? "current" : "",
+    const node = { id: `r${k}`, title: `第 ${k} 轮 · ${how(k, mine)}`, badge: k === (c.round ?? 1) ? "当前" : "",
       tone: settle ? eventTone(settle) : k === (c.round ?? 1) ? "accent" : "muted", blocks: [], children: [] };
-    const timeline = { id: `r${k}.events`, title: "Timeline", depth: 0, badge: String(mine.length), blocks: [], children: [] };
+    const timeline = { id: `r${k}.events`, title: "时间线", depth: 0, badge: String(mine.length), blocks: [], children: [] };
     timeline.blocks.push(mine.length ? { t: "events", rows: mine.map((e) => ({ time: clock(e.t), text: plain(eventWords(e)), tone: eventTone(e) })) }
-      : { t: "kv", rows: [{ k: "events", v: evs.length ? "none in this round" : "none recorded (dispatched before hd_dispatch.py kept events.jsonl)", tone: "muted" }] });
+      : { t: "kv", rows: [{ k: "事件", v: evs.length ? "这一轮没有" : "没有记录（hd_dispatch.py 开始记 events.jsonl 之前派出的）", tone: "muted" }] });
     node.children.push(timeline);
     const task = tasks[k];
-    if (task == null) node.children.push({ id: `r${k}.task`, title: `task-${k}.md`, depth: 0, tone: "muted", blocks: [{ t: "kv", rows: [{ k: "task file", v: "missing", tone: "muted" }] }], children: [] });
+    if (task == null) node.children.push({ id: `r${k}.task`, title: `task-${k}.md`, depth: 0, tone: "muted", blocks: [{ t: "kv", rows: [{ k: "任务文件", v: "缺失", tone: "muted" }] }], children: [] });
     else {
       const { preface, sections } = splitHeadings(task);
       const top = Math.min(3, ...sections.map((x) => x.level));
@@ -1142,15 +1153,15 @@ export function quotaView(agent, q, now = Date.now()) {
 export const QUOTA_SCRIPT = [
   'PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH',
   'D=$(dirname "$1"); [ -f "$D/hd_usage.py" ] || D=$(dirname "$(ls "$HOME"/.claude/skills/cc-herdr-dispatch-*/shared/scripts/hd_usage.py 2>/dev/null | head -n 1)")',
-  '[ -f "$D/hd_usage.py" ] || { echo "hd_usage.py not found" >&2; exit 127; }',
+  '[ -f "$D/hd_usage.py" ] || { echo "找不到 hd_usage.py" >&2; exit 127; }',
   'python3 "$D/hd_usage.py" quota "$2" --slow',
 ].join("\n");
 
 export const CONTROL_SCRIPT = [
   'PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH',
   'HD="$1"; [ -f "$HD" ] || HD=$(ls "$HOME"/.claude/skills/cc-herdr-dispatch-*/shared/scripts/hd_dispatch.py 2>/dev/null | head -n 1)',
-  '[ -n "$HD" ] || { echo "hd_dispatch.py not found" >&2; exit 127; }',
-  'command -v hc >/dev/null || { echo "hc not found on PATH" >&2; exit 127; }',
+  '[ -n "$HD" ] || { echo "找不到 hd_dispatch.py" >&2; exit 127; }',
+  'command -v hc >/dev/null || { echo "PATH 里找不到 hc" >&2; exit 127; }',
   'if [ "$2" = stop ]; then',
   '  nohup python3 "$HD" stop --run "$3" >"$3/stop.log" 2>&1 </dev/null &',
   '  echo STOP_STARTED=1',
@@ -1207,7 +1218,7 @@ export function takeoverPrompt(r) {
 }
 
 /** The line under the head of a run waiting for a new main agent. */
-export const takeoverBanner = (r) => `${mainAgentName(r).replace(/^the/, "The")} is gone · give a new one the prompt`;
+export const takeoverBanner = (r) => `${mainAgentName(r)} 已经不在了 · 把提示交给新的主 agent`;
 
 /** Which control buttons a run offers: pause and stop while it runs, resume and stop while paused. */
 export function controlOps(r) {
@@ -1224,10 +1235,10 @@ export function controlBanner(r, now = Date.now()) {
   const since = c.at ? ago(Number(c.at) * 1000, now) : "";
   if (c.state === "paused") {
     const n = r.calls.filter((x) => x.held && x.state === "live").length;
-    return ["Paused", since, n ? `${n} helper${n === 1 ? "" : "s"} held` : "no helper was working"].filter(Boolean).join(" · ");
+    return ["已暂停", since, n ? `挂起 ${n} 个子 agent` : "当时没有子 agent 在干活"].filter(Boolean).join(" · ");
   }
-  if (c.state === "stopping") return "Stopping · helpers are writing what they have done";
-  if (c.state === "stopped") return ["Stopped", since, `${mainAgentName(r)} has the summary`].filter(Boolean).join(" · ");
-  if (c.state === "handoff") return ["Handing off", since, "give the next main agent the prompt"].filter(Boolean).join(" · ");
+  if (c.state === "stopping") return "终止中 · 子 agent 正在写下做到哪了";
+  if (c.state === "stopped") return ["已终止", since, `总结已交给${mainAgentName(r)}`].filter(Boolean).join(" · ");
+  if (c.state === "handoff") return ["交接中", since, "把提示交给下一个主 agent"].filter(Boolean).join(" · ");
   return null;
 }

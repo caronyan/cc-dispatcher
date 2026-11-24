@@ -99,9 +99,9 @@ python3 $HD run --run $RD --call T<n> --mode write --effort high \
   --dir "$WT_ROOT/T<n>" --schema "$SKILL_DIR/references/report.schema.json" --prompt $RD/tasks/T<n>-prompt.md \
   --title "<卡片标题的英文简写>"
 ```
-小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板会把它列在"no helper yet"下并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
+小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板会把它列在"还没有子 agent"下并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
 
-`wait` 每报回一张卡，按它的输出处理：`REPORT_OK` 先把卡改为 `accepting` 再验收（停在 running 的卡在面板上显示为 awaiting review，用户会来催）；其他情况按 shared/herdr.md 处理，属于 `FAILURE=` 的再按"Codex 不可用时"处理。
+`wait` 每报回一张卡，按它的输出处理：`REPORT_OK` 先把卡改为 `accepting` 再验收（停在 running 的卡在面板上显示为"待验收"，用户会来催）；其他情况按 shared/herdr.md 处理，属于 `FAILURE=` 的再按"Codex 不可用时"处理。
 
 **4.4 验收**：每个任务交回报后，按 [references/acceptance.md](references/acceptance.md) 验收，给出四种结论之一：**通过 / 小修 / 返工 / 搁置**，结论和理由记入 `log.md`。
 

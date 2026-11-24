@@ -30,8 +30,8 @@ test("resultDoc leads with the verdict, then a node per field, then the worktree
   assert.equal(over.blocks[1].text, "two problems");
   assert.equal(findings.children.length, 2);
   assert.equal(findings.tone, "bad");
-  assert.equal(changes.title, "Changes in the worktree");
-  assert.equal(changes.children[0].badge, "1 new");
+  assert.equal(changes.title, "工作树里的改动");
+  assert.equal(changes.children[0].badge, "未跟踪 1");
 });
 
 test("resultDoc without a report says so", () => {
@@ -60,11 +60,11 @@ test("taskDoc groups events and task files by round, newest first", () => {
     { ev: "send", round: 2, t: 300 },
   ].map((e) => JSON.stringify(e)).join("\n");
   const doc = taskDoc(call({ failure: "exited" }), ev, { 1: "# Task\n## Goal\ng\n### Detail\nd", 2: "plain" });
-  assert.deepEqual(doc.nodes.map((n) => n.title), ["Overview", "Round 2 · rework", "Round 1 · dispatched"]);
-  const failure = doc.nodes[0].blocks[0].rows.find((r) => r.k === "failure");
+  assert.deepEqual(doc.nodes.map((n) => n.title), ["概览", "第 2 轮 · 返工", "第 1 轮 · 首次派发"]);
+  const failure = doc.nodes[0].blocks[0].rows.find((r) => r.k === "失败");
   assert.equal(failure.tone, "muted");
   const r2 = doc.nodes[1], r1 = doc.nodes[2];
-  assert.equal(r2.badge, "current");
+  assert.equal(r2.badge, "当前");
   assert.equal(r2.children[0].blocks[0].rows.length, 1);
   assert.deepEqual(r1.children.slice(2).map((x) => [x.title, x.depth]), [["Task", 1], ["Goal", 2], ["Detail", 3]]);
 });

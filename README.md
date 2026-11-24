@@ -42,24 +42,24 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
-- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（report ok / merged / done / parked / ended，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「n archived · show」里能看到并取消归档；之后再向这个运行派发会自动取消归档。已归档的运行在取消归档按钮旁还有一个删除按钮，确认后运行 `hd_dispatch.py delete`：关掉还开着的子 agent 终端，删除运行文件夹（meta、事件流、任务文件、屏幕、回报备份、待决项、交接包）、`$CC_HD_HOME` 下的回报和进度笔记、worktree 快照 `refs/cc-dispatch/<run>/*`、面板缓存和复盘台账里的条目，不能撤销；worktree、`cc/<run>/*` 分支和 Codex / Claude Code 自己的会话日志不动。
+- 运行没有自动的结束或清理：运行文件夹一直保留（复盘也读它），子 agent 交回后由主 agent `cleanup` 关掉终端。面板上所有子 agent 都已了结（回报合格 / 已合并 / 已完成 / 已搁置 / 已结束，终端开着也算）的运行可以点运行卡片标题行的归档图标隐去（写一个 `archived` 标记文件，文件都不动），在列表底部「已归档 n 个 · 显示」里能看到并取消归档；之后再向这个运行派发会自动取消归档。已归档的运行在取消归档按钮旁还有一个删除按钮，确认后运行 `hd_dispatch.py delete`：关掉还开着的子 agent 终端，删除运行文件夹（meta、事件流、任务文件、屏幕、回报备份、待决项、交接包）、`$CC_HD_HOME` 下的回报和进度笔记、worktree 快照 `refs/cc-dispatch/<run>/*`、面板缓存和复盘台账里的条目，不能撤销；worktree、`cc/<run>/*` 分支和 Codex / Claude Code 自己的会话日志不动。
 - 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的主 agent：`parent`（终端）、`space`（herdr space）、`dispatcher_agent`、`session`（Claude Code 会话或 Codex 线程，面板据此读它的后台任务；没记下时按运行目录去找）、`claude_cwd`。面板对每种主 agent 程序各有一个读会话日志的适配器（目前 Claude Code、Codex），后台任务按同一种样子显示。
 
 ## Herdr 面板
 
-Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板只放 skill 才知道的：每次派发运行、各子 agent 的轮次、回报是否过 schema、失败原因、已结束运行的历史。行内可跳转、Peek、看回报 / 任务文件 / worktree 改动，或经确认把"请收回报 / 请诊断"发给派发它的 Claude、清理终端。
+Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板只放 skill 才知道的：每次派发运行、各子 agent 的轮次、回报是否过 schema、失败原因、已结束运行的历史。行内可跳转、窥视、看回报 / 任务文件 / worktree 改动，或经确认把"请收回报 / 请诊断"发给派发它的 Claude、清理终端。
 
 运行卡片标题行末尾有三个运行级图标按钮（悬停显示名称），点了都要再确认一次：
 
-- **Pause**：给工作中的子 agent 按停止键，Codex 会话保留，已交回的不动；派发方暂停期间 `run`/`send` 被拒，`wait` 不报任何调用。
-- **Resume**：让被挂起的子 agent 接着做任务，不重做已完成的部分。
-- **Stop**：优雅终止：让还没交合格回报的子 agent 停手，把已完成部分写进回报（最多等 3 分钟），收回报、关终端（worktree 保留），写 `stop.md`，再请派发方汇总给你并等你决定下一步。
+- **暂停**：给工作中的子 agent 按停止键，Codex 会话保留，已交回的不动；派发方暂停期间 `run`/`send` 被拒，`wait` 不报任何调用。
+- **继续**：让被挂起的子 agent 接着做任务，不重做已完成的部分。
+- **终止**：优雅终止：让还没交合格回报的子 agent 停手，把已完成部分写进回报（最多等 3 分钟），收回报、关终端（worktree 保留），写 `stop.md`，再请派发方汇总给你并等你决定下一步。
 
-暂停是运行这一层的状态，和子 agent 自己的状态分开显示：运行圆点换成暂停标记，卡片边框变黄，标题下有一行"Paused · 多久前 · 挂起几个"；被挂起的子 agent 的圆点从转圈换成暂停标记，归入 `paused` 组。终止中和已终止也各有一行，已终止的可直接打开 `stop.md`。`./install.sh` 会一并安装（装了 Herdr app 时），然后切到 `herdr-cc-dispatch` layout。
+暂停是运行这一层的状态，和子 agent 自己的状态分开显示：运行圆点换成暂停标记，卡片边框变黄，标题下有一行"已暂停 · 多久前 · 挂起几个子 agent"；被挂起的子 agent 的圆点从转圈换成暂停标记，归入“已暂停”组。终止中和已终止也各有一行，已终止的可直接打开 `stop.md`。`./install.sh` 会一并安装（装了 Herdr app 时），然后切到 `herdr-cc-dispatch` layout。
 
-**Needs you（待决项）**：主 agent 需要你拍板或只有你知道答案的事，列在运行卡片里的 Needs you 下（运行折叠时也显示）。分两种：**decision** 是在 2–4 个具体做法里选一个，每个选项写明代价，主 agent 标出推荐（★）和理由；**question** 是要你提供的信息，可能附几个猜测的答案。点开后能看到上下文（含子 agent 回报里的 open questions）、选项和要发给主 agent 的消息，选一个、写补充，Send 后答案记进运行目录的 `answers.jsonl` 并发给主 agent；主 agent 不在时只保存，接手的主 agent 会读到。主 agent 处理完用 `hd_dispatch.py ask --resolve` 关掉这一项。搁置等你决定的卡没有写待决项时，面板给它补一个"继续做 / 不做了"。
+**需要你处理（待决项）**：主 agent 需要你拍板或只有你知道答案的事，列在运行卡片里的“需要你处理”下（运行折叠时也显示）。分两种：**decision** 是在 2–4 个具体做法里选一个，每个选项写明代价，主 agent 标出推荐（★）和理由；**question** 是要你提供的信息，可能附几个猜测的答案。点开后能看到上下文（含子 agent 回报里的 open questions）、选项和要发给主 agent 的消息，选一个、写补充，点“发送”后答案记进运行目录的 `answers.jsonl` 并发给主 agent；主 agent 不在时只保存，接手的主 agent 会读到。主 agent 处理完用 `hd_dispatch.py ask --resolve` 关掉这一项。搁置等你决定的卡没有写待决项时，面板给它补一个"继续做 / 不做了"。
 
-断网时，子 agent 在面板上标为 waiting for network；因断网停下的不占自动重试次数，网络恢复后自动接着做，主 agent 不用处理。
+断网时，子 agent 在面板上标为“等网络”；因断网停下的不占自动重试次数，网络恢复后自动接着做，主 agent 不用处理。
 
 ## 主 agent 交接
 
@@ -67,7 +67,7 @@ Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"�
 
 - **触发**：你在对话里说"准备交接"；或主 agent 所用账号的某个额度窗口（5 小时、7 天等）超过 90%（`CC_HD_HANDOFF_AT` 可改）时，它会先问你要不要交接，你同意才开始。不论主 agent 是 Claude Code 还是 Codex 都会提示：`hd_dispatch.py wait`/`collect` 每次都检查，Claude Code 另有 hook 在工具调用后检查。每个窗口重置前只问一次。
 - **额度从哪来**：先问本机 magpie（网关 `127.0.0.1:3425`，不通时后台跑 `magpie quota --json`），按该服务最近一次实际使用的账号算；没有 magpie 时，Codex 用它会话日志里的 `rate_limits`；都没有就不显示、不检查。面板上每个运行中或暂停的运行卡片头下面有一行「main agent · Claude Code · pro　5h 50%　7d 20%」，按主 agent 终端当前实际跑的程序选订阅（Codex 就显示 Codex 的），≥70% 黄、≥90% 红，悬停看重置时间和来源，约 30 秒刷新一次。`python3 shared/scripts/hd_usage.py quota codex` 可以看当前读到的值。
-- 主 agent 停止开始新工作，写交接说明，运行 `hd_dispatch.py handoff`，把给新 agent 的提示词贴在对话里（面板上该运行的 Copy prompt 也能复制）。
+- 主 agent 停止开始新工作，写交接说明，运行 `hd_dispatch.py handoff`，把给新 agent 的提示词贴在对话里（面板上该运行的“复制提示”也能复制）。
 - 你在 herdr 里新开终端启动 Claude Code 或 Codex，发这段提示词。新 agent 读交接包、运行 `adopt` 接手、向你复述现状，经你确认后继续。原来的主 agent 之后再操作这个运行会被拒绝。
 - 不交接了：让原主 agent 运行 `hd_dispatch.py resume`。
 
@@ -81,7 +81,7 @@ herdr 或机器重启、终端被误关时，没正常结束的子 agent 在面�
 
 主 agent 的会话不在了（终端被关、程序退出、herdr 重启），运行还没做完时，开一个新会话接着做，不用记命令：
 
-- **面板**：这样的运行卡片头下有一行「The main agent (…) is gone」和 **Copy resume prompt** 按钮。在 herdr 里新开终端，启动 Claude Code、Codex 或 Antigravity（Codex 用 `codex --sandbox danger-full-access`，Antigravity 用 `agy --dangerously-skip-permissions`），粘贴复制的提示词。
+- **面板**：这样的运行卡片头下有一行「主 agent（…） 已经不在了」和 **复制接手提示** 按钮。在 herdr 里新开终端，启动 Claude Code、Codex 或 Antigravity（Codex 用 `codex --sandbox danger-full-access`，Antigravity 用 `agy --dangerously-skip-permissions`），粘贴复制的提示词。
 - **直接说**：在新会话里说"用 cc-herdr-dispatch-dev 接着之前的运行"（research、review 同理）。skill 运行 `hd_dispatch.py runs` 列出本仓库没做完的运行，问你接哪个。
 - 新主 agent 运行 `hd_dispatch.py takeover --run <dir>`：一步完成恢复中断的子 agent 和接手（`recover` + `adopt`），运行先处于暂停；再向你复述现状，你确认后才继续派发。原主 agent 还开着时会拒绝，除非你明确让它接手（`--force`）。
 - 新旧主 agent 是什么程序都可以（Claude Code、Codex、Antigravity 等）。主 agent 程序登记在 `hd_dispatch.py` 的 `MAIN_AGENTS` 里（会话变量、续上原会话的命令）；没登记的程序照样能接手，只是不给续上原会话的命令。

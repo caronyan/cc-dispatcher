@@ -10,7 +10,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords } from "./model.js";
+import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -137,7 +137,7 @@ const toneColor = (t, tone) => ({ ok: t.ansi2, bad: t.ansi1, warn: t.ansi3, acce
 const KIND_COLOR = (t) => ({ added: t.ansi2, untracked: t.ansi6, modified: t.ansi3, deleted: t.ansi1, renamed: t.accent, conflict: t.ansi1 });
 // One letter per kind in place of git's two-column code (untracked is "??", which reads as a broken glyph).
 const KIND_MARK = { added: "A", untracked: "N", modified: "M", deleted: "D", renamed: "R", conflict: "!" };
-const KIND_SHORT = { added: "added", untracked: "new", modified: "modified", deleted: "deleted", renamed: "renamed", conflict: "conflict" };
+const KIND_SHORT = { added: "新增", untracked: "未跟踪", modified: "修改", deleted: "删除", renamed: "改名", conflict: "冲突" };
 const tdot = (color, size = 7) => div().size(size).flex_none().rounded(size / 2).bg(color);
 const blockLabel = (t, text) => div().flex_none().text_size(S().label).font_semibold().text_color(t.muted).child(String(text).toUpperCase());
 
@@ -224,7 +224,7 @@ function toggle() {
       .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(() => run("layout.toggle", { id: PANEL }))
-      .child(mark(14, on ? t.foreground : t.muted)).child("Dispatch")
+      .child(mark(14, on ? t.foreground : t.muted)).child("派发")
       .when(live.length > 0, (el) => el.child(h_flex().h(16).px(5).items_center().rounded(8).bg(busy ? t.working : t.selected)
         .text_size(11).text_color(busy ? t.background : t.muted).child(String(busy || live.length)))));
 }
@@ -253,7 +253,7 @@ export default class Dispatch extends View {
       const p = blockProps() ?? {};
       this.choice = null; this.sending = false; this.failed = null; this.saved = false; this.extra = null;
       this.answerBox = TextareaState.new({ rows: 3, placeholder: p.item?.kind === "question"
-        ? "Your answer (or pick a suggestion above and add to it)" : "A note for the main agent (optional): why, or what to watch" });
+        ? "你的回答（也可以选上面的建议再补充）" : "给主 agent 的备注（可不填）：理由，或要注意什么" });
       this.answerBox.on("change", (_e, cx) => cx.notify());
       this.answerBox.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
       this.answerBox.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
@@ -372,12 +372,12 @@ export default class Dispatch extends View {
     if (!v) return null;
     const color = { high: t.ansi1, warn: t.ansi3, ok: t.muted };
     const clock = (ms) => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
-    const tip = v.windows.map((w) => `${w.text}${w.resets ? ` · resets ${new Date(w.resets).toDateString() === new Date().toDateString() ? clock(w.resets) : `${new Date(w.resets).getMonth() + 1}/${new Date(w.resets).getDate()} ${clock(w.resets)}`}` : ""}`).join("\n")
-      + `\nfrom ${v.source === "magpie" ? "magpie" : "the agent's own log"}`;
+    const tip = v.windows.map((w) => `${w.text}${w.resets ? ` · 重置于 ${new Date(w.resets).toDateString() === new Date().toDateString() ? clock(w.resets) : `${new Date(w.resets).getMonth() + 1}/${new Date(w.resets).getDate()} ${clock(w.resets)}`}` : ""}`).join("\n")
+      + `\n来源：${v.source === "magpie" ? "magpie" : "agent 自己的日志"}`;
     return h_flex().id(`quota-${r.dir}`).flex_none().pl(30).pr(10).pb(6).gap(6).items_center().flex_wrap()
       .text_size(S().label).tooltip(tip)
       .child(icon("gauge", 11, t.muted))
-      .child(div().flex_none().text_color(t.muted).child(`main agent · ${v.label}`))
+      .child(div().flex_none().text_color(t.muted).child(`主 agent · ${v.label}`))
       .children(v.windows.map((w) => div().flex_none().text_color(color[w.level]).when(w.level !== "ok", (el) => el.font_semibold()).child(w.text)));
   }
 
@@ -425,12 +425,12 @@ export default class Dispatch extends View {
 
   renderRuns(t) {
     const body = v_flex().id("runs").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(8);
-    if (this.error) body.child(note(t, `Could not read runs: ${this.error}`, t.ansi1));
+    if (this.error) body.child(note(t, `读不到运行记录：${this.error}`, t.ansi1));
     const { mine, others } = this.split();
     if (!mine.length) {
       body.child(v_flex().p(8).gap(6)
-        .child(note(t, this.repo ? `No runs in ${baseName(this.repo)} yet.` : "Open a space to see its runs.", t.foreground))
-        .child(note(t, "Runs appear here when a cc-herdr-dispatch skill dispatches helpers: /cc-herdr-dispatch-research, -review, -dev, -fix, -test.")));
+        .child(note(t, this.repo ? `${baseName(this.repo)} 里还没有运行。` : "打开一个空间，就能看到它的运行。", t.foreground))
+        .child(note(t, "用 cc-herdr-dispatch 系列 skill 派出子 agent 后，运行会出现在这里：/cc-herdr-dispatch-research、-review、-dev、-fix、-test。")));
       return this.renderOthers(t, body, others);
     }
     // An archived run stays out of the list while all its helpers are settled (model.js archivedAway).
@@ -442,11 +442,11 @@ export default class Dispatch extends View {
     const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
     if (ended.length > HISTORY) {
-      body.child(link("older", this.showOld ? "Show fewer" : `Show ${ended.length - HISTORY} older`,
+      body.child(link("older", this.showOld ? "收起" : `再显示 ${ended.length - HISTORY} 个更早的`,
         (_e, cx) => { this.showOld = !this.showOld; cx.notify(); }));
     }
     if (archived.length) {
-      body.child(link("archived", this.showArchived ? "Hide archived" : `${archived.length} archived · show`,
+      body.child(link("archived", this.showArchived ? "隐藏已归档" : `已归档 ${archived.length} 个 · 显示`,
         (_e, cx) => { this.showArchived = !this.showArchived; cx.notify(); }));
       if (this.showArchived) body.children(archived.map((r) => this.renderRun(t, r)));
     }
@@ -456,7 +456,7 @@ export default class Dispatch extends View {
   // Other spaces with runs going: one row each; clicking shows that space (and the panel follows).
   renderOthers(t, body, others) {
     if (!others.length) return body;
-    body.child(div().flex_none().pt(6).px(2).text_size(S().label).text_color(t.muted).child("Other spaces"));
+    body.child(div().flex_none().pt(6).px(2).text_size(S().label).text_color(t.muted).child("其他空间"));
     for (const g of others) {
       const stages = g.runs.flatMap((r) => r.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])));
       body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().px(10).py(6).gap(8).items_center().rounded(8)
@@ -466,7 +466,7 @@ export default class Dispatch extends View {
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().text_size(S().body).font_semibold().child(g.name))
           .child(div().text_size(S().label).text_color(t.muted)
-            .child([`${g.runs.length} run${g.runs.length === 1 ? "" : "s"}`, stageSummary(stages)].join(" · "))))
+            .child([`${g.runs.length} 个运行`, stageSummary(stages)].join(" · "))))
         .when(Boolean(g.id), (el) => el.child(icon("chevron-right", 12, t.muted))));
     }
     return body;
@@ -539,7 +539,7 @@ export default class Dispatch extends View {
         .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
         .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
         .child(div().w(7).h(7).flex_none().rounded_full().border_1().border_color(t.muted))
-        .child(div().flex_1().min_w(0).truncate().text_size(S().label).font_semibold().text_color(t.muted).child("no helper yet"))
+        .child(div().flex_1().min_w(0).truncate().text_size(S().label).font_semibold().text_color(t.muted).child("还没有子 agent"))
         .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(t.selected)
           .text_size(S().label).text_color(t.foreground).child(String(away.length))));
       if (!folded) box.children(away.map((k) => v_flex().id(`card-${r.dir}|${k.id}`).flex_none().pl(28).pr(10).py(5).gap(2).bg(t.surface)
@@ -549,7 +549,7 @@ export default class Dispatch extends View {
           .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
           .child(stageTagText(t, CARD_WORDS[k.status] ?? k.status, k.status === "pending" ? t.muted : t.accent)))
         .when(Boolean(k.waits.length || k.note), (el) => el.child(div().pl(14).text_size(S().label).text_color(t.muted)
-          .child(k.waits.length ? `waits on ${k.waits.join(", ")}` : k.note)))));
+          .child(k.waits.length ? `等 ${k.waits.join("、")}` : k.note)))));
     }
     return box;
   }
@@ -568,7 +568,7 @@ export default class Dispatch extends View {
     };
     // Solid chips, the icon in the panel's background color: a filled pause on `foreground`, a filled
     // play on `accent`, a hollow square on `ansi1`.
-    const look = { pause: ["pause-dot", "Pause run", t.foreground], resume: ["play-fill", "Resume run", t.accent], stop: ["square", "Stop run", t.ansi1] };
+    const look = { pause: ["pause-dot", "暂停运行", t.foreground], resume: ["play-fill", "继续运行", t.accent], stop: ["square", "终止运行", t.ansi1] };
     const ops = controlOps(r);
     if (!ops.length) return [];
     return [h_flex().flex_none().gap(6).items_center().children(ops.map((op) => {
@@ -585,7 +585,7 @@ export default class Dispatch extends View {
     const cards = this.stats.runs[r.dir]?.status;
     const op = archivedAway(r, cards) ? "unarchive" : canArchive(r, cards) ? "archive" : null;
     if (!op) return [];
-    const tip = op === "archive" ? "Archive: hide from the panel (files stay)" : "Unarchive: back in the list";
+    const tip = op === "archive" ? "归档：从面板上隐藏（文件保留）" : "取消归档：放回列表";
     return [h_flex().id(`${op}-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
       .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(tip).on_mouse_down("left", stop)
       .on_click((_e, cx) => {
@@ -606,7 +606,7 @@ export default class Dispatch extends View {
   // An archived run's Delete, beside Unarchive: a "delete" dialog to confirm, then hd_dispatch.py delete.
   deleteButton(t, r) {
     return h_flex().id(`delete-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
-      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Delete: remove the run and everything kept of it").on_mouse_down("left", stop)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("删除：删掉这个运行和它留下的所有记录").on_mouse_down("left", stop)
       .on_click((_e, cx) => {
         cx.stop_propagation();
         const open = r.calls.filter((c) => c.state === "live").map((c) => c.name);
@@ -639,12 +639,12 @@ export default class Dispatch extends View {
       .bg(state === "paused" ? t.background : t.surface)
       .child(mark)
       .child(div().flex_1().min_w(0).truncate().text_size(S().label).text_color(color).child(banner))
-      .when(state === "stopped", (el) => el.child(action(`stopmd-${r.dir}`, "Summary", "file", t,
-        (_e, cx) => this.showText(cx, `${r.id} · stopped`, () => loadStopReport(io(on), r), "No stop.md yet."))))
+      .when(state === "stopped", (el) => el.child(action(`stopmd-${r.dir}`, "总结", "file", t,
+        (_e, cx) => this.showText(cx, `${r.id} · 终止总结`, () => loadStopReport(io(on), r), "还没有 stop.md。"))))
       .when(state === "handoff", (el) => el
-        .child(action(`handoffmd-${r.dir}`, "Package", "file", t,
-          (_e, cx) => this.showText(cx, `${r.id} · handoff`, () => loadHandoff(io(on), r), "No handoff.md yet.")))
-        .child(action(`copyprompt-${r.dir}`, this.copied === r.dir ? "Copied" : "Copy prompt", "task", t, (_e, cx) => {
+        .child(action(`handoffmd-${r.dir}`, "交接包", "file", t,
+          (_e, cx) => this.showText(cx, `${r.id} · 交接包`, () => loadHandoff(io(on), r), "还没有 handoff.md。")))
+        .child(action(`copyprompt-${r.dir}`, this.copied === r.dir ? "已复制" : "复制提示", "task", t, (_e, cx) => {
           cx.spawn(async (cx) => {
             const text = await loadHandoffPrompt(io(on), r);
             if (!text) return;
@@ -653,7 +653,7 @@ export default class Dispatch extends View {
             cx.timer.after(2000, (cx) => { if (this.copied === r.dir) { this.copied = null; cx.notify(); } });
           });
         }, { color: t.accent }))
-        .child(action(`retire-${r.dir}`, "Retire", "archive", t, this.confirmRetire(r), { color: t.muted })));
+        .child(action(`retire-${r.dir}`, "收尾", "archive", t, this.confirmRetire(r), { color: t.muted })));
   }
 
   // Under the head: a run whose main agent is gone and that is not done. Copy resume prompt puts the
@@ -666,7 +666,7 @@ export default class Dispatch extends View {
     return h_flex().flex_none().min_h(34).px(12).py(5).gap(8).items_center().border_t(1).border_color(t.border).bg(t.surface)
       .child(icon("handover", 11, t.accent))
       .child(div().flex_1().min_w(0).truncate().text_size(S().label).text_color(t.accent).child(takeoverBanner(r)))
-      .child(action(`takeover-${r.dir}`, this.copied === key ? "Copied" : "Copy resume prompt", "task", t, (_e, cx) => {
+      .child(action(`takeover-${r.dir}`, this.copied === key ? "已复制" : "复制接手提示", "task", t, (_e, cx) => {
         cx.write_to_clipboard(takeoverPrompt(r));
         this.copied = key; cx.notify();
         cx.timer.after(2000, (cx) => { if (this.copied === key) { this.copied = null; cx.notify(); } });
@@ -705,7 +705,7 @@ export default class Dispatch extends View {
         .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
         .child(icon("decide", 11, open ? t.ansi3 : t.muted))
         .child(div().flex_1().min_w(0).truncate().text_size(z.label).font_semibold().text_color(open ? t.ansi3 : t.muted)
-          .child(open ? "Needs you" : "Answered · waiting for the main agent"))
+          .child(open ? "需要你处理" : "已回答 · 等主 agent 处理"))
         .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(open ? t.ansi3 : t.selected)
           .text_size(z.label).text_color(open ? t.background : t.foreground).child(String(open || items.length))));
     if (folded) return box;
@@ -736,7 +736,7 @@ export default class Dispatch extends View {
     const statusColor = { running: t.working, completed: t.muted, failed: t.ansi1, killed: t.ansi3, stopped: t.ansi3, lost: t.muted };
     const row = (task) => {
       const running = task.status === "running", age = fmtDur((task.ended || Date.now()) - (task.started || Date.now()));
-      const word = running ? age : task.status === "completed" ? `done · ${age}` : task.status;
+      const word = running ? age : task.status === "completed" ? `已完成 · ${age}` : ({ failed: "失败", killed: "已停止", stopped: "已停止" }[task.status] ?? task.status);
       const sub = running ? (task.event || task.tail?.[task.tail.length - 1] || "") : (task.status === "completed" ? "" : bgSummary(task));
       return v_flex().id(`bg-${task.id}`).flex_none().pl(28).pr(10).py(4).gap(1)
         // An output file (Claude Code) opens live while running, else its end; a log (Codex) is shown as is.
@@ -744,7 +744,7 @@ export default class Dispatch extends View {
           .on_click((_e, cx) => running && task.kind !== "agent" && task.output
             ? openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 860, height: 620,
               props: { role: "bgtask", title: task.title, output: task.output, on, task: { started: task.started, command: task.command } } })
-            : this.showText(cx, `${task.title} · output`, async () => (task.output ? await loadOutput(io(on), task.output) : null) ?? task.log ?? null, "No output.",
+            : this.showText(cx, `${task.title} · 输出`, async () => (task.output ? await loadOutput(io(on), task.output) : null) ?? task.log ?? null, "没有输出。",
               (text) => `~~~~\n${text.replace(/\s+$/, "")}\n~~~~`)))
         .child(h_flex().min_w(0).gap(8).items_center()
           .child(running && task.kind !== "agent" ? icon("ring", 11, t.working).spin(1400) : icon(kindIcon[task.kind] ?? "terminal", 11, running ? t.working : t.muted))
@@ -754,17 +754,17 @@ export default class Dispatch extends View {
     };
     const box = v_flex().flex_none().py(4).border_t(1).border_color(t.border).bg(t.background)
       .child(h_flex().pl(28).pr(10).py(3).gap(6).items_center().text_size(z.label).text_color(t.muted)
-        .child(div().flex_1().child("background · main agent"))
-        .child(div().flex_none().child(bg.running.length ? `${bg.running.length} running` : "none running")));
+        .child(div().flex_1().child("后台任务 · 主 agent"))
+        .child(div().flex_none().child(bg.running.length ? `${bg.running.length} 个运行中` : "没有在运行的")));
     box.children(bg.running.map(row));
     box.children(bg.ended.map(row));
     // Newest ended first; "n earlier" shows BG_MORE more each click, "show fewer" folds back to the first few.
     const link = (id, text, fn) => div().id(id).flex_none().text_size(z.label).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { fn(); cx.notify(); }).child(text);
     if (bg.hidden || bg.more) box.child(h_flex().pl(28).pr(10).py(3).gap(12).items_center()
-      .when(bg.hidden > 0, (el) => el.child(link(`bg-more-${r.dir}`, `${bg.hidden} earlier · show ${Math.min(BG_MORE, bg.hidden)} more`,
+      .when(bg.hidden > 0, (el) => el.child(link(`bg-more-${r.dir}`, `更早的 ${bg.hidden} 个 · 再显示 ${Math.min(BG_MORE, bg.hidden)} 个`,
         () => this.bgMore.set(r.dir, bg.more + BG_MORE))))
-      .when(bg.more > 0, (el) => el.child(link(`bg-less-${r.dir}`, "show fewer", () => this.bgMore.delete(r.dir)))));
+      .when(bg.more > 0, (el) => el.child(link(`bg-less-${r.dir}`, "收起", () => this.bgMore.delete(r.dir)))));
     return box;
   }
 
@@ -783,9 +783,9 @@ export default class Dispatch extends View {
       .child(div().text_size(z.small).font_semibold().child(value));
 
     const cells = [
-      s.elapsed != null && cell(fmtDur(s.elapsed), r.live ? "elapsed" : "took"),
-      s.known && cell(String(s.commands), "commands"),
-      s.known && cell(String(s.files), "files patched"),
+      s.elapsed != null && cell(fmtDur(s.elapsed), r.live ? "已用时" : "用时"),
+      s.known && cell(String(s.commands), "命令"),
+      s.known && cell(String(s.files), "改动文件"),
     ].filter(Boolean);
     const box = v_flex().flex_none().px(12).pt(8).pb(10).gap(10).border_t(1).border_color(t.border);
     if (cells.length) box.child(h_flex().gap(8).children(cells));
@@ -794,20 +794,20 @@ export default class Dispatch extends View {
       // in the key), review calls are not cards at all (stats.js).
       const counts = cardCounts(s.cards), colors = CARD_COLORS(t), v = cardView(s.cards, r.calls.map((c) => c.call));
       box.child(v_flex().gap(5)
-        .child(line("cards", `${v.merged}/${v.goal} merged`))
+        .child(line("卡片", `已合并 ${v.merged}/${v.goal}`))
         .child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))
         .child(h_flex().gap(8).overflow_hidden().text_size(z.label).text_color(t.muted)
-          .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${n} ${CARD_WORDS[st] ?? st}`).flex_none()))));
+          .children(counts.map(([st, n]) => key(colors[st] ?? t.muted, `${CARD_WORDS[st] ?? st} ${n}`).flex_none()))));
     }
     if (s.tokens) {
       const k = s.tokens;
       box.child(v_flex().gap(5)
-        .child(line("tokens", fmtTok(k.total)))
+        .child(line("token", fmtTok(k.total)))
         .child(bar([[k.cached, t.ansi4], [k.fresh, t.ansi6], [k.output, t.ansi3]], k.total))
         .child(h_flex().flex_wrap().gap(10).text_size(z.label).text_color(t.muted)
-          .child(key(t.ansi4, `cached ${fmtTok(k.cached)}`))
-          .child(key(t.ansi6, `new input ${fmtTok(k.fresh)}`))
-          .child(key(t.ansi3, `output ${fmtTok(k.output)}`))));
+          .child(key(t.ansi4, `缓存 ${fmtTok(k.cached)}`))
+          .child(key(t.ansi6, `新输入 ${fmtTok(k.fresh)}`))
+          .child(key(t.ansi3, `输出 ${fmtTok(k.output)}`))));
     }
     return box;
   }
@@ -832,7 +832,7 @@ export default class Dispatch extends View {
       .children(callTags(c).map((x) => tag(x)))
       .when(Boolean(agentTag(c)), (el) => el.child(tag(agentTag(c).text, agentTag(c).weak ? t.ansi3 : t.muted)))
       .when(Boolean(c.handingTo), (el) => el.child(tag(`→ ${c.handingTo}`, t.accent)))
-      .when(Boolean(c.failure && c.failure !== "exited" && c.failure !== "blocked"), (el) => el.child(tag(c.failure, t.ansi1)))
+      .when(Boolean(c.failure && c.failure !== "exited" && c.failure !== "blocked"), (el) => el.child(tag(failureWord(c.failure), t.ansi1)))
       .when(Boolean(c.retry), (el) => el.child(tag(c.retry.split(" ").pop(), t.ansi3)))
       .when(tagged, (el) => el.child(stageTag(t, stage)))
       .child(div().flex_1())
@@ -861,30 +861,30 @@ export default class Dispatch extends View {
     const grid = (cells, end) => h_flex().gap(6).children(cells.map((x) => x || gap())).child(end || div().flex_none().w(28));
     const writes = (c.mode === "write" || c.mode === "net") && c.dir;
     const view = grid([
-      cell(`result-${c.key}`, "Result", "file", (_e, cx) => this.showResult(cx, c, on, writes)),
-      cell(`task-${c.key}`, "Task", "task", (_e, cx) => this.showText(cx, `${c.call} · task and rounds`, async () => {
+      cell(`result-${c.key}`, "结果", "file", (_e, cx) => this.showResult(cx, c, on, writes)),
+      cell(`task-${c.key}`, "任务", "task", (_e, cx) => this.showText(cx, `${c.call} · 任务和各轮`, async () => {
         const files = io(on);
         const [events, tasks] = [await loadEvents(files, c), await loadTasks(files, c)];
-        const text = Object.entries(tasks).reverse().map(([k, x]) => `==> task-${k}.md <==\n${x ?? "(missing)"}`).join("\n\n")
+        const text = Object.entries(tasks).reverse().map(([k, x]) => `==> task-${k}.md <==\n${x ?? "（缺失）"}`).join("\n\n")
           + `\n\n==> events.jsonl <==\n${events ?? ""}`;
         return { text, markdown: roundsMarkdown(c, events, tasks), doc: taskDoc(c, events, tasks) };
-      }, "No task file.")),
-      live && cell(`peek-${c.key}`, "Peek", "eye", () => goTo(c.address, c.parent)),
-    ], live && square(`kill-${c.key}`, "Clean up", "trash", () => openOverlay({
+      }, "没有任务文件。")),
+      live && cell(`peek-${c.key}`, "窥视", "eye", () => goTo(c.address, c.parent)),
+    ], live && square(`kill-${c.key}`, "清理", "trash", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 440, height: 220,
       props: { role: "cleanup", address: c.address, call: c.call, name: c.name } }), t.ansi1));
     // Ask: a message to its main agent. A card parked for you offers your two answers instead.
     // Hand over: freeze it and start another agent (or a fresh session of the same one) on its task.
     const run = this.runs.find((r) => r.dir === c.runDir) ?? null;
-    const ASK_LABEL = { accept: "Ask to review" };
+    const ASK_LABEL = { accept: "请求验收" };
     const item = asks.includes("decide") && run ? this.itemsOf(run).find((x) => x.card === c.call) ?? null : null;
     const askCells = asks.includes("decide")
-      ? (item ? [cell(`decide-${c.key}`, item.answer ? "Answered · change…" : "Decide…", "decide", () => this.openDecide(run, item), t.ansi3)] : [])
-      : to ? asks.map((ask) => cell(`ask-${ask}-${c.key}`, ASK_LABEL[ask] ?? "Ask", "send", () => openOverlay({
+      ? (item ? [cell(`decide-${c.key}`, item.answer ? "已回答 · 修改…" : "决定…", "decide", () => this.openDecide(run, item), t.ansi3)] : [])
+      : to ? asks.map((ask) => cell(`ask-${ask}-${c.key}`, ASK_LABEL[ask] ?? "询问", "send", () => openOverlay({
         mod: "cc-dispatch", kind: "dialog", width: 480, height: 300,
         props: { role: "handoff", address: to.address, name: to.program?.name ?? to.address, text: handoffText(c, ask) } }), t.accent)) : [];
     const parentLive = Boolean(c.parent && (terminals() ?? []).find((x) => x.address === c.parent && x.state === "live"));
-    const handIt = canHandOver(c, run) && cell(`handover-${c.key}`, "Hand over…", "handover", () => openOverlay({
+    const handIt = canHandOver(c, run) && cell(`handover-${c.key}`, "移交…", "handover", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 500, height: 360,
       props: { role: "handover", on, run: { dir: c.runDir, hd: run?.hd ?? c.hd, id: run?.id ?? baseName(c.runDir) },
         call: c.call, name: c.name, agent: c.agent, live, round: c.round, mode: c.mode, parentLive,
@@ -892,15 +892,15 @@ export default class Dispatch extends View {
     const second = [...askCells, handIt].filter(Boolean).slice(0, 2);
     const terminal = second.length ? grid([...second, null].slice(0, 2)) : null;
     const spend = callSpend(this.stats.calls[c.key]);
-    const who = c.lost ? "Interrupted: its terminal vanished before it handed in a good report. Nothing is done about it until its main agent (or you) decides."
-      : c.offline ? "Waiting for the network: it carries on by itself once the network is back, using up no retry."
-      : c.handingTo ? `Handing over to ${agentLabel(c.handingTo)}: it is writing its handoff note`
-      : weakIsolation(c) ? `${agentLabel(c.agent)} · weak isolation: no sandbox, only its task file's rules keep it in its folder` : null;
+    const who = c.lost ? "已中断：交出合格回报之前终端消失了。要等主 agent（或你）决定怎么处理。"
+      : c.offline ? "等网络：网络恢复后会自己接着做，不占重试次数。"
+      : c.handingTo ? `正在移交给 ${agentLabel(c.handingTo)}：它在写交接说明`
+      : weakIsolation(c) ? `${agentLabel(c.agent)} · 弱隔离：没有沙箱，只靠任务文件里的规定让它待在自己的目录里` : null;
     // Its dev card, when it has one: what the main agent made of it, and why it is parked.
     const why = parkedWhy(card);
     const cardLine = card && (why || card.note || card.result || ["pending", "running"].includes(card.status))
-      ? [`card ${CARD_WORDS[card.status] ?? card.status}`,
-         why === "user" ? "waiting for your decision" : why === "superseded" ? `superseded${card.by ? ` by ${card.by}` : ""}` : why === "dropped" ? "dropped" : null,
+      ? [`卡片${CARD_WORDS[card.status] ?? card.status}`,
+         why === "user" ? "等你决定" : why === "superseded" ? `已被${card.by ? ` ${card.by} ` : ""}取代` : why === "dropped" ? "已放弃" : null,
          card.note || card.result].filter(Boolean).join(" · ") : null;
     return v_flex().pl(28).pr(10).pt(2).pb(10).gap(6)
       .when(Boolean(spend), (el) => el.child(div().pb(2).text_size(S().label).text_color(t.muted).child(spend)))
@@ -928,19 +928,19 @@ export default class Dispatch extends View {
   }
 
   showResult(cx, c, on, writes) {
-    this.showText(cx, `${c.call} · result (round ${c.round})`, async () => {
+    this.showText(cx, `${c.call} · 结果（第 ${c.round} 轮）`, async () => {
       const files = io(on);
       const { text, exists, path } = await loadReport(files, c);
       const older = await earlierReports(files, c);
       const diff = writes ? await loadDiff(files, c) : null;
       const head = [
-        `verdict: ${c.report ?? "not checked yet (hd_dispatch.py collect checks it)"}`,
-        `file: ${c.reportPath}`,
-        path && path !== c.reportPath ? `read from the run folder's copy: ${path}` : null,
-        `schema: ${c.schema}`,
-        older.length ? `earlier rounds: ${older.join(", ")}` : null,
+        `结论：${{ ok: "合格", bad: "不合格", missing: "缺失" }[c.report] ?? "还没检查（hd_dispatch.py collect 时检查）"}`,
+        `文件：${c.reportPath}`,
+        path && path !== c.reportPath ? `读的是运行目录里的副本：${path}` : null,
+        `schema：${c.schema}`,
+        older.length ? `之前各轮：${older.join(", ")}` : null,
       ].filter(Boolean).join("\n");
-      return { text: `${head}\n\n${exists ? text : "(no report written yet)"}${diff != null ? `\n\n==> worktree <==\n${diff}` : ""}`,
+      return { text: `${head}\n\n${exists ? text : "（还没写回报）"}${diff != null ? `\n\n==> worktree <==\n${diff}` : ""}`,
         markdown: resultMarkdown(c, exists ? text : null, older, diff), doc: resultDoc(c, exists ? text : null, older, diff) };
     }, "");
   }
@@ -953,9 +953,9 @@ export default class Dispatch extends View {
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
       .child(div().flex_1().truncate().child(runs.length
-        ? `${runs.length} run${runs.length === 1 ? "" : "s"} · ${live} active · ${helpers} helper${helpers === 1 ? "" : "s"} live${archived ? ` · ${archived} archived` : ""}`
-        : archived ? `${archived} archived` : "No runs"))
-      .when(waiting > 0, (el) => el.child(div().flex_none().pl(8).text_color(t.ansi3).font_semibold().child(`${waiting} need${waiting === 1 ? "s" : ""} you`)))
+        ? `${runs.length} 个运行 · ${live} 个进行中 · ${helpers} 个子 agent 在线${archived ? ` · 已归档 ${archived} 个` : ""}`
+        : archived ? `已归档 ${archived} 个` : "没有运行"))
+      .when(waiting > 0, (el) => el.child(div().flex_none().pl(8).text_color(t.ansi3).font_semibold().child(`${waiting} 项等你处理`)))
       .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().text_color(t.ansi3).child(this.statsError)));
   }
 
@@ -981,7 +981,7 @@ export default class Dispatch extends View {
     };
     const nav = v_flex().id("doc-nav").w(230).flex_none().min_h(0).overflow_y_scrollbar().p(6).gap(1).rounded(8)
       .border_1().border_color(t.border).bg(t.background)
-      .child(entry(null, "All", { group: true, tone: "accent" }))
+      .child(entry(null, "全部", { group: true, tone: "accent" }))
       .children(docEntries(doc).map((x) => x.depth < 0
         ? div().pt(6).child(entry(x.node.id, x.node.title, { group: true, tone: x.node.tone, badge: x.node.badge }))
         : entry(x.node.id, x.node.title, { depth: x.depth, tone: x.node.tone, badge: x.node.badge })));
@@ -1034,52 +1034,52 @@ export default class Dispatch extends View {
           .child(h_flex().gap(8).items_center()
             .child(div().flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(o.key))
             .child(div().flex_1().min_w(0).text_size(z.body).font_semibold().text_color(t.foreground).child(o.label))
-            .when(rec, (el) => el.child(badge("Recommended", t.accent))))
+            .when(rec, (el) => el.child(badge("推荐", t.accent))))
           .when(Boolean(o.detail), (el) => el.child(div().text_size(z.small).text_color(t.muted).child(o.detail)))
-          .when(rec && Boolean(x.why), (el) => el.child(div().text_size(z.small).text_color(t.accent).child(`Why: ${x.why}`))));
+          .when(rec && Boolean(x.why), (el) => el.child(div().text_size(z.small).text_color(t.accent).child(`理由：${x.why}`))));
     };
-    const context = [x.context, this.extra?.length ? `**The helper's open questions**\n\n${this.extra.map((q) => `- ${q}`).join("\n")}` : null,
-      x.blocks?.length ? `Waiting on this: ${x.blocks.join(", ")}` : null].filter(Boolean).join("\n\n");
+    const context = [x.context, this.extra?.length ? `**子 agent 还没解决的问题**\n\n${this.extra.map((q) => `- ${q}`).join("\n")}` : null,
+      x.blocks?.length ? `在等这件事的：${x.blocks.join("、")}` : null].filter(Boolean).join("\n\n");
     const go = (_e, cx) => {
       if (!ready || this.sending) return;
       this.sending = true; this.failed = null; cx.notify();
       cx.spawn(async (cx) => {
         const saved = await saveAnswer(io(p.on ?? null), run.dir, answerRecord(x, ans));
-        if (!saved.ok) { this.sending = false; this.failed = `Could not save the answer: ${saved.error}`; cx.notify(); return; }
+        if (!saved.ok) { this.sending = false; this.failed = `回答没保存成功：${saved.error}`; cx.notify(); return; }
         if (reach === "ok") {
           const r = await hc(["send", p.to.address, msg]).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
           if (r.code === 0) { close(); return; }
-          this.failed = `Saved, but not sent: ${(r.stderr || r.stdout || "hc send failed").trim().split("\n").pop()}. The main agent sees it at its next wait.`;
+          this.failed = `已保存，但没发出去：${(r.stderr || r.stdout || "hc send 失败").trim().split("\n").pop()}。主 agent 下次等待时会看到。`;
         }
         this.sending = false; this.saved = true; cx.notify();
       });
     };
-    const where = reach === "ok" ? `Saved in the run (answers.jsonl) and sent to the main agent, ${p.to.name} (${p.to.address}).`
-      : reach === "blocked" ? `Saved in the run. ${p.to?.name} is waiting on a question, so nothing is typed into it; its next wait or collect shows your answer.`
-      : "Saved in the run. Its main agent is not running: whoever takes the run over sees your answer (hd_dispatch.py ask --list, wait, collect).";
+    const where = reach === "ok" ? `已保存到运行里（answers.jsonl），并发给了主 agent ${p.to.name}（${p.to.address}）。`
+      : reach === "blocked" ? `已保存到运行里。${p.to?.name} 正在等一个确认，所以没往它那里输入；它下次等待或收回报时会看到你的回答。`
+      : "已保存到运行里。主 agent 不在运行：之后谁接手这个运行，都能看到你的回答（hd_dispatch.py ask --list、wait、collect）。";
     const body = [
       h_flex().flex_none().gap(8).items_center()
-        .child(badge(decision ? "Decision" : "Question", decision ? t.ansi3 : t.accent))
+        .child(badge(decision ? "决定" : "问题", decision ? t.ansi3 : t.accent))
         .when(Boolean(x.card), (el) => el.child(badge(`card ${x.card}`, t.muted)))
-        .child(div().flex_1().min_w(0).truncate().text_size(z.label).text_color(t.muted).child(`${run.id ?? ""}${x.asked ? ` · asked ${ago(x.asked)}` : ""}`)),
-      x.answer && note(t, `Answered ${ago(x.answer.at * 1000)}: ${answerWords(x.answer)}. Sending again replaces it.`, t.done),
+        .child(div().flex_1().min_w(0).truncate().text_size(z.label).text_color(t.muted).child(`${run.id ?? ""}${x.asked ? ` · ${ago(x.asked)}提问` : ""}`)),
+      x.answer && note(t, `${ago(x.answer.at * 1000)}已回答：${answerWords(x.answer)}。再发一次会替换它。`, t.done),
       v_flex().id("decide-body").flex_1().min_h(0).overflow_y_scrollbar().gap(10)
         .when(Boolean(context), (el) => el.child(div().flex_none().px(14).py(10).rounded(8).border_1().border_color(t.border).bg(t.background)
           .text_size(z.body).child(TextView.markdown("decide-context", context).selectable(true))))
         .when(opts.length > 0, (el) => el
-          .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "Pick one" : "Suggested answers (optional)"))
+          .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "选一个" : "建议的回答（可不选）"))
           .children(opts.map(option)))
-        .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "Note (optional)" : "Your answer"))
+        .child(div().flex_none().text_size(z.label).text_color(t.muted).child(decision ? "备注（可不填）" : "你的回答"))
         .child(div().id("answer").flex_none().on_mouse_down("left", stop)
           .child(Textarea.new(this.answerBox).h(78).w_full().px(10).py(8).rounded(8).border_1()
             .border_color(this.typing ? t.accent : t.input).bg(t.background).text_size(z.body).text_color(t.foreground)))
-        .when(Boolean(msg), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`The main agent gets: ${msg}`))),
+        .when(Boolean(msg), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`主 agent 会收到：${msg}`))),
       note(t, this.saved ? (this.failed ?? where) : where, this.saved ? t.done : t.muted),
       this.failed && !this.saved && note(t, this.failed, t.ansi1),
     ];
     return dialogFrame(t, "decide", x.title ?? "", body, [
-      dialogButton("cancel", this.saved ? "Close" : "Cancel", t, close, this.saved ? "primary" : "secondary"),
-      !this.saved && dialogButton("go", this.sending ? "Sending…" : reach === "ok" ? "Send" : "Save answer", t, go, "primary", ready && !this.sending),
+      dialogButton("cancel", this.saved ? "关闭" : "取消", t, close, this.saved ? "primary" : "secondary"),
+      !this.saved && dialogButton("go", this.sending ? "发送中…" : reach === "ok" ? "发送" : "保存回答", t, go, "primary", ready && !this.sending),
     ], close);
   }
 
@@ -1091,38 +1091,38 @@ export default class Dispatch extends View {
         .bg(on ? t.raised : t.popover).text_color(on ? t.foreground : t.muted).cursor_pointer()
         .on_click((_e, cx) => { this.raw = value; cx.notify(); }).child(label);
       const modes = md && md.length <= MARKDOWN_LIMIT ? h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
-        .child(seg("rendered", "Rendered", !raw, false)).child(seg("source", "Source", raw, true)) : null;
+        .child(seg("rendered", "排版", !raw, false)).child(seg("source", "原文", raw, true)) : null;
       const body = raw ? monoBox(t, "out", p.text ?? "")
         : p.doc ? this.renderDoc(t, p)
         : div().id(`md-${p.title ?? ""}`).flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).rounded(8).border_1().border_color(t.border).bg(t.background)
           .text_size(S().body).text_color(t.foreground).child(TextView.markdown("md-view", md).selectable(true));
-      return dialogFrame(t, "text", p.title ?? "", [body], [dialogButton("close", "Close", t, close, "primary")], close, modes);
+      return dialogFrame(t, "text", p.title ?? "", [body], [dialogButton("close", "关闭", t, close, "primary")], close, modes);
     }
     if (p.role === "bgtask") {
-      const md = this.live ? liveMarkdown(p.task ?? {}, this.live) : "Reading its processes…";
+      const md = this.live ? liveMarkdown(p.task ?? {}, this.live) : "正在读取它的进程…";
       const body = div().id("live").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).rounded(8).border_1().border_color(t.border).bg(t.background)
         .text_size(S().body).text_color(t.foreground).child(TextView.markdown("live-view", md).selectable(true));
       const stamp = h_flex().flex_none().gap(6).items_center().text_size(S().small).text_color(t.muted)
-        .child(icon("ring", 11, t.working).spin(1400)).child(`live · every ${LIVE_POLL / 1000}s`);
-      return dialogFrame(t, "bgtask", `${p.title ?? "task"} · live`, [body], [dialogButton("close", "Close", t, close, "primary")], close, stamp);
+        .child(icon("ring", 11, t.working).spin(1400)).child(`实时 · 每 ${LIVE_POLL / 1000} 秒刷新`);
+      return dialogFrame(t, "bgtask", `${p.title ?? "任务"} · 实时`, [body], [dialogButton("close", "关闭", t, close, "primary")], close, stamp);
     }
     if (p.role === "handoff") {
       const agent = (agents() ?? []).find((a) => a.address === p.address) ?? null;
-      const problem = !agent ? `${p.name} is no longer running. Nothing was sent.` : agent.status === "blocked" ? `${p.name} is waiting on a question; answer it first.` : this.failed;
+      const problem = !agent ? `${p.name} 已经不在运行了，什么都没发。` : agent.status === "blocked" ? `${p.name} 正在等一个确认，先处理它。` : this.failed;
       const go = (_e, cx) => {
         if (problem || this.sending) return;
         this.sending = true; cx.notify();
         cx.spawn(async (cx) => {
           const r = await hc(["send", p.address, p.text]).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
           if (r.code === 0) { close(); goTo(p.address, null); return; }
-          this.sending = false; this.failed = (r.stderr || r.stdout || "Could not send").trim().split("\n").pop(); cx.notify();
+          this.sending = false; this.failed = (r.stderr || r.stdout || "发送失败").trim().split("\n").pop(); cx.notify();
         });
       };
-      return dialogFrame(t, "handoff", "Ask the main agent?", [
-        note(t, `Sends this message to the main agent, ${p.name} (${p.address}). It decides what to do; nothing else changes.`),
+      return dialogFrame(t, "handoff", "问主 agent？", [
+        note(t, `把这条消息发给主 agent ${p.name}（${p.address}），由它决定怎么做；其他什么都不变。`),
         monoBox(t, "msg", p.text ?? ""),
         problem && note(t, problem, t.ansi1),
-      ], [dialogButton("cancel", "Cancel", t, close), dialogButton("go", this.sending ? "Sending…" : "Send", t, go, "primary", !problem && !this.sending)], close);
+      ], [dialogButton("cancel", "取消", t, close), dialogButton("go", this.sending ? "发送中…" : "发送", t, go, "primary", !problem && !this.sending)], close);
     }
     if (p.role === "cleanup") {
       const go = (_e, cx) => {
@@ -1132,21 +1132,21 @@ export default class Dispatch extends View {
           await hc(["kill", p.address]).catch(() => null);
           const r = await hc(["rm", p.address]).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
           if (r.code === 0) { close(); return; }
-          this.sending = false; this.failed = (r.stderr || "Could not remove it").trim().split("\n").pop(); cx.notify();
+          this.sending = false; this.failed = (r.stderr || "清理失败").trim().split("\n").pop(); cx.notify();
         });
       };
-      return dialogFrame(t, "cleanup", `Clean up ${p.name}?`, [
-        note(t, `Stops ${p.name} (${p.address}) and removes its terminal, like hd_dispatch.py cleanup. Its meta.json, task files and report stay, so the run keeps its history.`, t.foreground),
-        note(t, "Its main agent is not told; it will see the helper as gone."),
+      return dialogFrame(t, "cleanup", `清理 ${p.name}？`, [
+        note(t, `停下 ${p.name}（${p.address}）并关掉它的终端，和 hd_dispatch.py cleanup 一样。它的 meta.json、任务文件和回报都保留，运行的记录不会丢。`, t.foreground),
+        note(t, "不会通知主 agent，它会看到这个子 agent 已经不在了。"),
         this.failed && note(t, this.failed, t.ansi1),
-      ], [dialogButton("cancel", "Cancel", t, close), dialogButton("go", this.sending ? "Stopping…" : "Clean up", t, go, "danger", !this.sending)], close);
+      ], [dialogButton("cancel", "取消", t, close), dialogButton("go", this.sending ? "正在停止…" : "清理", t, go, "danger", !this.sending)], close);
     }
     if (p.role === "handover") {
       const pick = this.pick ?? "codex", label = agentLabel(pick), weak = AGENTS[pick]?.isolation === "weak";
       const choice = (a) => h_flex().id(`to-${a}`).h(26).px(12).items_center().rounded(5).text_size(S().small)
         .bg(pick === a ? t.raised : t.popover).text_color(pick === a ? t.foreground : t.muted).cursor_pointer()
         .on_click((_e, cx) => { this.pick = a; cx.notify(); })
-        .child(agentLabel(a) + (a === p.agent ? " (new session)" : ""));
+        .child(agentLabel(a) + (a === p.agent ? "（新会话）" : ""));
       const picker = h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border).children(Object.keys(AGENTS).map(choice));
       const go = (_e, cx) => {
         if (this.sending) return;
@@ -1155,21 +1155,21 @@ export default class Dispatch extends View {
           const r = await handOver(io(p.on ?? null), p.run ?? {}, { call: p.call, hd: p.run?.hd }, pick)
             .catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
           if (r.ok) { close(); return; }
-          this.sending = false; this.failed = (r.text || "Could not run hd_dispatch.py").split("\n").slice(-2).join(" "); cx.notify();
+          this.sending = false; this.failed = (r.text || "hd_dispatch.py 运行失败").split("\n").slice(-2).join(" "); cx.notify();
         });
       };
-      return dialogFrame(t, "handover", `Hand ${p.name} over?`, [
-        h_flex().gap(10).items_center().text_size(S().body).text_color(t.foreground).child("To").child(picker),
+      return dialogFrame(t, "handover", `移交 ${p.name}？`, [
+        h_flex().gap(10).items_center().text_size(S().body).text_color(t.foreground).child("交给").child(picker),
         note(t, p.live
-          ? `Stops ${p.name}: it gets up to 3 minutes to write a handoff note, then its terminal is closed.${p.mode !== "read" ? " Its worktree is saved as a snapshot first; nothing in it is undone." : ""}`
-          : `${p.name}'s terminal is closed; what it left (session log, screen, report${p.mode !== "read" ? ", a snapshot of its worktree" : ""}) is packed up.`, t.foreground),
-        note(t, `Then ${label} starts in the same folder on the same task and report as round ${(p.round ?? 1) + 1}, told to read the handoff package first.`, t.foreground),
-        weak && note(t, `${label} has no sandbox here: only the task file's rules keep it in its folder.`, t.ansi3),
-        note(t, p.parentLive ? "The main agent is told, and collects its report as usual."
-          : "The main agent is not running, so nobody is told."),
-        note(t, `Log: ${p.log}`),
+          ? `停下 ${p.name}：给它最多 3 分钟写交接说明，然后关掉它的终端。${p.mode !== "read" ? "先给它的工作树存一个快照，里面的改动不会撤销。" : ""}`
+          : `${p.name} 的终端已关闭；把它留下的东西（会话日志、屏幕、回报${p.mode !== "read" ? "、工作树快照" : ""}）打包。`, t.foreground),
+        note(t, `然后 ${label} 在同一个目录里接着做同一个任务、写同一份回报，算第 ${(p.round ?? 1) + 1} 轮，开始前先读交接包。`, t.foreground),
+        weak && note(t, `${label} 在这里没有沙箱：只靠任务文件里的规定让它待在自己的目录里。`, t.ansi3),
+        note(t, p.parentLive ? "会通知主 agent，它照常收回报。"
+          : "主 agent 不在运行，不会通知任何人。"),
+        note(t, `日志：${p.log}`),
         this.failed && note(t, this.failed, t.ansi1),
-      ], [dialogButton("cancel", "Cancel", t, close), dialogButton("go", this.sending ? "Starting…" : `Hand over to ${label}`, t, go, "primary", !this.sending)], close);
+      ], [dialogButton("cancel", "取消", t, close), dialogButton("go", this.sending ? "正在启动…" : `移交给 ${label}`, t, go, "primary", !this.sending)], close);
     }
     if (p.role === "decide") return this.renderDecide(t, p, close);
     if (p.role === "delete") {
@@ -1181,43 +1181,43 @@ export default class Dispatch extends View {
           const r = await controlRun(io(p.on ?? null), run, "delete").catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
           if (r.ok && /DELETED=/.test(r.text)) { close(); return; }
           this.sending = false;
-          this.failed = (r.text || "Could not run hd_dispatch.py").split("\n").filter((l) => !/^FAILURE=/.test(l)).slice(-2).join(" ");
+          this.failed = (r.text || "hd_dispatch.py 运行失败").split("\n").filter((l) => !/^FAILURE=/.test(l)).slice(-2).join(" ");
           cx.notify();
         });
       };
-      return dialogFrame(t, "delete", `Delete ${run.id}?`, [
-        note(t, `Removes the run folder (${p.helpers} helper${p.helpers === 1 ? "" : "s"}: meta.json, events, task files, screens, kept reports, asks and answers, handoff packages), the reports and progress notes under $CC_HD_HOME, its worktree snapshots (refs/cc-dispatch/${baseName(run.dir)}/*), the panel's spend and task caches for it and its retro ledger entry.`, t.foreground),
-        p.open?.length ? note(t, `Closes the terminals still open: ${p.open.join(", ")}.`, t.foreground) : null,
-        note(t, "Code stays: worktrees and cc/<run>/* branches are not touched, nor Codex's and Claude Code's own session logs."),
-        note(t, "This cannot be undone.", t.ansi1),
+      return dialogFrame(t, "delete", `删除 ${run.id}？`, [
+        note(t, `删掉运行目录（${p.helpers} 个子 agent 的 meta.json、事件、任务文件、屏幕、保留的回报、提问和回答、交接包），$CC_HD_HOME 下的回报和进度说明，它的工作树快照（refs/cc-dispatch/${baseName(run.dir)}/*），面板给它存的花费和任务缓存，以及复盘台账里它的那一条。`, t.foreground),
+        p.open?.length ? note(t, `关掉还开着的终端：${p.open.join("、")}。`, t.foreground) : null,
+        note(t, "代码保留：不动工作树和 cc/<run>/* 分支，也不动 Codex 和 Claude Code 自己的会话日志。"),
+        note(t, "删了就没法恢复。", t.ansi1),
         this.failed && note(t, this.failed, t.ansi1),
-      ], [dialogButton("cancel", "Cancel", t, close),
-        dialogButton("go", this.sending ? "Deleting…" : "Delete run", t, go, "danger", !this.sending)], close);
+      ], [dialogButton("cancel", "取消", t, close),
+        dialogButton("go", this.sending ? "正在删除…" : "删除运行", t, go, "danger", !this.sending)], close);
     }
     if (p.role === "control") {
       const run = p.run ?? {}, op = p.op;
-      const list = (names) => names?.length ? names.join(", ") : "none";
+      const list = (names) => names?.length ? names.join("、") : "无";
       const text = {
         pause: [
-          `Presses the stop key of the helpers working now (${list(p.working)}). Their Codex sessions are kept, so Resume picks up where they were.`,
-          "Helpers that already finished their turn are left as they are. Until you resume, the main agent cannot dispatch or send, and its wait reports nothing.",
+          `给正在干活的子 agent（${list(p.working)}）按下停止键。它们的 Codex 会话会保留，继续时从停下的地方接着做。`,
+          "已经做完这一轮的子 agent 保持原样。继续之前，主 agent 不能派发或发消息，它的等待也不会报回任何东西。",
         ],
         resume: [
-          `Tells the held helpers (${list(p.held)}) to carry on with their task, not redoing what they did. Then the run goes on and the main agent collects as usual.`,
+          `让挂起的子 agent（${list(p.held)}）接着做任务，不重做已经做完的部分。之后运行照常进行，主 agent 照常收回报。`,
         ],
         retire: [
-          `Ends ${run.id} for good: nobody adopts its handoff. ${p.open?.length ? `Closes the helpers' terminals still open (${list(p.open)}); their reports stay.` : "No helper terminal is open."}`,
-          "Marks the run finished in state.json and archives it. The handoff package, reports and worktrees stay; unarchive shows it again, and dispatching to it again carries it on.",
-          p.working?.length ? `${list(p.working)} still working: retire refuses until they settle.` : "No main agent is told.",
+          `彻底结束 ${run.id}：不再有人接手它的交接包。${p.open?.length ? `关掉还开着的子 agent 终端（${list(p.open)}），回报保留。` : "没有开着的子 agent 终端。"}`,
+          "在 state.json 里标记为已结束并归档。交接包、回报和工作树都保留；取消归档就能再看到它，再往里派发就会接着做。",
+          p.working?.length ? `${list(p.working)} 还在干活：等它们停下才能收尾。` : "不会通知主 agent。",
         ],
         stop: [
-          `Asks every helper without a good report (${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}) to stop and write what it has done so far into its report, giving them up to 3 minutes, then closes their terminals. Worktrees and the run folder stay.`,
-          p.parentLive ? "Then the main agent gets stop.md, sums up what was done and what was not, and asks you what to do next. It dispatches nothing until you decide."
-            : "The main agent is not running, so nobody is told; the summary is in stop.md.",
+          `让所有还没交出合格回报的子 agent（${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}）停下，把已经做完的写进回报，最多给 3 分钟，然后关掉它们的终端。工作树和运行目录都保留。`,
+          p.parentLive ? "然后主 agent 拿到 stop.md，总结哪些做完了、哪些没做完，再问你下一步怎么办。你决定之前它不会派发任何东西。"
+            : "主 agent 不在运行，不会通知任何人；总结在 stop.md 里。",
         ],
       }[op] ?? [];
-      const title = { pause: `Pause ${run.id}?`, resume: `Resume ${run.id}?`, stop: `Stop ${run.id}?`, retire: `Retire ${run.id}?` }[op] ?? "";
-      const label = { pause: "Pause", resume: "Resume", stop: "Stop run", retire: "Retire run" }[op];
+      const title = { pause: `暂停 ${run.id}？`, resume: `继续 ${run.id}？`, stop: `终止 ${run.id}？`, retire: `收尾 ${run.id}？` }[op] ?? "";
+      const label = { pause: "暂停", resume: "继续", stop: "终止运行", retire: "收尾" }[op];
       const go = (_e, cx) => {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();
@@ -1225,15 +1225,15 @@ export default class Dispatch extends View {
           const r = await controlRun(io(p.on ?? null), run, op).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
           if (r.ok && !/RUN_CONTROL=|RUN_STOPPING/.test(r.text)) { close(); return; }
           this.sending = false;
-          this.failed = r.ok ? `Nothing done: ${r.text.split("\n").pop()}` : (r.text || "Could not run hd_dispatch.py").split("\n").slice(-2).join(" ");
+          this.failed = r.ok ? `什么都没做：${r.text.split("\n").pop()}` : (r.text || "hd_dispatch.py 运行失败").split("\n").slice(-2).join(" ");
           cx.notify();
         });
       };
       return dialogFrame(t, "control", title, [
         ...text.map((x, i) => note(t, x, i === 0 ? t.foreground : t.muted)),
         this.failed && note(t, this.failed, t.ansi1),
-      ], [dialogButton("cancel", "Cancel", t, close),
-        dialogButton("go", this.sending ? "Working…" : label, t, go, op === "stop" ? "danger" : "primary", !this.sending)], close);
+      ], [dialogButton("cancel", "取消", t, close),
+        dialogButton("go", this.sending ? "处理中…" : label, t, go, op === "stop" ? "danger" : "primary", !this.sending)], close);
     }
     return div();
   }

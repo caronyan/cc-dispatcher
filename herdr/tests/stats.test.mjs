@@ -150,6 +150,6 @@ test("formatting", () => {
   assert.equal(fmtDur(33_060_000), "9h11m");
   assert.equal(fmtDur(240_000), "4m");
   assert.equal(fmtDur(35_000), "35s");
-  assert.equal(callSpend({ tokens: { input: 13_000_000, cached: 0, cache_write: 0, output: 500_000 }, commands: 101, files: 1 }), "13.5M tok · 101 cmd · 1 file");
+  assert.equal(callSpend({ tokens: { input: 13_000_000, cached: 0, cache_write: 0, output: 500_000 }, commands: 101, files: 1 }), "13.5M tok · 101 条命令 · 1 个文件");
   assert.equal(callSpend(null), "");
 });

@@ -127,18 +127,18 @@ test("parseLive keeps the tree under the shell holding the output file", () => {
 
 test("liveMarkdown names the busy process and shows the task's command for the shell", () => {
   const md = liveMarkdown({ started: 1000_000, command: "npm test" }, parseLive(LIVE));
-  assert.match(md, /output empty so far/);
-  assert.match(md, /Busy: `node worker\.js` at 100% CPU/);
+  assert.match(md, /暂时没有输出/);
+  assert.match(md, /在忙：`node worker\.js` 占用 100% CPU/);
   assert.match(md, /sh: npm test/);
-  assert.match(md, /_Nothing yet\./);
+  assert.match(md, /_还没有输出。/);
 });
 
 test("liveMarkdown: idle processes and a quiet file read as waiting or stuck", () => {
   const idle = LIVE.replace("R    09:59   9:58.00  99.5", "S    09:59   0:00.10   0.0");
-  assert.match(liveMarkdown({}, parseLive(idle)), /All 3 processes idle/);
+  assert.match(liveMarkdown({}, parseLive(idle)), /3 个进程都空闲/);
   const gone = parseLive("SIZE=5\nMTIME=1590\nNOW=1600\nPIDS=\n--PS--\n--TAIL--\nhello\n");
   const md = liveMarkdown({}, gone);
-  assert.match(md, /No process holds the output file/);
+  assert.match(md, /没有进程占着输出文件/);
   assert.match(md, /~~~~\nhello\n~~~~/);
 });
 
@@ -272,8 +272,8 @@ test("codex adapter: finds the main agent's thread and reads the processes it we
   assert.deepEqual(tasks.map((t) => [t.id, t.agent, t.kind, t.status, t.summary]), [
     ["codex-c2", "codex", "shell", "completed", null],
     ["codex-c7", "codex", "wait", "running", null],
-    ["codex-c8", "codex", "shell", "failed", "exit code 2"],
-    ["codex-c11", "codex", "shell", "killed", "exit code 130"],
+    ["codex-c8", "codex", "shell", "failed", "退出码 2"],
+    ["codex-c11", "codex", "shell", "killed", "退出码 130"],
   ]);
   const [build, , heredoc] = tasks;
   assert.deepEqual([build.title, build.started, build.ended, build.output], ["npm run build", Date.parse(cts("01")), Date.parse(cts("03")), null]);

@@ -19,20 +19,20 @@ export async function loadRuns({ sh }, repo, terminals) {
   const roots = runRoots(repo, terminals);
   if (!roots.length) return { runs: [], error: null };
   const r = await sh(LIST_SCRIPT, roots);
-  if (r.code !== 0 && !r.stdout) return { runs: [], error: (r.stderr ?? "").trim() || `exit ${r.code}` };
+  if (r.code !== 0 && !r.stdout) return { runs: [], error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };
   return { runs: buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout)), error: null };
 }
 
 /** Archive or unarchive a run (op "archive" | "unarchive"): { ok, error }. */
 export async function archiveRun({ sh }, r, op) {
   const x = await sh(ARCHIVE_SCRIPT, [op, r.dir]);
-  return { ok: x.code === 0, error: x.code === 0 ? null : (x.stderr ?? "").trim() || `exit ${x.code}` };
+  return { ok: x.code === 0, error: x.code === 0 ? null : (x.stderr ?? "").trim() || `退出码 ${x.code}` };
 }
 
 /** Records the person's answer to one of a run's open items (model.js answerRecord) in <run>/answers.jsonl. */
 export async function saveAnswer({ sh }, dir, record) {
   const x = await sh(ANSWER_SCRIPT, [dir, JSON.stringify(record)]);
-  return { ok: x.code === 0, error: x.code === 0 ? null : (x.stderr ?? "").trim() || `exit ${x.code}` };
+  return { ok: x.code === 0, error: x.code === 0 ? null : (x.stderr ?? "").trim() || `退出码 ${x.code}` };
 }
 
 /** Where hd_dispatch.py keeps a copy of round k's report in the run folder (/tmp does not survive a reboot). */
@@ -89,7 +89,7 @@ export async function loadTasks({ readText }, c) {
 /** A write/net helper's worktree changes as text. */
 export async function loadDiff({ sh }, c) {
   const r = await sh(DIFF_SCRIPT, [c.dir]);
-  return (r.stdout || r.stderr || "").trim() || "No changes.";
+  return (r.stdout || r.stderr || "").trim() || "没有改动。";
 }
 
 /** Earlier rounds' reports that exist (report.r1.json, …, else the run folder's report-r<k>.json). */
@@ -112,7 +112,7 @@ export async function loadStats({ py }, runs) {
   if (!runs.length) return { calls: {}, runs: {}, finished: {}, pending: {} };
   const r = await py(STATS_PY, [JSON.stringify(statsRequest(runs))]);
   const v = r.code === 0 ? parseJSON(r.stdout) : null;
-  if (!v || typeof v !== "object") return { error: ((r.stderr ?? "").trim().split("\n").pop() || `exit ${r.code}`) };
+  if (!v || typeof v !== "object") return { error: ((r.stderr ?? "").trim().split("\n").pop() || `退出码 ${r.code}`) };
   return { calls: v.calls ?? {}, runs: v.runs ?? {}, finished: v.finished ?? {}, pending: v.pending ?? {} };
 }
 
@@ -124,7 +124,7 @@ export async function loadBg({ py }, runs) {
   if (!runs.length) return { runs: {}, sessions: {} };
   const r = await py(BG_PY, [JSON.stringify(bgRequest(runs))]);
   const v = r.code === 0 ? parseJSON(r.stdout) : null;
-  if (!v || typeof v !== "object") return { error: ((r.stderr ?? "").trim().split("\n").pop() || `exit ${r.code}`) };
+  if (!v || typeof v !== "object") return { error: ((r.stderr ?? "").trim().split("\n").pop() || `退出码 ${r.code}`) };
   return { runs: v.runs ?? {}, sessions: v.sessions ?? {} };
 }
 

@@ -363,7 +363,7 @@ def codex_scan(path, sid):
                         if m:
                             code = int(m.group(1))
                             s.update({"status": "killed" if t["kill"] else "completed" if code == 0 else "failed", "ended": ts,
-                                      "summary": None if code == 0 else "exit code %d" % code})
+                                      "summary": None if code == 0 else "退出码 %d" % code})
                         elif CODEX_UNKNOWN.search(o):
                             s.update({"status": "lost", "ended": ts})
                         if s["status"] != "running" and not s["bg"]:
@@ -597,11 +597,14 @@ export function parseLive(text) {
   return { size: num(kv.SIZE), mtime: num(kv.MTIME), now: num(kv.NOW), procs, tail };
 }
 
-const STATE_WORDS = { R: "running", S: "sleeping", I: "idle", D: "disk wait", U: "disk wait", T: "stopped", Z: "zombie" };
+const STATE_WORDS = { R: "运行", S: "休眠", I: "空闲", D: "等磁盘", U: "等磁盘", T: "已停止", Z: "僵尸" };
+/** Pads to a display width: CJK characters take two columns in a monospace block. */
+const width = (s) => [...String(s)].reduce((n, ch) => n + (/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1), 0);
+const padW = (s, n) => String(s) + " ".repeat(Math.max(0, n - width(s)));
 const fmtBytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 // Claude Code's shell runs `source <snapshot> && … && eval '<command>'`: show the command.
 // Executables lose their folder (/…/bin/node → node).
-const shortCommand = (cmd, task) => (/shell-snapshots\//.test(cmd) ? `sh: ${task?.command ?? "(command)"}` : cmd.replace(/^\S*\/(\S+)/, "$1")).replace(/\s+/g, " ");
+const shortCommand = (cmd, task) => (/shell-snapshots\//.test(cmd) ? `sh: ${task?.command ?? "（命令）"}` : cmd.replace(/^\S*\/(\S+)/, "$1")).replace(/\s+/g, " ");
 
 /** The live dialog's markdown: a verdict line, the process tree, then the output's end. */
 export function liveMarkdown(task, live) {
@@ -609,31 +612,31 @@ export function liveMarkdown(task, live) {
   const out = [];
   const age = task.started ? fmtDur(now - task.started) : "";
   const quiet = live.mtime != null ? now - live.mtime * 1000 : null;
-  const written = live.size < 0 ? "no output file" : live.size === 0 ? "output empty so far" : `output ${fmtBytes(live.size)}, last written ${fmtDur(quiet)} ago`;
-  out.push(`**running ${age}** · ${written}`);
+  const written = live.size < 0 ? "没有输出文件" : live.size === 0 ? "暂时没有输出" : `输出 ${fmtBytes(live.size)}，${fmtDur(quiet)} 前最后写入`;
+  out.push(`**已运行 ${age}** · ${written}`);
   const procs = live.procs;
   if (!procs.length) {
-    out.push("", "No process holds the output file: the task may just have ended (the panel updates within seconds), or it runs on another machine.");
+    out.push("", "没有进程占着输出文件：任务可能刚结束（面板几秒内会更新），也可能在别的机器上运行。");
   } else {
     const busy = procs.filter((p) => p.stat[0] === "R" || p.cpu >= 20).sort((a, b) => b.cpu - a.cpu);
     const top = busy[0];
     const hint = top
-      ? `Busy: \`${shortCommand(top.command, task).slice(0, 80)}\` at ${top.cpu.toFixed(0)}% CPU. It is computing; if this lasts far longer than usual it may be looping.`
-      : procs.some((p) => /^[DU]/.test(p.stat)) ? "Waiting on disk."
-      : quiet != null && quiet > 300_000 ? `All ${procs.length} processes idle and nothing written for ${fmtDur(quiet)}: waiting on something (network, a lock, a server, input) or stuck.`
-      : `All ${procs.length} processes idle: waiting on something (a child, the network, a timer).`;
+      ? `在忙：\`${shortCommand(top.command, task).slice(0, 80)}\` 占用 ${top.cpu.toFixed(0)}% CPU，正在计算；如果比平时久很多，可能陷入了死循环。`
+      : procs.some((p) => /^[DU]/.test(p.stat)) ? "在等磁盘。"
+      : quiet != null && quiet > 300_000 ? `${procs.length} 个进程都空闲，${fmtDur(quiet)} 没有写入：在等什么（网络、锁、服务、输入），或者卡住了。`
+      : `${procs.length} 个进程都空闲：在等什么（子进程、网络、定时器）。`;
     out.push("", hint, "", "~~~~");
     const w = { pid: Math.max(3, ...procs.map((p) => String(p.pid).length)), etime: Math.max(7, ...procs.map((p) => p.etime.length)), time: Math.max(8, ...procs.map((p) => p.time.length)) };
-    out.push(`${"PID".padEnd(w.pid)}  ${"STATE".padEnd(9)}  ${"CPU%".padStart(5)}  ${"CPU TIME".padStart(w.time)}  ${"ELAPSED".padStart(w.etime)}  COMMAND`);
+    out.push(`${"PID".padEnd(w.pid)}  ${padW("状态", 9)}  ${"CPU%".padStart(5)}  ${"CPU TIME".padStart(w.time)}  ${"ELAPSED".padStart(w.etime)}  COMMAND`);
     for (const p of procs) {
       const cmd = `${"  ".repeat(p.depth)}${p.depth ? "└ " : ""}${shortCommand(p.command, task)}`;
-      out.push(`${String(p.pid).padEnd(w.pid)}  ${(STATE_WORDS[p.stat[0]] ?? p.stat).padEnd(9)}  ${p.cpu.toFixed(1).padStart(5)}  ${p.time.padStart(w.time)}  ${p.etime.padStart(w.etime)}  ${cmd.slice(0, 160)}`);
+      out.push(`${String(p.pid).padEnd(w.pid)}  ${padW(STATE_WORDS[p.stat[0]] ?? p.stat, 9)}  ${p.cpu.toFixed(1).padStart(5)}  ${p.time.padStart(w.time)}  ${p.etime.padStart(w.etime)}  ${cmd.slice(0, 160)}`);
     }
     out.push("~~~~");
   }
   const lines = live.tail.replace(/\r(?!\n)/g, "\n").split("\n");
   const tail = lines.slice(-120).join("\n").replace(/\s+$/, "");
-  out.push("", "**Output**", "");
-  out.push(tail ? `~~~~\n${tail}\n~~~~` : "_Nothing yet. Many commands print only when they end, or their output is captured by `$(...)` or `| tail`; the processes above show what it is doing._");
+  out.push("", "**输出**", "");
+  out.push(tail ? `~~~~\n${tail}\n~~~~` : "_还没有输出。很多命令要结束时才打印，或者输出被 `$(...)`、`| tail` 截走了；上面的进程能看出它在做什么。_");
   return out.join("\n");
 }

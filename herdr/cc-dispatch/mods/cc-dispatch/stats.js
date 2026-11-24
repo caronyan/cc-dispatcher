@@ -345,10 +345,10 @@ export function fmtDur(ms) {
   return `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
-/** One call's spend in a few words, for its row: "13.5M tok · 101 cmd · 20 files". */
+/** One call's spend in a few words, for its row: "13.5M tok · 101 条命令 · 20 个文件". */
 export function callSpend(s) {
   if (!s || (!s.tokens && !s.commands)) return "";
   const t = s.tokens ? s.tokens.input + s.tokens.output : null;
-  return [t != null && `${fmtTok(t)} tok`, s.commands && `${s.commands} cmd`, s.files && `${s.files} file${s.files === 1 ? "" : "s"}`]
+  return [t != null && `${fmtTok(t)} tok`, s.commands && `${s.commands} 条命令`, s.files && `${s.files} 个文件`]
     .filter(Boolean).join(" · ");
 }

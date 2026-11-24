@@ -88,12 +88,12 @@ test("callNeed orders what to act on", () => {
   assert.equal(callNeed({ ...base, status: "error", retry: "capacity 1/4" }), "retry");
   assert.equal(callNeed({ ...base, status: "working", retry: "capacity 1/4" }), "working");
   assert.equal(callStage({ ...base, status: "error", retry: "capacity 1/4" }), "retrying");
-  assert.equal(callDetail({ mode: "read", effort: "high", round: 1, report: null, failure: null, retry: "capacity 1/4", state: "live" }), "read·high · retry capacity 1/4");
+  assert.equal(callDetail({ mode: "read", effort: "high", round: 1, report: null, failure: null, retry: "capacity 1/4", state: "live" }), "read·high · 服务繁忙 重试 1/4");
   assert.equal(callNeed({ ...base, status: "working", offline: true }), "offline");
   assert.equal(callStage({ ...base, status: "error", offline: true, retry: null }), "offline");
   assert.equal(callNeed({ ...base, status: "blocked", offline: true }), "blocked");
   assert.equal(buildCall({ call: "a", name: "n" }, "/r/.cc-dispatch/dev-x", [{ name: "n", state: "live", status: "working", labels: { "cc.net": "down" } }]).offline, true);
-  assert.equal(eventWords({ ev: "send", why: "retry", kind: "network" }), "network back: told to carry on");
+  assert.equal(eventWords({ ev: "send", why: "retry", kind: "network" }), "网络恢复，已让它继续");
   assert.equal(callNeed({ ...base, report: "bad" }), "bad");
   assert.equal(callNeed(base), "review");
   assert.equal(callNeed({ ...base, state: "gone" }), "gone");
@@ -114,7 +114,7 @@ test("buildRuns: live first, newest first, the most urgent need", () => {
   assert.equal(runs[0].need, "blocked");
   assert.deepEqual(runs[0].calls.map((c) => c.call), ["a", "b"]);
   assert.equal(runs[1].need, "done");
-  assert.equal(summary(runs[0].counts), "1 waiting on you · 1 working");
+  assert.equal(summary(runs[0].counts), "等你 1 · 进行中 1");
   assert.equal(runs[0].mainAgent, "codex"); // the adopter's program wins
 });
 
@@ -125,23 +125,23 @@ test("lost: a helper whose terminal vanished while open, before a good report", 
   assert.equal(callStage(lost), "lost");
   assert.equal(handoffAsk(lost), "lost");
   assert.match(handoffText(lost, "lost"), /终端意外消失/);
-  assert.match(callDetail(lost), /terminal vanished$/);
+  assert.match(callDetail(lost), /终端消失了$/);
   assert.equal(buildCall(meta("a", { open: false }), RUN, []).lost, false); // cleaned up, stopped, frozen
   assert.equal(buildCall(meta("a", { open: true, report_check: "ok" }), RUN, []).lost, false); // its work is in
   assert.equal(buildCall(meta("a", { open: true, address: "t9" }), RUN, [{ address: "t9", state: "live" }]).lost, false);
   assert.equal(buildCall(meta("a", { round: 2, lost: { round: 2 } }), RUN, []).lost, true);
-  assert.equal(stageSummary(["lost", "working"]), "1 interrupted · 1 working");
+  assert.equal(stageSummary(["lost", "working"]), "已中断 1 · 进行中 1");
 });
 
 test("callDetail and ago", () => {
   assert.equal(callDetail({ mode: "write", effort: "high", round: 2, report: "bad", failure: null, state: "live" }),
-    "write·high · round 2");
+    "write·high · 第 2 轮");
   assert.equal(callDetail({ mode: "read", effort: "", round: 1, report: "missing", failure: "quota", state: "gone" }),
-    "read · no report · quota · closed");
-  assert.equal(callDetail({ mode: "read", effort: "", round: 1, report: "ok", failure: "exited", state: "finished" }), "read · closed");
+    "read · 没有回报 · 额度用完 · 已关闭");
+  assert.equal(callDetail({ mode: "read", effort: "", round: 1, report: "ok", failure: "exited", state: "finished" }), "read · 已关闭");
   assert.equal(ago(0), "");
-  assert.equal(ago(1000, 1000 + 125000), "2m ago");
-  assert.equal(ago(1000, 1000 + 3 * 86400000), "3d ago");
+  assert.equal(ago(1000, 1000 + 125000), "2 分钟前");
+  assert.equal(ago(1000, 1000 + 3 * 86400000), "3 天前");
 });
 
 test("hand-off fits the need", () => {
@@ -173,28 +173,28 @@ test("jsonMarkdown: fields become sections, item lists numbered sub-sections, lo
   assert.match(md, /^## status\n\n`done`/);
   assert.match(md, /## summary\n\nDid the thing\.\nTwo lines\./);
   assert.match(md, /### 1\. a\.py\n\n- \*\*change\*\*: added x/);
-  assert.match(md, /### 2\. item 2\n\n- \*\*change\*\*: no title here/);
+  assert.match(md, /### 2\. 第 2 项\n\n- \*\*change\*\*: no title here/);
   assert.match(md, /- \*\*passed\*\*: `true`/);
   assert.match(md, /- \*\*output_tail\*\*: \n\n  ```\n  line 1\n  line 2\n  ```/);
   assert.match(md, /## notes\n\n- `one`\n- `two`/);
-  assert.match(md, /## empty\n\n- \*\(none\)\*/);
+  assert.match(md, /## empty\n\n- \*（无）\*/);
 });
 
 test("jsonMarkdown: not JSON or too long shows the source in a block", () => {
   assert.equal(jsonMarkdown("oops {"), "```\noops {\n```");
-  assert.match(jsonMarkdown(`"${"x".repeat(MARKDOWN_LIMIT)}"`), /^\*Too long to render/);
+  assert.match(jsonMarkdown(`"${"x".repeat(MARKDOWN_LIMIT)}"`), /^\*内容太长/);
   assert.equal(jsonMarkdown(null), "");
 });
 
 test("reportMarkdown and diffMarkdown", () => {
   const c = { report: "bad", reportPath: "/r/report.json", schema: "/s.json" };
   const md = reportMarkdown(c, '{"status":"blocked"}', ["/r/report.r1.json"]);
-  assert.match(md, /\*\*verdict\*\*: \*\*fails the schema\*\*/);
-  assert.match(md, /earlier rounds\*\*: `report\.r1\.json`/);
+  assert.match(md, /\*\*结论\*\*：\*\*没通过 schema 检查\*\*/);
+  assert.match(md, /之前各轮\*\*： `report\.r1\.json`/);
   assert.match(md, /## status\n\n`blocked`/);
-  assert.match(reportMarkdown({ ...c, report: null }, null), /\*No report written yet\.\*/);
+  assert.match(reportMarkdown({ ...c, report: null }, null), /\*还没写回报。\*/);
   assert.equal(diffMarkdown("## cc/run/T1 @ /wt\n M a.js\n\n 1 file changed"), "### `cc/run/T1 @ /wt`\n\n```\n M a.js\n\n 1 file changed\n```");
-  assert.equal(diffMarkdown("## main @ /wt\n"), "### `main @ /wt`\n\n*No changes.*");
+  assert.equal(diffMarkdown("## main @ /wt\n"), "### `main @ /wt`\n\n*没有改动。*");
 });
 
 test("callStage: the helper's own trouble first, then its card, then its report", () => {
@@ -214,7 +214,7 @@ test("callStage: the helper's own trouble first, then its card, then its report"
   const stages = ["merged", "working", "merged", "review"];
   assert.equal(runStage(stages), "working");
   assert.equal(runStage([]), "ended");
-  assert.equal(stageSummary(stages), "1 working · 1 in review · 2 merged");
+  assert.equal(stageSummary(stages), "进行中 1 · 验收中 1 · 已合并 2");
   assert.deepEqual(cardCounts({ status: { a: "merged", b: "pending", c: "merged", d: "accepting", e: "odd" } }),
     [["merged", 2], ["accepting", 1], ["pending", 1], ["odd", 1]]);
   assert.deepEqual(cardCounts(null), []);
@@ -257,17 +257,17 @@ test("timelineMarkdown: events.jsonl in words, oldest first", () => {
   ].map((e) => JSON.stringify(e)).join("\n") + "\nnot json\n";
   const md = timelineMarkdown(lines).split("\n");
   assert.equal(md.length, 6);
-  assert.match(md[0], /· r1 · dispatched write·high "token refresh"$/);
-  assert.match(md[1], /capacity: retry 1\/4 at \d\d:\d\d:\d\d$/);
-  assert.match(md[2], /told to carry on \(capacity retry 1\)$/);
-  assert.match(md[3], /settled: done, report ok, after 1 retry$/);
-  assert.match(md[4], /Codex so far: 1.5M tok · 12 cmd · 3 files · gpt$/);
-  assert.match(md[5], /· r2 · sent round 2 — \*\*not delivered\*\*$/);
-  assert.match(timelineMarkdown(null), /No events recorded/);
-  assert.equal(eventWords({ ev: "settle", state: "gone", report: "missing", failure: "exited" }), "settled: gone, report missing, **exited**");
-  assert.match(eventWords({ ev: "lost" }), /interrupted/);
-  assert.match(eventWords({ ev: "recover", how: "resume" }), /own session reopened/);
-  assert.match(eventWords({ ev: "recover", how: "fresh" }), /new session read the task/);
+  assert.match(md[0], /· r1 · 已派发 write·high「token refresh」$/);
+  assert.match(md[1], /服务繁忙：\d\d:\d\d:\d\d 第 1\/4 次重试$/);
+  assert.match(md[2], /已让它继续（服务繁忙，第 1 次重试）$/);
+  assert.match(md[3], /停下：已完成，回报合格，重试过 1 次$/);
+  assert.match(md[4], /Codex 累计：1.5M tok · 12 条命令 · 3 个文件 · gpt$/);
+  assert.match(md[5], /· r2 · 发出第 2 轮 — \*\*没送达\*\*$/);
+  assert.match(timelineMarkdown(null), /没有事件记录/);
+  assert.equal(eventWords({ ev: "settle", state: "gone", report: "missing", failure: "exited" }), "停下：已关闭，回报缺失，**已退出**");
+  assert.match(eventWords({ ev: "lost" }), /已中断/);
+  assert.match(eventWords({ ev: "recover", how: "resume" }), /重新打开了原会话/);
+  assert.match(eventWords({ ev: "recover", how: "fresh" }), /新会话读了任务/);
 });
 
 test("a paused run: control.json from the dump, held helpers, the paused stage, its buttons and line", () => {
@@ -290,11 +290,11 @@ test("a paused run: control.json from the dump, held helpers, the paused stage, 
   assert.equal(callStage(a), "paused");
   assert.equal(callStage(b), "collect");
   assert.equal(runStage([callStage(a), callStage(b)]), "paused");
-  assert.equal(summary(r.counts), "1 paused · 1 to collect");
+  assert.equal(summary(r.counts), "已暂停 1 · 待收回报 1");
   assert.deepEqual(controlOps(r), ["resume", "stop"]);
-  assert.equal(controlBanner(r, 1000 * 1000 + 120000), "Paused · 2m ago · 1 helper held");
+  assert.equal(controlBanner(r, 1000 * 1000 + 120000), "已暂停 · 2 分钟前 · 挂起 1 个子 agent");
   assert.match(timelineMarkdown('{"t":1,"ev":"pause","round":1,"interrupted":true}\n{"t":2,"ev":"stop","round":1,"asked":true}'),
-    /paused\*\*: stopped mid-turn[\s\S]*run stopped\*\*: asked to report/);
+    /已暂停\*\*：中途打断[\s\S]*运行已终止\*\*：已让它交代做到哪了/);
 });
 
 test("run control: buttons by state, and a running control.json counts as none", () => {
@@ -302,9 +302,9 @@ test("run control: buttons by state, and a running control.json counts as none",
   assert.deepEqual(controlOps({ live: false, control: null }), []);
   assert.deepEqual(controlOps({ live: true, control: { state: "stopping" } }), []);
   assert.deepEqual(controlOps({ live: false, control: { state: "stopped" } }), []);
-  assert.match(controlBanner({ calls: [], control: { state: "stopped", at: 0 } }), /^Stopped/);
-  assert.match(controlBanner({ calls: [], control: { state: "stopped", at: 0 } }), /the main agent has the summary$/);
-  assert.match(controlBanner({ calls: [], mainAgent: "codex", control: { state: "stopped", at: 0 } }), /the main agent \(Codex\) has the summary$/);
+  assert.match(controlBanner({ calls: [], control: { state: "stopped", at: 0 } }), /^已终止/);
+  assert.match(controlBanner({ calls: [], control: { state: "stopped", at: 0 } }), /总结已交给主 agent$/);
+  assert.match(controlBanner({ calls: [], mainAgent: "codex", control: { state: "stopped", at: 0 } }), /总结已交给主 agent（Codex）$/);
   const text = `\n${CONTROL_SEP}${RUN}/control.json\n{"state":"running"}` + dump([`${RUN}/agents/a/meta.json`, meta("a", { address: "t1" })]);
   const [r] = buildRuns(parseMetaDump(text), [{ address: "t1", state: "live", status: "working", labels: {} }], parseControls(text));
   assert.equal(r.control, null);
@@ -322,10 +322,10 @@ import { resultMarkdown, roundsMarkdown } from "../cc-dispatch/mods/cc-dispatch/
 test("resultMarkdown: the report first, then the worktree's changes for a writing helper", () => {
   const c = { report: "ok", reportPath: "/tmp/r.json", schema: "/s.json" };
   const md = resultMarkdown(c, '{"status":"done"}', [], "## main @ /w\n M a.js\n a.js | 2 +-");
-  assert.ok(md.indexOf("passes the schema") < md.indexOf("## Changes in the worktree"));
-  assert.match(md, /## Changes in the worktree\n\n`main @ \/w`/);
+  assert.ok(md.indexOf("通过 schema 检查") < md.indexOf("## 工作树里的改动"));
+  assert.match(md, /## 工作树里的改动\n\n`main @ \/w`/);
   assert.match(md, / M a\.js/);
-  assert.doesNotMatch(resultMarkdown(c, '{"status":"done"}', [], null), /Changes/);
+  assert.doesNotMatch(resultMarkdown(c, '{"status":"done"}', [], null), /工作树里的改动/);
 });
 
 test("roundsMarkdown: newest round first, each with its events and task file", () => {
@@ -337,12 +337,12 @@ test("roundsMarkdown: newest round first, each with its events and task file", (
     { t: 5, ev: "adopt", round: 2, frm: "t1", by: "t7", agent: "codex" },
   ].map((e) => JSON.stringify(e)).join("\n");
   const md = roundsMarkdown({ round: 2 }, ev, { 1: "# 任务 a\n做 X", 2: "# 任务 a（第 2 轮）\n接手" });
-  assert.ok(md.indexOf("## Round 2 · current · handed over") < md.indexOf("## Round 1 · dispatched"));
-  assert.match(md, /handed over\*\* codex → claude \(context_limit\), weak isolation/);
-  assert.match(md, /\*\*adopted\*\* by the main agent in t7 \(codex\), was t1/);
-  assert.match(md, /\*\*frozen\*\* \(context_limit\), worktree saved `abcdef1234`/);
-  assert.match(md, /### Task file `task-2\.md`\n\n#### 任务 a（第 2 轮）/);
-  assert.match(roundsMarkdown({ round: 1 }, null, { 1: null }), /No events recorded[\s\S]*No task file for round 1/);
+  assert.ok(md.indexOf("## 第 2 轮 · 当前 · 已移交") < md.indexOf("## 第 1 轮 · 首次派发"));
+  assert.match(md, /已移交\*\* codex → claude（context_limit），弱隔离/);
+  assert.match(md, /\*\*已接手\*\*：t7 里的主 agent（codex），原来是 t1/);
+  assert.match(md, /\*\*已冻结\*\*（context_limit），已保存工作树 `abcdef1234`/);
+  assert.match(md, /### 任务文件 `task-2\.md`\n\n#### 任务 a（第 2 轮）/);
+  assert.match(roundsMarkdown({ round: 1 }, null, { 1: null }), /没有事件记录[\s\S]*第 1 轮没有任务文件/);
 });
 
 import { agentTag, agentLabel, weakIsolation, canHandOver, AGENTS } from "../cc-dispatch/mods/cc-dispatch/model.js";
@@ -354,11 +354,11 @@ test("helper agents: the label wins, then meta.json, else codex; Claude Code is 
   assert.deepEqual(agentTag(c), { text: "claude", weak: true });
   assert.deepEqual(c.claudeSessions, ["s1", "s2"]);
   assert.ok(weakIsolation(c));
-  assert.match(callDetail(c), /Claude Code \(weak isolation\)/);
+  assert.match(callDetail(c), /Claude Code（弱隔离）/);
   const live = buildCall(meta("a", { address: "t5" }), RUN, [{ address: "t5", state: "live", labels: { "cc.agent": "claude", "cc.handover": "codex" } }]);
   assert.equal(live.agent, "claude");
   assert.equal(live.handingTo, "codex");
-  assert.match(callDetail(live), /handing over to Codex/);
+  assert.match(callDetail(live), /正在移交给 Codex/);
   assert.deepEqual(Object.keys(AGENTS), ["codex", "claude", "agy"]);
   assert.equal(agentLabel("claude"), "Claude Code");
 });
@@ -374,7 +374,7 @@ test("canHandOver: a running run's helper without a good report, not while one i
 test("a run being handed off offers no controls and says to give the prompt", () => {
   const r = { live: true, calls: [], control: { state: "handoff", at: 100, package: "/r/handoff/1", prompt: "/r/handoff/1/prompt.md" } };
   assert.deepEqual(controlOps(r), []);
-  assert.equal(controlBanner(r, 100_000 + 120_000), "Handing off · 2m ago · give the next main agent the prompt");
+  assert.equal(controlBanner(r, 100_000 + 120_000), "交接中 · 2 分钟前 · 把提示交给下一个主 agent");
 });
 
 test("the quota shown is the subscription the main agent's terminal runs now", () => {
@@ -517,7 +517,7 @@ test("pendingItems: asks, cards parked for you (with older pending_decisions fol
   assert.match(t1.context, /Redact headers[\s\S]*3 rounds failed[\s\S]*T1-redaction.*quoted values/);
   assert.deepEqual(t1.options.map((o) => o.key), ["resume", "drop"]);
   assert.equal(itemLine(items.find((x) => x.id === "api")), "409 / ★ 410");
-  assert.equal(itemLine(items.find((x) => x.id === "env")), "answered · stg-2");
+  assert.equal(itemLine(items.find((x) => x.id === "env")), "已回答 · stg-2");
   assert.equal(items.find((x) => x.id === "env").answer.text, "stg-2");
   assert.equal(pendingItems({ asks: {}, answers: [] }, {}, {}).length, 0);
   // asked again after the answer: the old answer no longer counts
@@ -584,8 +584,8 @@ test("takeoverPrompt names the skill, the run and the takeover command, for any 
   assert.match(p, /`python3 \/h\/hd_dispatch\.py takeover --run \/r\/\.cc-dispatch\/review-0107`/);
   assert.match(p, /确认之前/);
   assert.equal(skillOf({ kind: "probe" }), "cc-herdr-dispatch-dev");
-  assert.equal(takeoverBanner(r), "The main agent (Codex) is gone · give a new one the prompt");
-  assert.equal(takeoverBanner({}), "The main agent is gone · give a new one the prompt");
+  assert.equal(takeoverBanner(r), "主 agent（Codex） 已经不在了 · 把提示交给新的主 agent");
+  assert.equal(takeoverBanner({}), "主 agent 已经不在了 · 把提示交给新的主 agent");
 });
 
 test("buildRuns lists every main agent of a run, newest first, whatever its program", () => {

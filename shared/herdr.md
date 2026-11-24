@@ -143,7 +143,7 @@ python3 $HD handover --run $RD --call <调用名> [--to codex|claude|agy] [--why
    python3 $HD handoff --run $RD [--why manual|usage]
    ```
    脚本把运行置为 `handoff`（新派发、`send` 都会被拒绝，`wait` 立刻结束），在 `$RD/handoff/<序号>/` 写交接包：`handoff.md`（接手说明、你的笔记、每个调用的状态、state.json、仓库状态）和 `prompt.md`。缺 `handoff-notes.md` 时报 `NOTES_MISSING`，补上再运行。
-4. 把输出里 `----- prompt for the next main agent -----` 和 `----- end -----` 之间的提示词原样贴给用户，告诉用户：在 herdr 里新开一个终端，启动 Claude Code 或 Codex，把这段提示词发给它（面板上这次运行的"Copy prompt"按钮也能复制）。
+4. 把输出里 `----- prompt for the next main agent -----` 和 `----- end -----` 之间的提示词原样贴给用户，告诉用户：在 herdr 里新开一个终端，启动 Claude Code 或 Codex，把这段提示词发给它（面板上这次运行的"复制提示"按钮也能复制）。
 5. 然后停下，不再做这次运行的任何事。后台的 `wait` 会以 `RUN_CONTROL=handoff` 结束，忽略即可。
 
 用户改主意不交接了：`python3 $HD resume --run $RD`，运行回到交接前的状态（`HANDOFF=cancelled`），你照常继续。
@@ -158,7 +158,7 @@ python3 $HD handover --run $RD --call <调用名> [--to codex|claude|agy] [--why
 
 原来的主 agent 已经不在了（终端被关、程序退出、herdr 或机器重启），或者用户在新会话里说"接着之前的运行""续上中断的卡片"时，你来接手。前后两个主 agent 是什么程序都可以（Claude Code、Codex 或别的能加载这套 skill 的 agent），做法一样。卡片和进度都在运行目录里（`state.json`、`log.md`、`agents/`），面板读的也是这些文件，接手后不需要另外同步面板。
 
-1. **确定运行**：用户给了运行目录（面板上的 Copy resume prompt 会带上）就用它。没给时运行
+1. **确定运行**：用户给了运行目录（面板上的"复制接手提示"会带上）就用它。没给时运行
    ```bash
    python3 $HD runs
    ```
@@ -177,7 +177,7 @@ python3 $HD handover --run $RD --call <调用名> [--to codex|claude|agy] [--why
 
 ## 待决项
 
-需要用户拍板或只有用户知道答案的事，除了在对话里问，还要写成待决项。面板在运行下方的 **Needs you** 里列出它们，用户能直接看到上下文、选项和你的推荐，点选后把答案发回给你。
+需要用户拍板或只有用户知道答案的事，除了在对话里问，还要写成待决项。面板在运行下方的 **需要你处理** 里列出它们，用户能直接看到上下文、选项和你的推荐，点选后把答案发回给你。
 
 **什么时候写**：
 - 卡片因为等用户决定而搁置（`parked_why` 是 user）；
