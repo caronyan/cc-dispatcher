@@ -164,6 +164,7 @@ wait reports nothing and retries nothing: it waits while paused or stopping and 
 RUN_CONTROL=paused (at its timeout) or RUN_CONTROL=stopped STOP_REPORT=<path>.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -174,7 +175,9 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -1905,6 +1908,499 @@ def write_json(path: Path, value):
     os.replace(tmp, path)
 
 
+# ---- topics: drafts, requests and authoritative run bindings ----------------------------------------
+
+TOPIC_KINDS = ("research", "review", "dev", "fix", "test", "retro")
+_TOPIC_LOCKS = {}
+
+
+def repo_of_run(run):
+    return Path(run).resolve().parent.parent
+
+
+def topic_dir(repo, tid):
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", tid):
+        fail("invalid topic id", failure="TOPIC_NOT_FOUND", code=3)
+    return Path(repo).resolve() / ".cc-dispatch" / "topics" / tid
+
+
+@contextmanager
+def topic_lock(repo, tid):
+    path = topic_dir(repo, tid).parent / f".{tid}.lock"
+    key = (os.getpid(), str(path))
+    lock = _TOPIC_LOCKS.setdefault(key, {"mutex": threading.RLock(), "depth": 0})
+    with lock["mutex"]:
+        if not lock["depth"]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stream = path.open("a")
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+            except BaseException:
+                stream.close()
+                raise
+            lock["stream"] = stream
+        lock["depth"] += 1
+        try:
+            yield
+        finally:
+            lock["depth"] -= 1
+            if not lock["depth"]:
+                stream = lock.pop("stream")
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_UN)
+                finally:
+                    stream.close()
+
+
+def load_topic(repo, tid):
+    with topic_lock(repo, tid):
+        data = read_json(topic_dir(repo, tid) / "topic.json", {})
+        if not data:
+            fail(f"topic not found: {tid}", failure="TOPIC_NOT_FOUND", code=3)
+        return data
+
+
+def save_topic(repo, tid, data):
+    with topic_lock(repo, tid):
+        folder = topic_dir(repo, tid)
+        folder.mkdir(parents=True, exist_ok=True)
+        write_json(folder / "topic.json", data)
+
+
+def load_backlog(repo, tid):
+    with topic_lock(repo, tid):
+        load_topic(repo, tid)
+        return read_json(topic_dir(repo, tid) / "backlog.json", {"next_item": 1, "items": []})
+
+
+def save_backlog(repo, tid, data):
+    with topic_lock(repo, tid):
+        write_json(topic_dir(repo, tid) / "backlog.json", data)
+
+
+def topic_repo(a):
+    if getattr(a, "run", None):
+        return repo_of_run(a.run)
+    if a.repo:
+        return Path(a.repo).resolve()
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if r.returncode:
+        a.topic_parser.error("--repo is required outside a git repository")
+    return Path(r.stdout.strip()).resolve()
+
+
+def topic_owner(terminal=None):
+    if terminal is None and not os.environ.get("HC_TERMINAL_ID"):
+        return dict.fromkeys(("terminal", "agent", "session", "space", "cwd"))
+    if terminal is None or terminal == os.environ.get("HC_TERMINAL_ID"):
+        me = dispatcher()
+        return {"terminal": me["parent"], "agent": me["dispatcher_agent"], "session": me["session"],
+                "space": me["space"], "cwd": me["claude_cwd"]}
+    g = hc_json("get", terminal)
+    g = g if isinstance(g, dict) else {}
+    return {"terminal": terminal, "agent": agent_on(g), "session": None,
+            "space": (g.get("labels") or {}).get("herdr.space"),
+            "cwd": (g.get("foreground") or {}).get("cwd") or g.get("cwd")}
+
+
+def new_topic_data(tid, title, owner):
+    return {"id": tid, "title": title, "created_at": time.time(), "archived": None, "paused_at": None,
+            "paused_runs": [], "deleting": None, "owner": owner, "next_task": 1, "tasks": {}}
+
+
+def new_topic_id():
+    return datetime.now().strftime("%m%d%H%M") + "-" + secrets.token_hex(2)
+
+
+def topic_writable(data, active=False):
+    for field, failure in (("deleting", "TOPIC_DELETING"), ("archived", "TOPIC_ARCHIVED"),
+                           ("paused_at", "TOPIC_PAUSED")):
+        if (field != "paused_at" or active) and data.get(field) is not None:
+            fail(f"topic {data['id']}: {field}", failure=failure, code=3)
+
+
+def topic_task(data, tid, draft=False):
+    task = data["tasks"].get(tid)
+    if task is None:
+        fail(f"task not found: {tid}", failure="TASK_NOT_FOUND", code=3)
+    if draft and task.get("run"):
+        fail(f"task is bound: {tid}", failure="TASK_BOUND", code=3)
+    return task
+
+
+def topic_items(backlog, ids):
+    by_id = {item["id"]: item for item in backlog["items"]}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        fail("items not found: " + ",".join(missing), failure="ITEM_NOT_FOUND", code=3)
+    return [by_id[i] for i in ids]
+
+
+def topic_ids(value):
+    return list(dict.fromkeys(x.strip() for x in value.split(",") if x.strip()))
+
+
+def add_topic_task(data, title, kind, detail="", depends_on=None, from_backlog=None, parent_task=None):
+    tid = f"k{data['next_task']}"
+    data["next_task"] += 1
+    data["tasks"][tid] = {
+        "title": title, "kind": kind, "detail": detail, "depends_on": depends_on or [],
+        "from_backlog": from_backlog, "parent_task": parent_task, "run": None, "agent": None,
+        "request": None, "consumed_request": None, "summary_line": None, "artifact": None,
+        "created_at": time.time(), "started_at": None, "finished_at": None,
+    }
+    return tid
+
+
+def cmd_topic_init(a):
+    repo, owner = topic_repo(a), topic_owner(a.owner)
+    while True:
+        tid = new_topic_id()
+        with topic_lock(repo, tid):
+            if (topic_dir(repo, tid) / "topic.json").exists():
+                continue
+            save_topic(repo, tid, new_topic_data(tid, a.title, owner))
+            save_backlog(repo, tid, {"next_item": 1, "items": []})
+            break
+    out(topic=tid)
+
+
+def cmd_topic_task(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        topic_writable(data)
+        if a.topic_cmd == "task-add":
+            if a.from_backlog:
+                topic_items(load_backlog(repo, a.topic), [a.from_backlog])
+            tid = add_topic_task(data, a.title, a.kind, a.detail, topic_ids(a.depends), a.from_backlog)
+        else:
+            tid = a.task
+            task = topic_task(data, tid, draft=True)
+            if a.topic_cmd == "task-rm":
+                del data["tasks"][tid]
+            else:
+                for field in ("title", "kind", "detail", "depends"):
+                    value = getattr(a, field)
+                    if value is None:
+                        continue
+                    key = "depends_on" if field == "depends" else field
+                    value = topic_ids(value) if field == "depends" else value
+                    if field in ("kind", "detail") and value != task.get(key):
+                        task["request"] = None
+                    task[key] = value
+        save_topic(repo, a.topic, data)
+    out(**{"removed" if a.topic_cmd == "task-rm" else "task": tid})
+
+
+def cmd_topic_backlog(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        topic_writable(load_topic(repo, a.topic))
+        backlog = load_backlog(repo, a.topic)
+        if a.topic_cmd == "backlog-add":
+            bid = f"b{backlog['next_item']}"
+            backlog["next_item"] += 1
+            now = time.time()
+            backlog["items"].append({"id": bid, "text": a.text, "status": "open", "request": None,
+                                     "task_ids": [], "created_at": now, "updated_at": now})
+        else:
+            bid = a.item
+            item = topic_items(backlog, [bid])[0]
+            if a.topic_cmd == "backlog-rm":
+                backlog["items"].remove(item)
+            else:
+                if item["text"] != a.text:
+                    item.update(text=a.text, status="open", request=None, updated_at=time.time())
+        save_backlog(repo, a.topic, backlog)
+    out(**{"removed" if a.topic_cmd == "backlog-rm" else "item": bid})
+
+
+def topic_message(repo, data, request, task_id=None, item_ids=None):
+    if request["type"] == "dispatch":
+        task = data["tasks"][task_id]
+        params = f"--topic {data['id']} --task {task_id} --request {request['id']}"
+        if (request.get("agent") or data["owner"].get("agent")) == "claude":
+            return f"/cc-herdr-dispatch-{task['kind']} {params}"
+        return f"按 cc-herdr-dispatch-{task['kind']} skill 执行，参数：{params}"
+    return (f"[cc-dispatch 面板] 请细化 Topic {data['id']}「{data['title']}」的 backlog 条目 {','.join(item_ids)}："
+            f"读 {topic_dir(repo, data['id'])}/backlog.json 里这些条目，拆成草稿 Task（每个有 title、kind、detail），"
+            f"用 python3 {Path(__file__).resolve()} topic refined --topic {data['id']} --ack {request['id']} "
+            "--drafts '<json>' 一次提交。只建草稿，不要派发。")
+
+
+def cmd_topic_request(a):
+    request_type = a.type or ("dispatch" if a.task else "refine")
+    if (request_type == "dispatch") != bool(a.task):
+        a.topic_parser.error("dispatch needs --task; refine needs --items")
+    ids = topic_ids(a.items) if a.items is not None else None
+    if ids == []:
+        a.topic_parser.error("--items must contain at least one item")
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        topic_writable(data, active=True)
+        backlog = load_backlog(repo, a.topic) if ids is not None else None
+        objects = topic_items(backlog, ids) if backlog is not None else [topic_task(data, a.task, draft=True)]
+        old_ids = list(dict.fromkeys(obj["request"]["id"] for obj in objects if obj.get("request")))
+        if a.cancel:
+            for obj in objects:
+                obj["request"] = None
+                if backlog is not None:
+                    obj.update(status="open", updated_at=time.time())
+            result = {"cancelled": ",".join(old_ids)}
+        elif a.resend:
+            if len(old_ids) != 1 or any(not obj.get("request") for obj in objects):
+                fail("no common current request", failure="REQUEST_STALE", code=3)
+            for obj in objects:
+                obj["request"]["delivered_at"] = None
+            result = {"request": old_ids[0]}
+        else:
+            rid = "r" + secrets.token_hex(3)
+            request = {"id": rid, "type": request_type, "target": a.target, "agent": a.agent,
+                       "at": time.time(), "delivered_at": None}
+            for obj in objects:
+                obj["request"] = dict(request)
+                if backlog is not None:
+                    obj.update(status="refining", updated_at=request["at"])
+            if backlog is not None:
+                # Keep membership and acknowledgements outside the public Topic/backlog schemas:
+                # a cleared request alone cannot identify an edited member or an acknowledged rid.
+                path = topic_dir(repo, a.topic) / "refinements.json"
+                journal = read_json(path, {})
+                journal[rid] = {"items": ids, "task_ids": None}
+                write_json(path, journal)
+            result = {"request": rid, "message": json.dumps(
+                topic_message(repo, data, request, a.task, ids), ensure_ascii=False)}
+        if backlog is not None:
+            save_backlog(repo, a.topic, backlog)
+        else:
+            save_topic(repo, a.topic, data)
+    out(**result)
+
+
+def topic_binding(repo, run):
+    """Find the authoritative binding, including a start interrupted before writing state.json."""
+    for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
+        with topic_lock(repo, path.parent.name):
+            data = read_json(path, {})
+            for tid, task in data.get("tasks", {}).items():
+                if task.get("run") == Path(run).name:
+                    return path.parent.name, tid
+    return None
+
+
+def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
+    topic_writable(data, active=True)
+    task = topic_task(data, task_id)
+    if task.get("run") and task["run"] != run.name:
+        fail(f"task already taken: {task_id}", failure="TASK_TAKEN", code=3)
+    if task["kind"] != run_kind(run) or (kind is not None and kind != task["kind"]):
+        fail(f"task kind does not match run: {task_id}", failure="KIND_MISMATCH", code=3)
+    current = (task.get("request") or {}).get("id")
+    allowed = task.get("consumed_request") if task.get("run") == run.name else current
+    if request_id is not None and request_id != allowed:
+        fail(f"request is stale: {request_id}", failure="REQUEST_STALE", code=3)
+    if not task.get("run"):
+        task.update(run=run.name, agent=agent, started_at=time.time(), request=None,
+                    consumed_request=current)
+    save_topic(repo, topic_id, data)
+    state_path = run / "state.json"
+    state = read_json(state_path, {})
+    state.update(topic=topic_id, task=task_id)
+    write_json(state_path, state)
+    if not (topic_dir(repo, topic_id) / "backlog.json").exists():
+        save_backlog(repo, topic_id, {"next_item": 1, "items": []})
+    out(topic=topic_id, task=task_id, detail=json.dumps(task["detail"], ensure_ascii=False))
+
+
+def cmd_topic_start(a):
+    if bool(a.task) != bool(a.topic):
+        a.topic_parser.error("--topic and --task must be supplied together")
+    if a.request and not a.task:
+        a.topic_parser.error("--request needs --task")
+    run = Path(a.run).resolve()
+    if not run.is_dir():
+        a.topic_parser.error(f"no run folder {run}")
+    repo, agent = repo_of_run(run), dispatcher()["dispatcher_agent"]
+    bound = topic_binding(repo, run)
+    if bound and a.task and bound != (a.topic, a.task):
+        fail("run is already bound to another task", failure="TASK_TAKEN", code=3)
+    if a.task or bound:
+        topic_id, task_id = (a.topic, a.task) if a.task else bound
+        with topic_lock(repo, topic_id):
+            bind_topic_run(repo, topic_id, task_id, load_topic(repo, topic_id), run, a.request, agent, a.kind)
+        return
+    parent_task = None
+    if a.parent:
+        parent = Path(a.parent).resolve()
+        if repo_of_run(parent) != repo:
+            a.topic_parser.error("--parent must belong to the same repository")
+        inherited = topic_binding(repo, parent)
+        if not inherited:
+            fail("parent run has no topic", failure="NO_TOPIC", code=3)
+        topic_id, parent_task = inherited
+    kind = a.kind or run_kind(run)
+    if kind not in TOPIC_KINDS or kind != run_kind(run):
+        fail("task kind does not match run", failure="KIND_MISMATCH", code=3)
+    if parent_task:
+        with topic_lock(repo, topic_id):
+            data = load_topic(repo, topic_id)
+            topic_writable(data, active=True)
+            task_id = add_topic_task(data, a.title or run.name, kind, parent_task=parent_task)
+            bind_topic_run(repo, topic_id, task_id, data, run, a.request, agent, a.kind)
+        return
+    owner = topic_owner()
+    while True:
+        topic_id = new_topic_id()
+        with topic_lock(repo, topic_id):
+            if (topic_dir(repo, topic_id) / "topic.json").exists():
+                continue
+            data = new_topic_data(topic_id, a.title or run.name, owner)
+            task_id = add_topic_task(data, a.title or run.name, kind)
+            bind_topic_run(repo, topic_id, task_id, data, run, a.request, agent, a.kind)
+            return
+
+
+def cmd_topic_finish(a):
+    run = Path(a.run).resolve()
+    repo = repo_of_run(run)
+    bound = topic_binding(repo, run)
+    if not bound:
+        fail("run has no topic", failure="NO_TOPIC", code=3)
+    topic_id, task_id = bound
+    with topic_lock(repo, topic_id):
+        data = load_topic(repo, topic_id)
+        task = topic_task(data, task_id)
+        if task.get("run") != run.name:
+            fail("task belongs to another run", failure="TASK_TAKEN", code=3)
+        now = time.time()
+        summary = topic_dir(repo, topic_id) / "summary.md"
+        entry = f"## {task_id} {task['title']}（{task['kind']}）\n{a.line}\n"
+        previous = summary.read_text() if summary.exists() else ""
+        if entry not in previous:
+            with summary.open("a") as stream:
+                stream.write(entry + (f"产物：{a.artifact}\n" if a.artifact else "") + "\n")
+        task.update(summary_line=a.line, artifact=a.artifact, finished_at=now)
+        save_topic(repo, topic_id, data)
+        state_path = run / "state.json"
+        state = read_json(state_path, {})
+        state.update(topic=topic_id, task=task_id, finished=now)
+        write_json(state_path, state)
+    out(finished=task_id)
+
+
+def cmd_topic_refined(a):
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        backlog = load_backlog(repo, a.topic)
+        path = topic_dir(repo, a.topic) / "refinements.json"
+        journal = read_json(path, {})
+        receipt = journal.get(a.ack)
+        by_id = {item["id"]: item for item in backlog["items"]}
+        ids = receipt["items"] if receipt else []
+        items = [by_id.get(i) for i in ids]
+        if receipt and receipt["task_ids"] is not None and all(
+                item and item["status"] == "refined" and item["task_ids"] == receipt["task_ids"]
+                and item["updated_at"] == receipt["at"] for item in items):
+            out(tasks=",".join(receipt["task_ids"]))
+            return
+        if not ids or any(not item or (item.get("request") or {}).get("id") != a.ack for item in items):
+            fail(f"refinement request is stale: {a.ack}", failure="REQUEST_STALE", code=3)
+        try:
+            raw = a.drafts
+            if not raw.lstrip().startswith("["):
+                raw = Path(raw).read_text()
+            drafts = json.loads(raw)
+        except (OSError, ValueError) as e:
+            a.topic_parser.error(f"cannot read --drafts: {e}")
+        if not isinstance(drafts, list) or any(
+                not isinstance(d, dict) or not isinstance(d.get("title"), str)
+                or d.get("kind") not in TOPIC_KINDS or not isinstance(d.get("detail", ""), str)
+                or not isinstance(d.get("depends_on", []), list)
+                or any(not isinstance(dep, str) for dep in d.get("depends_on", [])) for d in drafts):
+            a.topic_parser.error("--drafts needs [{title, kind, detail?, depends_on?}]")
+        task_ids = [add_topic_task(data, d["title"], d["kind"], d.get("detail", ""), d.get("depends_on"),
+                                   from_backlog=ids[0]) for d in drafts]
+        now = time.time()
+        for item in items:
+            item.update(status="refined", request=None, task_ids=list(task_ids), updated_at=now)
+        receipt.update(task_ids=task_ids, at=now)
+        save_topic(repo, a.topic, data)
+        save_backlog(repo, a.topic, backlog)
+        write_json(path, journal)
+    out(tasks=",".join(task_ids))
+
+
+def cmd_topic_unimplemented(a):
+    fail("not implemented", failure="other")
+
+
+def cmd_topic(a):
+    handlers = {"init": cmd_topic_init, "request": cmd_topic_request, "start": cmd_topic_start,
+                "finish": cmd_topic_finish, "refined": cmd_topic_refined}
+    handler = (cmd_topic_task if a.topic_cmd.startswith("task-") else
+               cmd_topic_backlog if a.topic_cmd.startswith("backlog-") else
+               handlers.get(a.topic_cmd, cmd_topic_unimplemented))
+    handler(a)
+
+
+def register_topic_parser(sub):
+    topic = sub.add_parser("topic")
+    topic.add_argument("--repo")
+    commands = topic.add_subparsers(dest="topic_cmd", required=True)
+    for name in ("init", "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
+                 "request", "deliver", "start", "finish", "refined", "pause", "resume", "stop",
+                 "archive", "unarchive", "delete"):
+        c = commands.add_parser(name)
+        c.set_defaults(topic_parser=c)
+        c.add_argument("--repo", default=argparse.SUPPRESS)
+        if name not in ("init", "deliver", "start", "finish"):
+            c.add_argument("--topic", required=True)
+        if name == "init":
+            c.add_argument("--title", required=True)
+            c.add_argument("--owner")
+        elif name in ("task-add", "task-edit"):
+            if name == "task-edit":
+                c.add_argument("--task", required=True)
+            c.add_argument("--title", required=name == "task-add")
+            c.add_argument("--kind", choices=TOPIC_KINDS, required=name == "task-add")
+            c.add_argument("--detail", default="" if name == "task-add" else None)
+            c.add_argument("--depends", default="" if name == "task-add" else None)
+            if name == "task-add":
+                c.add_argument("--from-backlog")
+        elif name == "task-rm":
+            c.add_argument("--task", required=True)
+        elif name.startswith("backlog-"):
+            if name != "backlog-add":
+                c.add_argument("--item", required=True)
+            if name != "backlog-rm":
+                c.add_argument("--text", required=True)
+        elif name == "request":
+            targets = c.add_mutually_exclusive_group(required=True)
+            targets.add_argument("--task")
+            targets.add_argument("--items")
+            c.add_argument("--type", choices=("dispatch", "refine"))
+            c.add_argument("--target", choices=("owner", "new_tab"), default="owner")
+            c.add_argument("--agent")
+            action = c.add_mutually_exclusive_group()
+            action.add_argument("--cancel", action="store_true")
+            action.add_argument("--resend", action="store_true")
+        elif name == "start":
+            c.add_argument("--run", required=True)
+            for flag in ("--topic", "--task", "--request", "--parent", "--title"):
+                c.add_argument(flag)
+            c.add_argument("--kind", choices=TOPIC_KINDS)
+        elif name == "finish":
+            c.add_argument("--run", required=True)
+            c.add_argument("--line", required=True)
+            c.add_argument("--artifact")
+        elif name == "refined":
+            c.add_argument("--ack", required=True)
+            c.add_argument("--drafts", required=True)
+
+
 def check_ask(i: str, item) -> str | None:
     """Why an asks.json item is malformed, or None."""
     if not isinstance(item, dict):
@@ -2545,8 +3041,9 @@ def main():
     hf.add_argument("--run", required=True)
     hf.add_argument("--why", default="manual", help="manual (the user asked) or usage (this agent is near its limit)")
     hf.add_argument("--no-notes", action="store_true", help="hand off without <run>/handoff-notes.md")
+    register_topic_parser(sub)
     a = p.parse_args()
-    {"recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "delete": cmd_delete, "retire": cmd_retire, "ask": cmd_ask, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
+    {"topic": cmd_topic, "recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "delete": cmd_delete, "retire": cmd_retire, "ask": cmd_ask, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
      "status": cmd_status, "diagnose": cmd_diagnose, "cleanup": cmd_cleanup, "freeze": cmd_freeze,
      "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop}[a.cmd](a)
     if a.cmd in ("wait", "collect"):
