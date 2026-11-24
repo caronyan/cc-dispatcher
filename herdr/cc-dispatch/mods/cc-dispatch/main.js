@@ -1,25 +1,23 @@
-// cc-dispatch beside herdr's Agents list: the cc-herdr-dispatch skills' runs, one card per run
-// (<repo>/.cc-dispatch/<kind>-<run>), each helper's round, report verdict and failure, history
-// that outlives the terminals, and a hand-off to the Claude that dispatched it.
-// Herdr's Agents list already shows live status and the sub-agent tree; this panel shows what only
-// the skills know. Roles (props.role): the panel (default); "toggle", the tab-bar button that
-// shows or hides the layout's "cc-dispatch-panel" node; dialogs "text", "handoff", "handover", "cleanup",
-// "control" (confirms a run's pause / resume / stop), "bgtask" (a running background task, live), "decide"
-// (answer one item the main agent waits on you for), "delete" (confirms deleting an archived run).
+// Topics contain Tasks, and each bound Task shows its run's helpers. Historical runs use the
+// same view through implicit, single-Task Topics. Only this file imports Herdr.
 // Only this file imports Herdr: model.js and loader.js are tested under node.
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
-import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel } from "./model.js";
-import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer } from "./loader.js";
-import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
-import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
+import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
+import { callTags, callStage, runStage, cardCounts, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir } from "./model.js";
+import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
+import { assignTasks, topicTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
+import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
 
 const PANEL = "cc-dispatch-panel"; // the layout node the toggle shows and hides
 const POLL = 4000;                 // meta.json re-read while shown; live status comes from terminals()
 const HISTORY = 6;                 // ended runs shown before "Show n older"
 const LIVE_POLL = 2000;            // a running background task's dialog re-reads its processes
 const QUOTA_POLL = 30000;          // the main agents' quota (hd_usage.py keeps magpie's answer 60 s)
+const TASK_KINDS = ["research", "review", "dev", "fix", "test", "retro"];
+const GROUP_WORDS = { you: "等你", active: "进行中", queued: "待分发", done: "已完成" };
+const outputValue = (out, key) => (out ?? "").split("\n").find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
+const commandError = (out) => (out || "hd_dispatch.py 运行失败").split("\n").filter((line) => line && !line.startsWith("FAILURE=")).slice(-2).join(" ");
 
 const io = (on) => ({
   sh: (script, args = []) => exec("sh", ["-c", script, "cc-dispatch-panel", ...args], { on })
@@ -224,7 +222,7 @@ function toggle() {
       .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(() => run("layout.toggle", { id: PANEL }))
-      .child(mark(14, on ? t.foreground : t.muted)).child("Dispatch")
+      .child(mark(14, on ? t.foreground : t.muted)).child("派发")
       .when(live.length > 0, (el) => el.child(h_flex().h(16).px(5).items_center().rounded(8).bg(busy ? t.working : t.selected)
         .text_size(11).text_color(busy ? t.background : t.muted).child(String(busy || live.length)))));
 }
@@ -267,12 +265,29 @@ export default class Dispatch extends View {
       });
       return;
     }
+    if (["dispatch", "task", "backlog", "newtopic"].includes(this.role)) {
+      const p = blockProps() ?? {};
+      this.sending = false; this.failed = null; this.kind = p.task?.kind ?? "dev";
+      const field = (value, rows, placeholder) => {
+        const box = TextareaState.new({ value: value ?? "", rows, placeholder });
+        box.on("change", (_e, cx) => cx.notify());
+        return box;
+      };
+      this.titleBox = field(p.task?.title, 2, "填写标题");
+      this.detailBox = field(p.task?.detail, 6, "说明要做什么、期望结果和限制");
+      this.backlogBox = field(p.item?.text, 8, "记录想法或待办，可以写多行");
+      this.programs = p.programs ?? []; this.programsAt = 0; this.programsBusy = false;
+      this.pick = p.ownerLive ? "owner" : null;
+      if (this.role === "dispatch") this.refreshPrograms(cx, p.on ?? null);
+      return;
+    }
     if (this.role !== "panel") return;
-    this.runs = []; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.liveKey = null;
+    this.runs = []; this.topics = []; this.states = {}; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.liveKey = null;
     this.open = null; this.fold = new Map(); this.groupFold = new Map(); this.bgMore = new Map(); this.showOld = false; this.showArchived = false; this.loading = false; this.token = 0; this.lastAgent = null;
     this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.statsBusy = false;
     this.bg = { runs: {}, sessions: {} };
     this.quota = {}; // agent -> { q, at, busy }
+    this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
   }
 
@@ -280,10 +295,23 @@ export default class Dispatch extends View {
 
   // The shown space, as Herdr's Spaces list names it.
 
-  // The shown space's runs, and other spaces' live runs by space.
+  // Keep a Topic together even when its nested Tasks were started in another space.
   split() {
-    const shown = spaces().find((s) => s.active) ?? null;
-    return splitBySpace(this.runs, terminals() ?? [], spaces() ?? [], shown, this.repo);
+    const allSpaces = spaces() ?? [], shown = allSpaces.find((s) => s.active) ?? null;
+    const runSplit = splitBySpace(this.runs, terminals() ?? [], allSpaces, shown, this.repo);
+    const mineDirs = new Set(runSplit.mine.map((r) => r.dir)), mine = [], others = new Map();
+    for (const topic of this.topics) {
+      const dir = topicDir(topic);
+      const repo = topic.implicit ? topic.runs[0]?.repo : dir?.replace(/\/\.cc-dispatch\/topics\/[^/]+$/, "");
+      if ((this.repo && repo === this.repo) || topic.runs.some((r) => mineDirs.has(r.dir))) { mine.push(topic); continue; }
+      if (!this.topicActive(topic)) continue;
+      const g = runSplit.others.find((g) => g.runs.some((r) => topic.runs.includes(r)));
+      const id = g?.id ?? topic.owner?.space ?? null;
+      const key = id ?? `repo:${repo}`;
+      if (!others.has(key)) others.set(key, { id, name: g?.name ?? allSpaces.find((s) => s.id === id)?.name ?? baseName(repo), topics: [] });
+      others.get(key).topics.push(topic);
+    }
+    return { mine, others: [...others.values()] };
   }
 
   context() {
@@ -298,20 +326,51 @@ export default class Dispatch extends View {
     if (this.loading) return;
     this.loading = true;
     const token = this.token, ctx = this.ctx;
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
         const files = io(ctx?.on ?? null);
         const repo = ctx ? await findRepo(files, ctx.folder) : null;
-        const { runs, error } = await loadRuns(files, repo, terminals() ?? []);
         if (token !== this.token) return;
-        this.repo = repo; this.runs = runs; this.error = error;
-        later(cx, (cx) => this.refreshStats(cx, files, token));
-        later(cx, (cx) => this.refreshQuota(cx, files));
+        const { runs, topics, states, error } = await loadRuns(files, repo, terminals() ?? []);
+        if (token !== this.token) return;
+        this.repo = repo; this.runs = runs; this.topics = topics; this.states = states; this.error = error;
+        later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
+        later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
+        later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
+        const pending = topics.some((topic) => !topic.implicit && this.topicRepo(topic) === repo && !topic.archived && !topic.pausedAt && !topic.deleting
+          && [...topic.tasks, ...topic.backlog].some((x) => x.request?.target === "owner" && x.request.deliveredAt == null));
+        if (repo && pending && !checking()) {
+          const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", repo]);
+          if (token !== this.token) return;
+          if (!delivered.ok) this.error = `自动送达失败：${commandError(delivered.out)}`;
+          else if (outputValue(delivered.out, "DELIVERED")) {
+            const next = await loadRuns(files, repo, terminals() ?? []);
+            if (token !== this.token) return;
+            this.runs = next.runs; this.topics = next.topics; this.states = next.states; this.error = next.error;
+          }
+        }
       } catch (e) {
-        this.error = String(e?.message ?? e);
+        if (token === this.token) this.error = String(e?.message ?? e);
       } finally {
-        this.loading = false;
-        cx.notify();
+        if (token === this.token) { this.loading = false; cx.notify(); }
+      }
+    });
+  }
+
+  refreshPrograms(cx, on, token = null) {
+    if (this.programsBusy || Date.now() - this.programsAt < 60000) return;
+    this.programsBusy = true;
+    cx.spawn(async (cx) => {
+      try {
+        const programs = await knownAgents({ on });
+        if (token != null && token !== this.token) return;
+        this.programs = programs.filter((p) => p.installed); this.programsAt = Date.now(); this.programsError = null;
+      } catch (e) {
+        if (token != null && token !== this.token) return;
+        this.programsError = `读不到可用 agent：${e?.message ?? e}`;
+      } finally {
+        if (token == null || token === this.token) { this.programsBusy = false; cx.notify(); }
       }
     });
   }
@@ -337,14 +396,13 @@ export default class Dispatch extends View {
         for (const r of want) this.stats.pending[r.dir] = s.pending?.[r.dir] ?? {};
         for (const r of want) if (!r.live) this.statsFor.add(r.dir);
       } finally {
-        this.statsBusy = false;
-        cx.notify();
+        if (token === this.token) { this.statsBusy = false; cx.notify(); }
       }
     });
   }
 
   // Each live run's main agent's quota, per subscription (claude, codex), at most every QUOTA_POLL.
-  refreshQuota(cx, files) {
+  refreshQuota(cx, files, token) {
     const now = Date.now(), want = new Map();
     for (const r of this.runs) {
       if (!r.live) continue;
@@ -357,6 +415,7 @@ export default class Dispatch extends View {
       this.quota[agent] = { ...(cur ?? { q: null }), at: now, busy: true };
       cx.spawn(async (cx) => {
         const q = await loadQuota(files, hd, agent).catch(() => null);
+        if (token !== this.token) return;
         this.quota[agent] = { q, at: Date.now(), busy: false };
         cx.notify();
       });
@@ -382,9 +441,11 @@ export default class Dispatch extends View {
 
   // The Claude a hand-off goes to: the one that dispatched the call, else the focused agent.
   receiver(c) {
-    const all = agents() ?? [];
-    const parent = c.parent && all.find((a) => a.address === c.parent);
+    const every = agents() ?? [];
+    const parent = c.parent && every.find((a) => a.address === c.parent);
     if (parent) return parent;
+    const space = (spaces() ?? []).find((s) => s.active)?.id;
+    const all = every.filter((a) => a.space === space);
     const f = all.find((a) => a.focused);
     if (f && !(f.address === c.address)) { this.lastAgent = f.address; return f; }
     return all.find((a) => a.address === this.lastAgent) ?? null;
@@ -397,7 +458,14 @@ export default class Dispatch extends View {
 
     // Follow the shown space and its focused folder; a new place starts over.
     const ctx = this.context(), key = ctx ? `${ctx.on}|${ctx.folder}` : "";
-    if (key !== this.ctxKey) { this.ctxKey = key; this.ctx = ctx; this.token++; this.loading = false; this.statsBusy = false; this.open = null; later(cx, (cx) => this.refresh(cx)); }
+    if (key !== this.ctxKey) {
+      this.ctxKey = key; this.ctx = ctx; this.token++; this.loading = false; this.statsBusy = false; this.open = null;
+      this.runs = []; this.topics = []; this.states = {}; this.repo = null; this.error = null; this.statsError = null;
+      this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.bg = { runs: {}, sessions: {} }; this.quota = {};
+      this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
+      this.fold.clear(); this.groupFold.clear(); this.bgMore.clear(); this.showOld = false; this.showArchived = false; this.lastAgent = null;
+      later(cx, (cx) => this.refresh(cx));
+    }
     // Helpers came, went or relabelled themselves: re-read meta.json now, not at the next poll.
     const live = (terminals() ?? []).filter((x) => x?.labels?.["cc.run"]);
     const liveKey = live.map((x) => `${x.address}:${x.state}:${JSON.stringify(x.labels)}`).sort().join("|");
@@ -411,33 +479,85 @@ export default class Dispatch extends View {
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(S().body)
       .child(h_flex().h(42).flex_none().pl(14).pr(8).gap(8).items_center().border_b(1).border_color(t.border)
         .child(mark(17, t.accent))
-        .child(div().text_size(S().title).font_semibold().child("Dispatch"))
+        .child(div().text_size(S().title).font_semibold().child("派发"))
         .child(div().flex_1())
+        .when(Boolean(this.repo), (el) => el.child(action("new-topic", "新建 Topic", "task", t, () => {
+          const owner = this.receiver({});
+          this.openForm("newtopic", null, { owner: owner?.address ?? null, ownerName: owner?.program?.name ?? null });
+        }, { color: t.accent })))
         .child(h_flex().id("refresh").size(24).justify_center().items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", stop).on_click((_e, cx) => this.refresh(cx))
           .child(this.loading ? icon("ring", 13, t.muted).spin(900) : icon("refresh", 13, t.muted)))
         .when(Boolean(node), (el) => el.child(h_flex().id("close").size(24).justify_center().items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", stop).on_click(() => run("layout.hide", { id: PANEL })).child(icon("close", 14, t.muted)))))
-      .child(this.renderRuns(t))
+      .child(this.renderTopics(t))
       .child(this.renderFooter(t));
   }
 
-  renderRuns(t) {
-    const body = v_flex().id("runs").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(8);
-    if (this.error) body.child(note(t, `读不到运行记录：${this.error}`, t.ansi1));
+  topicActive(topic) {
+    return !topic.archived && (topic.pausedAt || topic.tasks.some((task) => ["active", "you"].includes(taskGroup(task, topic))));
+  }
+
+  topicHD(topic) { return topic?.runs.find((r) => r.hd)?.hd ?? this.runs.find((r) => r.hd)?.hd ?? null; }
+
+  topicRepo(topic) {
+    const dir = topicDir(topic);
+    return (topic?.implicit ? topic.runs[0]?.repo : dir?.replace(/\/\.cc-dispatch\/topics\/[^/]+$/, "")) ?? this.repo;
+  }
+
+  // Forms only need serializable metadata; render/group/summary keep the original model objects.
+  topicProps(topic) {
+    return topic ? { id: topic.id, title: topic.title, implicit: topic.implicit, archived: topic.archived, pausedAt: topic.pausedAt,
+      owner: topic.owner, tasks: topic.tasks.map((task) => ({ id: task.id, title: task.title, run: task.runDir })),
+      runs: topic.runs.map((r) => ({ id: r.id, dir: r.dir, hd: r.hd })) } : null;
+  }
+
+  openForm(role, topic, extra = {}) {
+    const ownerLive = Boolean(topic?.owner?.terminal) && (agents() ?? []).some((a) => a.address === topic.owner.terminal);
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 560, height: role === "dispatch" ? 660 : role === "task" ? 540 : 430,
+      props: { role, topic: this.topicProps(topic), repo: this.topicRepo(topic), hd: this.topicHD(topic),
+        on: this.ctx?.on ?? null, space: (spaces() ?? []).find((s) => s.active)?.id,
+        ownerLive, programs: this.programs, ...extra } });
+  }
+
+  command(cx, topic, op, args = []) {
+    if (this.busy.has(topic.id)) return;
+    const token = this.token, files = io(this.ctx?.on ?? null), hd = this.topicHD(topic), repo = this.topicRepo(topic);
+    this.busy.add(topic.id); this.error = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        // Historical Topics have no topic.json; their controls still address the underlying run.
+        let res;
+        if (topic.implicit) {
+          const r = topic.runs[0];
+          const got = ["archive", "unarchive"].includes(op) ? await archiveRun(files, r, op) : await controlRun(files, r, op);
+          res = { ok: got.ok, out: got.text ?? got.error };
+        } else res = await topicCmd(files, hd, ["topic", op, "--repo", repo, "--topic", topic.id, ...args]);
+        if (token !== this.token) return;
+        if (!res.ok) this.error = commandError(res.out);
+        else later(cx, (cx) => { if (token === this.token) this.refresh(cx); });
+      } catch (e) {
+        if (token === this.token) this.error = String(e?.message ?? e);
+      } finally {
+        if (token === this.token) { this.busy.delete(topic.id); cx.notify(); }
+      }
+    });
+  }
+
+  renderTopics(t) {
+    const body = v_flex().id("topics").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(8);
+    if (this.error) body.child(note(t, this.error, t.ansi1));
     const { mine, others } = this.split();
     if (!mine.length) {
       body.child(v_flex().p(8).gap(6)
-        .child(note(t, this.repo ? `${baseName(this.repo)} 里还没有运行。` : "打开一个空间，就能看到它的运行。", t.foreground))
-        .child(note(t, "用 cc-herdr-dispatch 系列 skill 派出子 agent 后，运行会出现在这里：/cc-herdr-dispatch-research、-review、-dev、-fix、-test。")));
+        .child(note(t, this.repo ? `${baseName(this.repo)} 里还没有 Topic。` : "打开一个空间，就能看到它的 Topic。", t.foreground))
+        .child(note(t, "新建 Topic 后添加 Task 草稿，或用 cc-herdr-dispatch 系列 skill 开始工作。历史运行也会显示在这里。")));
       return this.renderOthers(t, body, others);
     }
-    // An archived run stays out of the list while all its helpers are settled (model.js archivedAway).
-    const away = (r) => archivedAway(r, this.stats.runs[r.dir]?.status);
-    const live = mine.filter((r) => r.live && !away(r)), ended = mine.filter((r) => !r.live && !away(r));
-    const archived = mine.filter(away).sort((a, b) => b.archived - a.archived);
+    const live = mine.filter((topic) => this.topicActive(topic)), ended = mine.filter((topic) => !topic.archived && !this.topicActive(topic));
+    const archived = mine.filter((topic) => topic.archived).sort((a, b) => b.archived - a.archived);
     const old = this.showOld ? ended : ended.slice(0, HISTORY);
-    body.children([...live, ...old].map((r) => this.renderRun(t, r)));
+    body.children([...live, ...old].map((topic) => this.renderTopic(t, topic)));
     const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
     if (ended.length > HISTORY) {
@@ -447,115 +567,226 @@ export default class Dispatch extends View {
     if (archived.length) {
       body.child(link("archived", this.showArchived ? "隐藏已归档" : `已归档 ${archived.length} 个 · 显示`,
         (_e, cx) => { this.showArchived = !this.showArchived; cx.notify(); }));
-      if (this.showArchived) body.children(archived.map((r) => this.renderRun(t, r)));
+      if (this.showArchived) body.children(archived.map((topic) => this.renderTopic(t, topic)));
     }
     return this.renderOthers(t, body, others);
   }
 
-  // Other spaces with runs going: one row each; clicking shows that space (and the panel follows).
+  // Other spaces with Topics going: one row each.
   renderOthers(t, body, others) {
     if (!others.length) return body;
     body.child(div().flex_none().pt(6).px(2).text_size(S().label).text_color(t.muted).child("其他空间"));
     for (const g of others) {
-      const stages = g.runs.flatMap((r) => r.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])));
+      const waiting = g.topics.some((topic) => topic.tasks.some((task) => taskGroup(task, topic) === "you"));
       body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().px(10).py(6).gap(8).items_center().rounded(8)
         .border_1().border_dashed().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
         .when(Boolean(g.id), (el) => el.on_click(() => run("space.select", { id: g.id })))
-        .child(dot(t, runStage(stages)))
+        .child(dot(t, waiting ? "blocked" : "working"))
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().text_size(S().body).font_semibold().child(g.name))
           .child(div().text_size(S().label).text_color(t.muted)
-            .child([`${g.runs.length} 个运行`, stageSummary(stages)].join(" · "))))
+            .child(`${g.topics.length} 个 Topic · ${g.topics.reduce((n, topic) => n + topic.tasks.length, 0)} 个 Task`)))
         .when(Boolean(g.id), (el) => el.child(icon("chevron-right", 12, t.muted))));
     }
     return body;
   }
 
-  renderRun(t, r) {
-    const folded = this.fold.has(r.dir) ? this.fold.get(r.dir) : !r.live;
-    const other = this.repo && r.repo !== this.repo;
-    const cards = this.stats.runs[r.dir], stages = r.calls.map((c) => callStage(c, cards?.status?.[c.call]));
-    const mainLive = Boolean(r.parent) && (terminals() ?? []).some((x) => x.address === r.parent && x.state === "live");
-    const bg = bgView(this.tasksOf(r), mainLive, this.bgMore.get(r.dir) ?? 0);
-    // One line: what the run is, then its pause / resume / stop as icons. Its stage counts are the
-    // group headers below; its spend, the stats under the head.
-    const head = h_flex().id(`run-${r.dir}`).h(36).flex_none().pl(10).pr(6).gap(8).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { this.fold.set(r.dir, !folded); cx.notify(); })
+  renderTopic(t, topic) {
+    const active = this.topicActive(topic), folded = this.fold.get(topic.id) ?? !active;
+    const groups = groupTasks(topic), waiting = groups.some((g) => g.group === "you");
+    const paused = Boolean(topic.pausedAt);
+    const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 12, t.muted))
-      .child(dot(t, runStage(stages), r.control))
-      .child(pill(t, r.kind, r.live ? t.foreground : t.muted))
-      .child(div().flex_1().min_w(0).truncate().text_size(S().body).font_semibold().text_color(r.live ? t.foreground : t.muted)
-        .child(r.id.replace(`${r.kind}-`, "") || r.id))
-      .when(Boolean(other), (el) => el.child(div().flex_none().max_w(90).truncate().text_size(S().label).text_color(t.muted).child(baseName(r.repo))))
-      .children(this.controlButtons(t, r))
-      .children(this.archiveButton(t, r));
-    const paused = r.control?.state === "paused";
-    const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : r.live ? t.input : t.border).bg(r.live || paused ? t.surface : t.background).overflow_hidden().child(head);
-    const quota = this.renderQuota(t, r);
-    if (quota) card.child(quota);
-    const ctl = this.renderControl(t, r);
-    if (ctl) card.child(ctl);
-    const take = this.renderTakeover(t, r);
-    if (take) card.child(take);
-    const asks = this.renderAsks(t, r);
+      .child(dot(t, waiting ? "blocked" : active ? "working" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
+      .child(div().flex_1().min_w(0).truncate().text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
+      .child(h_flex().id(`summary-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6)
+        .tooltip("查看摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          const files = io(this.ctx?.on ?? null);
+          this.showText(cx, `${topic.title} · 摘要`, () => loadSummary(files, topic), topic.implicit ? "还没有总结文档。" : "还没有 Task 完成摘要。");
+        }).child(icon("file", 13, t.muted)))
+      .children(this.topicControlButtons(t, topic))
+      .children(this.archiveButton(t, topic));
+    const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : active ? t.input : t.border)
+      .bg(active ? t.surface : t.background).overflow_hidden().child(head)
+      .child(h_flex().pl(30).pr(10).pb(6).gap(8).flex_wrap().text_size(S().label).text_color(t.muted)
+        .children(groups.map((g) => div().flex_none().text_color(g.group === "you" ? t.ansi3 : t.muted).child(`${GROUP_WORDS[g.group]} ${g.tasks.length}`))));
+    const quotaAgents = new Set();
+    for (const r of topic.runs) {
+      const agent = runQuotaAgent(r, terminals() ?? []);
+      if (quotaAgents.has(agent)) continue;
+      const quota = this.renderQuota(t, r);
+      if (quota) { quotaAgents.add(agent); card.child(quota); }
+    }
+    const stopping = topic.runs.some((r) => r.control?.state === "stopping");
+    const stopped = topic.runs.length && topic.runs.every((r) => r.control?.state === "stopped" || r.control?.retired);
+    if (paused || stopping || stopped || topic.deleting) card.child(h_flex().px(12).py(6).gap(7).items_center().border_t(1).border_color(t.border)
+      .child(icon(paused ? "pause" : "square", 11, paused ? t.ansi3 : t.muted))
+      .child(note(t, topic.deleting ? "Topic 删除中" : paused ? "Topic 已暂停 · 继续后才能派发 Task" : stopping ? "Topic 终止中 · 子 agent 正在记录进度" : "Topic 已终止", paused ? t.ansi3 : t.muted)));
+    const asks = this.renderAsks(t, topic);
     if (asks) card.child(asks);
     if (!folded) {
-      const totals = runTotals(r, this.stats.calls, this.stats.runs[r.dir]);
-      if (totals.known || totals.cards) card.child(this.renderStats(t, r, totals));
-      if (bg.running.length || bg.ended.length) card.child(this.renderBg(t, r, bg));
-      card.child(this.renderGroups(t, r, cards));
+      const totals = topicTotals(this.stats, topic);
+      if (totals.known || totals.cards) card.child(this.renderStats(t, topic, totals));
+      const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
+      const mainLive = topic.runs.some((r) => this.mainAgentOf(r));
+      const bg = bgView(topicTasks(assigned, topic), mainLive, this.bgMore.get(topic.id) ?? 0);
+      if (bg.running.length || bg.ended.length) card.child(this.renderBg(t, topic, bg));
+      for (const g of groups) {
+        const key = `${topic.id}|${g.group}`, folded = this.groupFold.get(key) ?? g.group === "done";
+        card.child(h_flex().id(`tasks-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
+          .border_t(1).border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
+          .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+          .child(div().flex_1().text_size(S().label).font_semibold().text_color(g.group === "you" ? t.ansi3 : t.muted).child(GROUP_WORDS[g.group]))
+          .child(pill(t, String(g.tasks.length))));
+        if (!folded) card.children(g.tasks.map((task) => this.renderTask(t, topic, task)));
+      }
+      if (!topic.implicit && !topic.archived && !topic.deleting) card.child(h_flex().px(12).py(8)
+        .child(action(`add-task-${topic.id}`, "+ Task", "task", t, () => this.openForm("task", topic), { color: t.accent })));
+      if (!topic.implicit) card.child(this.renderBacklog(t, topic));
     }
     return card;
   }
 
-  // The run's helpers by stage, most urgent first. A group folds from its header; settled ones
-  // (report ok, merged, done, parked, ended) start folded unless they are all the run has.
-  renderGroups(t, r, cards) {
-    const groups = groupByStage(r.calls, (c) => callStage(c, cards?.status?.[c.call]));
-    const box = v_flex().border_t(1).border_color(t.border);
-    for (const g of groups) {
-      const key = `${r.dir}|${g.stage}`;
-      const folded = this.groupFold.has(key) ? this.groupFold.get(key) : groups.length > 1 && SETTLED.has(g.stage);
-      const color = stageColor(t, g.stage);
-      box.child(h_flex().id(`group-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
-        .border_t(1).border_color(t.border).bg(t.background).cursor_pointer().hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
-        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
-        .child(g.stage === "working" ? icon("ring", 9, color).spin(900) : g.stage === "paused" ? icon("pause-dot", 9, color) : div().w(7).h(7).flex_none().rounded_full().bg(color))
-        .child(div().flex_1().min_w(0).truncate().text_size(S().label).font_semibold().text_color(SETTLED.has(g.stage) ? t.muted : color)
-          .child(STAGE_WORDS[g.stage]))
-        .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(t.selected)
-          .text_size(S().label).text_color(t.foreground).child(String(g.calls.length))));
-      if (!folded) box.children(g.calls.map((c) => this.renderCall(t, c, false)));
-    }
-    // Cards no helper stands for: queued ones waiting on their dependencies, and any the main agent
-    // works on itself. Otherwise they would only be a number in the cards line.
-    const away = cardView(cards, r.calls.map((c) => c.call)).undispatched;
-    if (away.length) {
-      const key = `${r.dir}|undispatched`, folded = this.groupFold.get(key) ?? false;
-      box.child(h_flex().id(`group-${key}`).h(28).flex_none().pl(14).pr(10).gap(7).items_center()
-        .border_t(1).border_color(t.border).bg(t.background).cursor_pointer().hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
-        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
-        .child(div().w(7).h(7).flex_none().rounded_full().border_1().border_color(t.muted))
-        .child(div().flex_1().min_w(0).truncate().text_size(S().label).font_semibold().text_color(t.muted).child("还没有子 agent"))
-        .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(t.selected)
-          .text_size(S().label).text_color(t.foreground).child(String(away.length))));
-      if (!folded) box.children(away.map((k) => v_flex().id(`card-${r.dir}|${k.id}`).flex_none().pl(28).pr(10).py(5).gap(2).bg(t.surface)
+  renderExecutor(t, key) {
+    if (!key) return null;
+    const program = this.programs.find((p) => p.key === key) ?? (agents() ?? []).find((a) => a.program?.key === key)?.program;
+    const glyph = !program?.icon ? div().text_size(S().label).text_color(t.muted).child(key)
+      : program.tint ? svg(program.icon).size(13).flex_none().text_color(t.muted) : image(program.icon).size(13).flex_none();
+    return h_flex().flex_none().gap(4).items_center().tooltip(program?.name ?? key).child(glyph);
+  }
+
+  renderTask(t, topic, task) {
+    const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
+    const folded = this.fold.get(key) ?? true;
+    const queued = group === "queued", request = requestState(task);
+    const terminated = r?.control?.state === "stopped" || r?.control?.retired;
+    const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
+    const stage = r?.control?.state === "paused" ? "已暂停" : r?.control?.state === "stopping" ? "终止中"
+      : r?.control?.state === "handoff" ? "交接中" : terminated ? "已终止"
+      : group === "done" ? "已完成" : queued ? request === "delivered" ? "已送达" : request ? "已排队" : "草稿"
+      : group === "you" ? GROUP_WORDS.you : stages.length && runStage(stages) !== "ended" ? STAGE_WORDS[runStage(stages)] : "进行中";
+    const working = request === "queued" && task.request?.target === "owner" && topic.owner?.terminal
+      ? this.topics.flatMap((p) => p.owner?.terminal === topic.owner.terminal
+        ? p.tasks.filter((x) => x.runDir && !x.finishedAt && !this.states[x.runDir]?.finished && x.run?.control?.state !== "stopped" && !x.run?.control?.retired) : []) : [];
+    const executor = this.renderExecutor(t, task.agent ?? task.request?.agent ?? (task.request?.target === "owner" ? topic.owner?.agent : null));
+    const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface)
+      .child(v_flex().id(`task-${key}`).px(12).py(7).gap(3).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })
         .child(h_flex().gap(7).items_center()
-          .child(div().w(7).h(7).flex_none().rounded_full().border_1().border_color(t.muted))
-          .child(div().flex_none().text_size(S().body).text_color(t.foreground).child(k.id))
-          .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
-          .child(stageTagText(t, CARD_WORDS[k.status] ?? k.status, k.status === "pending" ? t.muted : t.accent)))
-        .when(Boolean(k.waits.length || k.note), (el) => el.child(div().pl(14).text_size(S().label).text_color(t.muted)
-          .child(k.waits.length ? `等 ${k.waits.join("、")}` : k.note)))));
+          .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+          .child(pill(t, task.kind))
+          .child(div().flex_1().min_w(0).truncate().text_size(S().small).font_semibold().child(task.title)))
+        .child(h_flex().pl(17).gap(7).items_center().flex_wrap().text_size(S().label).text_color(t.muted)
+          .child(div().flex_none().child(task.id))
+          .when(Boolean(executor), (el) => el.child(executor))
+          .child(div().flex_none().text_color(group === "you" ? t.ansi3 : t.muted).child(stage))
+          .when(Boolean(task.parentTask), (el) => el.child(div().min_w(0).truncate().child(`来自 ${task.parentTask} ${topic.tasks.find((p) => p.id === task.parentTask)?.title ?? ""}`)))));
+    if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => `${x.id} ${x.title}`).join("、")}`).px(28).pb(5));
+    if (folded) return box;
+    if (task.detail) box.child(div().px(28).py(5).text_size(S().small).text_color(t.muted).child(task.detail));
+    if (task.dependsOn.length) box.child(note(t, `依赖：${task.dependsOn.join("、")}`).px(28).py(3));
+    if (queued && !topic.archived && !topic.deleting) {
+      box.child(h_flex().pl(28).pr(10).py(6).gap(6).flex_wrap()
+        .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
+        .child(action(`remove-${key}`, "删除", "trash", t, (_e, cx) => this.command(cx, topic, "task-rm", ["--task", task.id]), { color: t.ansi1 }))
+        .when(!topic.pausedAt, (el) => el.child(action(`dispatch-${key}`, request ? "改派…" : "派发…", "send", t,
+          () => this.openForm("dispatch", topic, { task }), { color: t.accent })))
+        .when(Boolean(request), (el) => el.child(action(`cancel-${key}`, "撤销", "close", t,
+          (_e, cx) => this.command(cx, topic, "request", ["--task", task.id, "--cancel"]))))
+        .when(request === "delivered" && !topic.pausedAt, (el) => el.child(action(`resend-${key}`, "重发", "refresh", t,
+          (_e, cx) => this.command(cx, topic, "request", ["--task", task.id, "--resend"])))));
     }
+    if (r) {
+      box.child(h_flex().pl(28).pr(10).py(6).gap(6).items_center()
+        .child(note(t, "控制这个 Task")).children(this.controlButtons(t, r, topic)));
+      const control = this.renderControl(t, r), take = group !== "done" ? this.renderTakeover(t, r) : null;
+      if (control) box.child(control);
+      if (take) box.child(take);
+      box.children(r.calls.map((c) => this.renderCall(t, c)));
+      const away = cardView(this.stats.runs[r.dir], r.calls.map((c) => c.call)).undispatched;
+      if (away.length) box.child(v_flex().pl(28).pr(10).py(6).gap(4)
+        .child(note(t, "内部进度"))
+        .children(away.map((k) => h_flex().id(`card-${r.dir}|${k.id}`).gap(7).items_center()
+          .child(div().flex_none().text_size(S().label).child(k.id))
+          .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
+          .child(stageTagText(t, CARD_WORDS[k.status] ?? k.status, t.muted))
+          .tooltip(k.waits.length ? `等 ${k.waits.join("、")}` : k.note ?? ""))));
+    }
+    if (task.summaryLine) box.child(note(t, task.summaryLine, t.done).px(28).py(5));
+    if (task.artifact) box.child(note(t, `产物：${task.artifact}`).px(28).pb(5));
     return box;
+  }
+
+  renderBacklog(t, topic) {
+    const key = `backlog|${topic.id}`, folded = this.groupFold.get(key) ?? true;
+    const editable = !topic.archived && !topic.deleting;
+    const box = v_flex().flex_none().border_t(1).border_color(t.border)
+      .child(h_flex().id(key).min_h(30).px(12).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
+        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+        .child(div().flex_1().text_size(S().label).text_color(t.muted).child(`backlog · ${topic.backlog.length} 条`))
+        .when(editable, (el) => el.child(action(`add-${key}`, "+ 添加", "task", t,
+          (_e, cx) => { cx.stop_propagation(); this.openForm("backlog", topic); }))));
+    if (folded) return box;
+    box.children(topic.backlog.map((item) => {
+      const state = item.status === "refining" ? "细化中" : item.status === "refined" ? "已细化" : "待细化";
+      const req = requestState(item);
+      return v_flex().id(`${key}|${item.id}`).px(12).py(7).gap(5)
+        .child(h_flex().gap(7).items_center()
+          .child(div().flex_1().min_w(0).truncate().text_size(S().small).child(item.text.split("\n")[0])
+            .when(editable, (el) => el.cursor_pointer().hover((s) => s.text_color(t.accent))
+              .on_click(() => this.openForm("backlog", topic, { item }))).tooltip(item.text))
+          .child(pill(t, state, item.status === "refining" ? t.accent : t.muted)))
+        .when(Boolean(req), (el) => el.child(note(t, req === "delivered" ? "已送达" : "已排队")))
+        .when(Boolean(item.taskIds.length), (el) => el.child(note(t, `已生成 Task：${item.taskIds.join("、")}`)))
+        .when(editable, (el) => el.child(h_flex().gap(6).flex_wrap()
+          .child(action(`edit-${key}-${item.id}`, "编辑", "task", t, () => this.openForm("backlog", topic, { item })))
+          .child(action(`remove-${key}-${item.id}`, "删除", "trash", t,
+            (_e, cx) => this.command(cx, topic, "backlog-rm", ["--item", item.id]), { color: t.ansi1 }))
+          .when(!topic.pausedAt && item.status !== "refined", (el) => el.child(action(`refine-${key}-${item.id}`, req ? "重新细化" : "细化", "send", t,
+            (_e, cx) => this.command(cx, topic, "request", ["--items", item.id, "--type", "refine", "--target", "owner"]), { color: t.accent })))
+          .when(Boolean(req), (el) => el.child(action(`cancel-${key}-${item.id}`, "撤销", "close", t,
+            (_e, cx) => this.command(cx, topic, "request", ["--items", item.id, "--type", "refine", "--cancel"]))))));
+    }));
+    if (!topic.backlog.length) box.child(note(t, "先记下想法，再交给主 agent 细化成 Task 草稿。").px(12).py(8));
+    return box;
+  }
+
+  topicControlButtons(t, topic) {
+    if (topic.archived || topic.deleting) return [];
+    const unfinished = topic.tasks.some((task) => task.runDir && taskGroup(task, topic) !== "done"
+      && !["stopped", "stopping"].includes(task.run?.control?.state) && !task.run?.control?.retired);
+    const ops = topic.pausedAt ? ["resume", "stop"] : unfinished ? ["pause", "stop"] : [];
+    return ops.map((op) => {
+      const color = op === "stop" ? t.ansi1 : op === "resume" ? t.accent : t.foreground;
+      return h_flex().id(`${op}-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6).bg(color)
+        .tooltip(`${{ pause: "暂停", resume: "继续", stop: "终止" }[op]}整个 Topic`).cursor_pointer().hover((s) => s.opacity(0.82))
+        .on_mouse_down("left", stop).on_click((_e, cx) => {
+          cx.stop_propagation();
+          this.openTopicControl(topic, op);
+        }).child(icon(op === "stop" ? "square" : op === "resume" ? "play-fill" : "pause-dot", 12, t.background));
+    });
+  }
+
+  openTopicControl(topic, op) {
+    const tasks = topic.tasks.filter((task) => op === "delete" || task.runDir).map((task) => ({ id: task.id, title: task.title, run: task.runDir }));
+    const calls = topic.runs.flatMap((r) => r.calls);
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 520, height: op === "delete" ? 480 : 430,
+      props: { role: op === "delete" ? "delete" : "control", op, topic: this.topicProps(topic), tasks,
+        repo: this.topicRepo(topic), hd: this.topicHD(topic), on: this.ctx?.on ?? null,
+        run: topic.implicit ? this.topicProps(topic).runs[0] : null,
+        helpers: calls.length, open: calls.filter((c) => c.state === "live").map((c) => c.name),
+        working: calls.filter((c) => c.state === "live" && c.status === "working").map((c) => c.name),
+        held: calls.filter((c) => c.held && c.state === "live").map((c) => c.name) } });
   }
 
   // The run's Pause / Resume / Stop, icons only, at the end of its head. Each opens a "control"
   // dialog to confirm; hd_dispatch.py does the work.
-  controlButtons(t, r) {
+  controlButtons(t, r, topic = null) {
     const confirm = (op) => (_e, cx) => {
       cx.stop_propagation();
       const working = r.calls.filter((c) => c.state === "live" && c.status === "working").map((c) => c.name);
@@ -568,7 +799,7 @@ export default class Dispatch extends View {
     // Solid chips, the icon in the panel's background color: a filled pause on `foreground`, a filled
     // play on `accent`, a hollow square on `ansi1`.
     const look = { pause: ["pause-dot", "暂停运行", t.foreground], resume: ["play-fill", "继续运行", t.accent], stop: ["square", "终止运行", t.ansi1] };
-    const ops = controlOps(r);
+    const ops = controlOps(r).filter((op) => !(topic?.pausedAt && op === "resume") && !topic?.archived && !topic?.deleting);
     if (!ops.length) return [];
     return [h_flex().flex_none().gap(6).items_center().children(ops.map((op) => {
       const [name, tip, color] = look[op];
@@ -578,39 +809,29 @@ export default class Dispatch extends View {
     }))];
   }
 
-  // A settled run's Archive (hides it from the panel; its files stay), or an archived one's Unarchive.
-  // Writes or removes <run>/archived at once, no dialog: it is undone with one click.
-  archiveButton(t, r) {
-    const cards = this.stats.runs[r.dir]?.status;
-    const op = archivedAway(r, cards) ? "unarchive" : canArchive(r, cards) ? "archive" : null;
+  archiveButton(t, topic) {
+    const stable = !topic.pausedAt && !topic.deleting && topic.tasks.every((task) => !task.runDir || taskGroup(task, topic) === "done")
+      && topic.runs.every((r) => !this.itemsOf(r).some((x) => !x.answer));
+    const op = topic.archived ? "unarchive" : stable ? "archive" : null;
     if (!op) return [];
     const tip = op === "archive" ? "归档：从面板上隐藏（文件保留）" : "取消归档：放回列表";
-    return [h_flex().id(`${op}-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
+    return [h_flex().id(`${op}-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6)
       .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(tip).on_mouse_down("left", stop)
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        const files = io(this.ctx?.on ?? null);
-        r.archived = op === "archive" ? Date.now() : null;
-        cx.notify();
-        cx.spawn(async (cx) => {
-          const res = await archiveRun(files, r, op);
-          if (!res.ok) this.error = `${op} ${r.id}: ${res.error}`;
-          later(cx, (cx) => this.refresh(cx));
-        });
+        this.command(cx, topic, op);
       })
       .child(icon(op, 13, t.muted)),
-    ...(op === "unarchive" ? [this.deleteButton(t, r)] : [])];
+    ...(op === "unarchive" ? [this.deleteButton(t, topic)] : [])];
   }
 
   // An archived run's Delete, beside Unarchive: a "delete" dialog to confirm, then hd_dispatch.py delete.
-  deleteButton(t, r) {
-    return h_flex().id(`delete-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6)
-      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("删除：删掉这个运行和它留下的所有记录").on_mouse_down("left", stop)
+  deleteButton(t, topic) {
+    return h_flex().id(`delete-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("删除 Topic 和它的全部运行记录").on_mouse_down("left", stop)
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        const open = r.calls.filter((c) => c.state === "live").map((c) => c.name);
-        openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 500, height: 360,
-          props: { role: "delete", on: this.ctx?.on ?? null, run: { dir: r.dir, hd: r.hd, id: r.id }, helpers: r.calls.length, open } });
+        this.openTopicControl(topic, "delete");
       })
       .child(icon("trash", 13, t.ansi1));
   }
@@ -693,13 +914,13 @@ export default class Dispatch extends View {
         reportPath: call?.reportPath ?? null, reportBackup: call?.agentDir ? `${call.agentDir}/report-r${call.round}.json` : null } });
   }
 
-  renderAsks(t, r) {
-    const items = this.itemsOf(r);
+  renderAsks(t, topic) {
+    const items = topic.tasks.flatMap((task) => task.run ? this.itemsOf(task.run).map((x) => ({ task, r: task.run, x })) : []);
     if (!items.length) return null;
-    const open = items.filter((x) => !x.answer).length, z = S();
-    const key = `asks|${r.dir}`, folded = this.groupFold.get(key) ?? false;
+    const open = items.filter(({ x }) => !x.answer).length, z = S();
+    const key = `asks|${topic.id}`, folded = this.groupFold.get(key) ?? false;
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.background)
-      .child(h_flex().id(`asks-${r.dir}`).h(28).flex_none().pl(12).pr(10).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+      .child(h_flex().id(`asks-${topic.id}`).h(28).flex_none().pl(12).pr(10).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
         .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
         .child(icon("decide", 11, open ? t.ansi3 : t.muted))
@@ -708,7 +929,7 @@ export default class Dispatch extends View {
         .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(open ? t.ansi3 : t.selected)
           .text_size(z.label).text_color(open ? t.background : t.foreground).child(String(open || items.length))));
     if (folded) return box;
-    box.children(items.map((x) => {
+    box.children(items.map(({ task, r, x }) => {
       const done = Boolean(x.answer), color = done ? t.muted : t.foreground;
       return v_flex().id(`item-${r.dir}|${x.id}`).flex_none().pl(28).pr(10).py(5).gap(2).cursor_pointer().hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stop).on_click(() => this.openDecide(r, x))
@@ -718,18 +939,13 @@ export default class Dispatch extends View {
           .when(Boolean(x.card), (el) => el.child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected)
             .font_family(mono()).text_size(z.label - 1.5).text_color(t.muted).child(x.card)))
           .when(Boolean(x.asked), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(ago(x.asked)))))
+        .child(div().pl(18).truncate().text_size(z.label).text_color(t.accent).child(`Task ${task.id} · ${task.title}`))
         .child(div().pl(18).truncate().text_size(z.label).text_color(t.muted).child(itemLine(x)));
     }));
     return box;
   }
 
-  // The run's background tasks, all the main agent's: a lighter list between the spend and the helpers.
-  tasksOf(r) {
-    const all = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
-    return all[r.dir] ?? [];
-  }
-
-  renderBg(t, r, bg) {
+  renderBg(t, topic, bg) {
     const z = S(), on = this.ctx?.on ?? null;
     const kindIcon = { shell: "terminal", monitor: "eye", agent: "bot" };
     const statusColor = { running: t.working, completed: t.muted, failed: t.ansi1, killed: t.ansi3, stopped: t.ansi3, lost: t.muted };
@@ -737,7 +953,7 @@ export default class Dispatch extends View {
       const running = task.status === "running", age = fmtDur((task.ended || Date.now()) - (task.started || Date.now()));
       const word = running ? age : task.status === "completed" ? `已完成 · ${age}` : ({ failed: "失败", killed: "已停止", stopped: "已停止" }[task.status] ?? task.status);
       const sub = running ? (task.event || task.tail?.[task.tail.length - 1] || "") : (task.status === "completed" ? "" : bgSummary(task));
-      return v_flex().id(`bg-${task.id}`).flex_none().pl(28).pr(10).py(4).gap(1)
+      return v_flex().id(`bg-${topic.id}|${task.session}|${task.id}`).flex_none().pl(28).pr(10).py(4).gap(1)
         // An output file (Claude Code) opens live while running, else its end; a log (Codex) is shown as is.
         .when(Boolean(task.output || task.log), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => running && task.kind !== "agent" && task.output
@@ -761,15 +977,15 @@ export default class Dispatch extends View {
     const link = (id, text, fn) => div().id(id).flex_none().text_size(z.label).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { fn(); cx.notify(); }).child(text);
     if (bg.hidden || bg.more) box.child(h_flex().pl(28).pr(10).py(3).gap(12).items_center()
-      .when(bg.hidden > 0, (el) => el.child(link(`bg-more-${r.dir}`, `更早的 ${bg.hidden} 个 · 再显示 ${Math.min(BG_MORE, bg.hidden)} 个`,
-        () => this.bgMore.set(r.dir, bg.more + BG_MORE))))
-      .when(bg.more > 0, (el) => el.child(link(`bg-less-${r.dir}`, "收起", () => this.bgMore.delete(r.dir)))));
+      .when(bg.hidden > 0, (el) => el.child(link(`bg-more-${topic.id}`, `更早的 ${bg.hidden} 个 · 再显示 ${Math.min(BG_MORE, bg.hidden)} 个`,
+        () => this.bgMore.set(topic.id, bg.more + BG_MORE))))
+      .when(bg.more > 0, (el) => el.child(link(`bg-less-${topic.id}`, "收起", () => this.bgMore.delete(topic.id)))));
     return box;
   }
 
   // What a run has spent so far, under its head: time, commands, patched files, tokens split into
   // cached / new input / output, and for dev runs how many cards are merged.
-  renderStats(t, r, s) {
+  renderStats(t, topic, s) {
     const z = S();
     const cell = (value, label) => v_flex().flex_1().min_w(0)
       .child(div().truncate().text_size(z.body).font_semibold().child(value))
@@ -782,7 +998,7 @@ export default class Dispatch extends View {
       .child(div().text_size(z.small).font_semibold().child(value));
 
     const cells = [
-      s.elapsed != null && cell(fmtDur(s.elapsed), r.live ? "已用时" : "用时"),
+      s.elapsed != null && cell(fmtDur(s.elapsed), this.topicActive(topic) ? "已用时" : "用时"),
       s.known && cell(String(s.commands), "命令"),
       s.known && cell(String(s.files), "改动文件"),
     ].filter(Boolean);
@@ -791,7 +1007,8 @@ export default class Dispatch extends View {
     if (s.cards) {
       // Merged out of the cards still meant to be merged: parked ones are left out of the count (they show
       // in the key), review calls are not cards at all (stats.js).
-      const counts = cardCounts(s.cards), colors = CARD_COLORS(t), v = cardView(s.cards, r.calls.map((c) => c.call));
+      const counts = cardCounts(s.cards), colors = CARD_COLORS(t);
+      const v = cardView(s.cards, topic.runs.flatMap((r) => r.calls.map((c) => `${r.dir}#${c.call}`)));
       box.child(v_flex().gap(5)
         .child(line("卡片", `已合并 ${v.merged}/${v.goal}`))
         .child(bar(counts.map(([st, n]) => [n, colors[st] ?? t.muted]), v.total))
@@ -945,16 +1162,15 @@ export default class Dispatch extends View {
   }
 
   renderFooter(t) {
-    const all = this.split().mine, runs = all.filter((r) => !archivedAway(r, this.stats.runs[r.dir]?.status)), archived = all.length - runs.length;
-    const live = runs.filter((r) => r.live).length;
-    const helpers = runs.reduce((n, r) => n + r.calls.filter((c) => c.state === "live").length, 0);
-    const waiting = runs.reduce((n, r) => n + this.itemsOf(r).filter((x) => !x.answer).length, 0);
+    const topics = this.split().mine.filter((topic) => !topic.archived);
+    const live = topics.filter((topic) => this.topicActive(topic) && !topic.pausedAt).length;
+    const calls = new Map(topics.flatMap((topic) => topic.runs.flatMap((r) => r.calls.map((c) => [c.key, c]))));
+    const helpers = [...calls.values()].filter((c) => c.state === "live" && c.status === "working").length;
+    const waiting = topics.reduce((n, topic) => n + topic.runs.reduce((n, r) => n + this.itemsOf(r).filter((x) => !x.answer).length, 0), 0);
+    const text = `${topics.length} 个 Topic · ${live} 个进行中 · ${helpers} 个 agent 在干活 · ${waiting} 项等你`;
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
-      .child(div().flex_1().truncate().child(runs.length
-        ? `${runs.length} 个运行 · ${live} 个进行中 · ${helpers} 个子 agent 在线${archived ? ` · 已归档 ${archived} 个` : ""}`
-        : archived ? `已归档 ${archived} 个` : "没有运行"))
-      .when(waiting > 0, (el) => el.child(div().flex_none().pl(8).text_color(t.ansi3).font_semibold().child(`${waiting} 项等你处理`)))
+      .child(div().flex_1().min_w(0).truncate().tooltip(text).child(text))
       .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().text_color(t.ansi3).child(this.statsError)));
   }
 
@@ -1082,8 +1298,113 @@ export default class Dispatch extends View {
     ], close);
   }
 
+  renderForm(t, p, close) {
+    const role = p.role, topic = p.topic, task = p.task;
+    const title = this.titleBox.value(), detail = this.detailBox.value(), text = this.backlogBox.value();
+    const owner = (agents() ?? []).find((a) => a.address === topic?.owner?.terminal);
+    const ownerLive = Boolean(owner), ownerName = owner?.program?.name ?? agentLabel(topic?.owner?.agent) ?? "主 agent";
+    const installed = this.programs.filter((program) => program.installed && program.run?.length);
+    const fallback = installed.find((program) => program.key === topic?.owner?.agent) ?? installed[0];
+    const picked = this.pick === "owner" && ownerLive ? "owner" : installed.some((program) => program.key === this.pick) ? this.pick
+      : ownerLive && this.pick == null ? "owner" : fallback?.key ?? null;
+    const program = installed.find((program) => program.key === picked);
+    const editor = (label, id, box, height) => v_flex().flex_none().gap(5)
+      .child(note(t, label, t.foreground))
+      .child(div().id(id).on_mouse_down("left", stop).child(Textarea.new(box).w_full().h(height).px(10).py(8).rounded(8)
+        .border_1().border_color(t.input).bg(t.background).text_size(S().body).text_color(t.foreground)));
+    const kinds = v_flex().flex_none().gap(5).child(note(t, "职责", t.foreground))
+      .child(h_flex().gap(5).flex_wrap().children(TASK_KINDS.map((kind) => h_flex().id(`kind-${kind}`).h(26).px(9).items_center().rounded(5)
+        .border_1().border_color(this.kind === kind ? t.accent : t.border).bg(this.kind === kind ? t.selected : t.background)
+        .text_size(S().small).text_color(this.kind === kind ? t.accent : t.muted).cursor_pointer()
+        .on_click((_e, cx) => { this.kind = kind; cx.notify(); }).child(kind))));
+    const choice = (key, label, subtitle) => h_flex().id(`executor-${key}`).flex_none().px(10).py(7).gap(8).items_center().rounded(6).border_1()
+      .border_color(picked === key ? t.accent : t.border).bg(picked === key ? t.selected : t.background).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.pick = key; cx.notify(); })
+      .child(div().size(10).flex_none().rounded_full().border(picked === key ? 3 : 1).border_color(picked === key ? t.accent : t.muted))
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(div().text_size(S().small).child(label))
+        .child(div().text_size(S().label).text_color(t.muted).child(subtitle)));
+    const body = v_flex().id(`${role}-fields`).flex_1().min_h(0).overflow_y_scrollbar().gap(12);
+    if (role === "newtopic") {
+      body.child(editor("Topic 标题", "topic-title", this.titleBox, 54))
+        .child(note(t, p.owner ? `主 agent：${p.ownerName ?? p.owner}（${p.owner}）` : "当前空间没有聚焦的主 agent，稍后可派发到新标签页。"));
+    } else if (role === "backlog") {
+      body.child(editor("backlog 内容", "backlog-text", this.backlogBox, 160));
+      if (p.item?.request) body.child(note(t, "修改内容会撤销当前细化请求，条目回到待细化。", t.ansi3));
+    } else {
+      if (role === "task") body.child(editor("Task 标题", "task-title", this.titleBox, 48));
+      else body.child(note(t, `${task.id} · ${task.title}`, t.foreground));
+      body.child(kinds).child(editor("说明", "task-detail", this.detailBox, role === "dispatch" ? 100 : 130));
+      if (role === "task" && task?.request) body.child(note(t, "修改职责或说明会撤销当前派发请求。", t.ansi3));
+      if (role === "dispatch") {
+        body.child(note(t, "执行者", t.foreground));
+        if (ownerLive) body.child(choice("owner", `当前主 agent（${ownerName}）`, "加入队列，等主 agent 空闲时自动送达"));
+        else body.child(note(t, "主 agent 已离线 · 默认新开标签页。", t.ansi3));
+        body.children(installed.map((program) => choice(program.key, `${program.name} · 新标签页`, "在当前空间启动，并带上这个 Task 的派发消息")));
+        if (this.programsBusy) body.child(note(t, "正在查找已安装的 agent…"));
+        if (!this.programsBusy && !installed.length) body.child(note(t, "没有找到可在新标签页启动的 agent。"));
+        if (this.programsError) body.child(note(t, this.programsError, t.ansi3));
+      }
+    }
+    const ready = role === "backlog" ? Boolean(text.trim()) : role === "dispatch" ? Boolean(picked) && !topic?.pausedAt
+      : Boolean(title.trim());
+    const submit = (_e, cx) => {
+      if (this.sending || !ready) return;
+      this.sending = true; this.failed = null; cx.notify();
+      const files = io(p.on ?? null);
+      cx.spawn(async (cx) => {
+        try {
+          const invoke = async (op, args = []) => {
+            const res = await topicCmd(files, p.hd, ["topic", op, "--repo", p.repo, ...(topic ? ["--topic", topic.id] : []), ...args]);
+            if (!res.ok) throw new Error(commandError(res.out));
+            return res.out;
+          };
+          if (role === "newtopic") {
+            await invoke("init", ["--title", title, ...(p.owner ? ["--owner", p.owner] : [])]);
+          } else if (role === "backlog") {
+            await invoke(p.item ? "backlog-edit" : "backlog-add", [...(p.item ? ["--item", p.item.id] : []), "--text", text]);
+          } else if (role === "task") {
+            await invoke(task ? "task-edit" : "task-add", [...(task ? ["--task", task.id] : []), "--title", title, "--kind", this.kind, "--detail", detail]);
+          } else {
+            if (this.kind !== task.kind || detail !== task.detail) await invoke("task-edit", ["--task", task.id, "--kind", this.kind, "--detail", detail]);
+            const agent = picked === "owner" ? owner?.program?.key ?? topic.owner?.agent : program.key;
+            const out = await invoke("request", ["--task", task.id, "--type", "dispatch", "--target", picked === "owner" ? "owner" : "new_tab",
+              ...(agent ? ["--agent", agent] : [])]);
+            if (picked !== "owner") {
+              const raw = outputValue(out, "MESSAGE");
+              let message;
+              try { message = JSON.parse(raw); } catch { throw new Error("派发请求已保存，但返回的 MESSAGE 无法读取。"); }
+              if (typeof message !== "string" || !message) throw new Error("派发请求已保存，但没有返回首条消息。");
+              run("tab.new", { space: p.space, folder: p.repo, argv: program.run, task: message });
+            }
+          }
+          close();
+        } catch (e) {
+          this.failed = String(e?.message ?? e); this.sending = false; cx.notify();
+        }
+      });
+    };
+    const label = role === "newtopic" ? "新建 Topic" : role === "dispatch" ? picked === "owner" ? "加入队列" : "新开标签页并派发"
+      : role === "backlog" ? p.item ? "保存" : "添加" : task ? "保存草稿" : "添加草稿";
+    return dialogFrame(t, role, role === "dispatch" ? "派发 Task" : role === "task" ? task ? "编辑 Task 草稿" : "新建 Task 草稿"
+      : role === "backlog" ? p.item ? "编辑 backlog" : "添加 backlog" : "新建 Topic",
+    [body, this.failed && note(t, this.failed, t.ansi1)], [
+      dialogButton("cancel", "取消", t, close),
+      dialogButton("go", this.sending ? "处理中…" : label, t, submit, "primary", ready && !this.sending),
+    ], close);
+  }
+
+  affectedTasks(t, p) {
+    if (!p.topic) return null;
+    return v_flex().id("affected-tasks").flex_1().min_h(40).overflow_y_scrollbar().gap(4)
+      .child(note(t, `受影响的 Task（${p.tasks?.length ?? 0} 个）`, t.foreground))
+      .children((p.tasks ?? []).map((task) => note(t, `${task.id} · ${task.title}`).tooltip(task.run ?? "草稿")))
+      .when(!p.tasks?.length, (el) => el.child(note(t, p.op === "delete" ? "没有 Task。" : "没有已绑定运行的 Task。")));
+  }
+
   renderDialog() {
     const t = theme(), p = blockProps() ?? {}, close = () => closeOverlay(p.overlay);
+    if (["dispatch", "task", "backlog", "newtopic"].includes(p.role)) return this.renderForm(t, p, close);
     if (p.role === "text") {
       const md = p.markdown ?? null, raw = !md || this.raw || md.length > MARKDOWN_LIMIT;
       const seg = (id, label, on, value) => h_flex().id(id).h(24).px(10).items_center().rounded(5).text_size(S().small)
@@ -1177,26 +1498,43 @@ export default class Dispatch extends View {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();
         cx.spawn(async (cx) => {
-          const r = await controlRun(io(p.on ?? null), run, "delete").catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
+          const r = await (p.topic && !p.topic.implicit
+            ? topicCmd(io(p.on ?? null), p.hd, ["topic", "delete", "--repo", p.repo, "--topic", p.topic.id]).then((res) => ({ ok: res.ok, text: res.out }))
+            : controlRun(io(p.on ?? null), run, "delete")).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
           if (r.ok && /DELETED=/.test(r.text)) { close(); return; }
           this.sending = false;
           this.failed = (r.text || "hd_dispatch.py 运行失败").split("\n").filter((l) => !/^FAILURE=/.test(l)).slice(-2).join(" ");
           cx.notify();
         });
       };
-      return dialogFrame(t, "delete", `删除 ${run.id}？`, [
-        note(t, `删掉运行目录（${p.helpers} 个子 agent 的 meta.json、事件、任务文件、屏幕、保留的回报、提问和回答、交接包），$CC_HD_HOME 下的回报和进度说明，它的 worktree 快照（refs/cc-dispatch/${baseName(run.dir)}/*），面板给它存的花费和任务缓存，以及复盘台账里它的那一条。`, t.foreground),
+      return dialogFrame(t, "delete", `删除 ${p.topic?.title ?? run.id}？`, [
+        note(t, p.topic ? `删除整个 Topic、Task、backlog 和摘要，以及下列 Task 的运行记录（${p.helpers} 个子 agent 的回报、事件、提问与回答、交接包和缓存）。`
+          : `删掉运行目录（${p.helpers} 个子 agent 的 meta.json、事件、任务文件、屏幕、保留的回报、提问和回答、交接包）、回报、进度说明、worktree 快照、面板缓存和复盘台账。`, t.foreground),
+        this.affectedTasks(t, p),
         p.open?.length ? note(t, `关掉还开着的终端：${p.open.join("、")}。`, t.foreground) : null,
         note(t, "代码保留：不动 worktree 和 cc/<run>/* 分支，也不动 Codex 和 Claude Code 自己的session 日志。"),
         note(t, "删了就没法恢复。", t.ansi1),
         this.failed && note(t, this.failed, t.ansi1),
       ], [dialogButton("cancel", "取消", t, close),
-        dialogButton("go", this.sending ? "正在删除…" : "删除运行", t, go, "danger", !this.sending)], close);
+        dialogButton("go", this.sending ? "正在删除…" : p.topic ? "删除 Topic" : "删除运行", t, go, "danger", !this.sending)], close);
     }
     if (p.role === "control") {
       const run = p.run ?? {}, op = p.op;
       const list = (names) => names?.length ? names.join("、") : "无";
-      const text = {
+      const text = p.topic ? {
+        pause: [
+          "暂停整个 Topic，并挂起下列 Task 中正在工作的子 agent；已有回报和 session 保留。",
+          "Topic 暂停期间不能继续单个 Task，也不能派发新的 Task。继续 Topic 后，仅恢复这次暂停的运行。",
+        ],
+        resume: [
+          "继续整个 Topic，恢复因 Topic 暂停而挂起的 Task；原先单独暂停的 Task 保持暂停。",
+          "队列中的请求会在主 agent 空闲时自动送达。",
+        ],
+        stop: [
+          "终止整个 Topic：撤销尚未确认的 Task 和 backlog 请求，并终止下列尚未结束的 Task。",
+          "子 agent 最多有 3 分钟记录进度，然后关闭终端；worktree 和运行记录保留。各 Task 的总结写入 stop.md。",
+        ],
+      }[op] ?? [] : {
         pause: [
           `给正在干活的子 agent（${list(p.working)}）按下停止键。它们的 Codex session 会保留，继续时从停下的地方接着做。`,
           "已经做完这一轮的子 agent 保持原样。继续之前，主 agent 不能派发或发消息，它的等待也不会报回任何东西。",
@@ -1215,13 +1553,16 @@ export default class Dispatch extends View {
             : "主 agent 不在运行，不会通知任何人；总结在 stop.md 里。",
         ],
       }[op] ?? [];
-      const title = { pause: `暂停 ${run.id}？`, resume: `继续 ${run.id}？`, stop: `终止 ${run.id}？`, retire: `收尾 ${run.id}？` }[op] ?? "";
-      const label = { pause: "暂停", resume: "继续", stop: "终止运行", retire: "收尾" }[op];
+      const name = p.topic?.title ?? run.id;
+      const title = { pause: `暂停 ${name}？`, resume: `继续 ${name}？`, stop: `终止 ${name}？`, retire: `收尾 ${name}？` }[op] ?? "";
+      const label = { pause: "暂停", resume: "继续", stop: p.topic ? "终止 Topic" : "终止运行", retire: "收尾" }[op];
       const go = (_e, cx) => {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();
         cx.spawn(async (cx) => {
-          const r = await controlRun(io(p.on ?? null), run, op).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
+          const r = await (p.topic && !p.topic.implicit
+            ? topicCmd(io(p.on ?? null), p.hd, ["topic", op, "--repo", p.repo, "--topic", p.topic.id]).then((res) => ({ ok: res.ok, text: res.out }))
+            : controlRun(io(p.on ?? null), run, op)).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
           if (r.ok && !/RUN_CONTROL=|RUN_STOPPING/.test(r.text)) { close(); return; }
           this.sending = false;
           this.failed = r.ok ? `什么都没做：${r.text.split("\n").pop()}` : (r.text || "hd_dispatch.py 运行失败").split("\n").slice(-2).join(" ");
@@ -1230,6 +1571,7 @@ export default class Dispatch extends View {
       };
       return dialogFrame(t, "control", title, [
         ...text.map((x, i) => note(t, x, i === 0 ? t.foreground : t.muted)),
+        this.affectedTasks(t, p),
         this.failed && note(t, this.failed, t.ansi1),
       ], [dialogButton("cancel", "取消", t, close),
         dialogButton("go", this.sending ? "处理中…" : label, t, go, op === "stop" ? "danger" : "primary", !this.sending)], close);

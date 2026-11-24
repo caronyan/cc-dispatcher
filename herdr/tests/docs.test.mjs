@@ -73,10 +73,16 @@ test("taskDoc groups events and task files by round, newest first", () => {
 test("panel text keeps technical nouns in English", async () => {
   const { readFileSync, readdirSync } = await import("node:fs");
   const dir = new URL("../cc-dispatch/mods/cc-dispatch/", import.meta.url);
-  // 面板文案里这些技术名词保留英文：worktree、session。新加的翻译名词也写进这里。
-  const banned = { "工作树": "worktree", "会话": "session" };
+  // 面板文案里的技术名词保留英文，新交互使用中文说明。
+  const banned = { "工作树": "worktree", "会话": "session", "令牌": "token" };
   const hits = readdirSync(dir).filter((f) => f.endsWith(".js")).flatMap((f) =>
     readFileSync(new URL(f, dir), "utf8").split("\n").flatMap((line, i) =>
       Object.keys(banned).filter((w) => line.includes(w)).map((w) => `${f}:${i + 1} 用了「${w}」，改写成 ${banned[w]}`)));
   assert.deepEqual(hits, []);
+  const main = readFileSync(new URL("main.js", dir), "utf8");
+  for (const word of ["新建 Topic", "新建 Task 草稿", "派发 Task", "当前主 agent", "主 agent 已离线",
+    "已排队", "已送达", "改派…", "撤销", "重发", "细化中", "已细化", "摘要", "受影响的 Task", "个 agent 在干活", "项等你"]) {
+    assert.ok(main.includes(word), `面板缺少中文文案：${word}`);
+  }
+  assert.doesNotMatch(main, /renderRun\b|renderGroups\b|还没有子 agent|no helper yet|Needs you/);
 });
