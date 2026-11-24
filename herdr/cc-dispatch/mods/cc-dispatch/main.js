@@ -846,8 +846,8 @@ export default class Dispatch extends View {
     const asks = handoffAsks(c, card), to = asks.length && !asks.includes("decide") ? this.receiver(c) : null;
     // Two rows of separate outlined buttons, both ending in a 28px square column so their edges line up.
     // Row one: Result (its report and, for write and net helpers, the worktree's changes), Task (its
-    // rounds: events and task files), Peek (live only), then Clean up as an icon in the square. Row two,
-    // when there is one: Ask (a message to its main agent) and Hand over…, half the width each. Empty
+    // rounds: events and task files), View (live only; jumps to its terminal), then Clean up as an icon in the square. Row two,
+    // when there is one: Ask (a message to its main agent) and Hand over…, on the same three columns as row one. Empty
     // cells keep the columns.
     const cell = (id, label, iconName, onClick, color = t.foreground) => h_flex().id(id).flex_1().min_w(0).h(28).px(6).gap(5)
       .justify_center().items_center().rounded(6).border_1().border_color(t.border)
@@ -868,7 +868,7 @@ export default class Dispatch extends View {
           + `\n\n==> events.jsonl <==\n${events ?? ""}`;
         return { text, markdown: roundsMarkdown(c, events, tasks), doc: taskDoc(c, events, tasks) };
       }, "没有任务文件。")),
-      live && cell(`peek-${c.key}`, "窥视", "eye", () => goTo(c.address, c.parent)),
+      live && cell(`peek-${c.key}`, "查看", "eye", () => goTo(c.address, c.parent)),
     ], live && square(`kill-${c.key}`, "清理", "trash", () => openOverlay({
       mod: "cc-dispatch", kind: "dialog", width: 440, height: 220,
       props: { role: "cleanup", address: c.address, call: c.call, name: c.name } }), t.ansi1));
@@ -889,7 +889,7 @@ export default class Dispatch extends View {
         call: c.call, name: c.name, agent: c.agent, live, round: c.round, mode: c.mode, parentLive,
         log: `${c.agentDir}/handover.log` } }));
     const second = [...askCells, handIt].filter(Boolean).slice(0, 2);
-    const terminal = second.length ? grid([...second, null].slice(0, 2)) : null;
+    const terminal = second.length ? grid([...second, null, null].slice(0, 3)) : null;
     const spend = callSpend(this.stats.calls[c.key]);
     const who = c.lost ? "已中断：交出合格回报之前终端消失了。要等主 agent（或你）决定怎么处理。"
       : c.offline ? "等网络：网络恢复后会自己接着做，不占重试次数。"

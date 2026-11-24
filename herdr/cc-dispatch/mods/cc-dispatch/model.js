@@ -180,7 +180,7 @@ function verdict(label, stored) {
 /**
  * The helper's terminal: by address, else by name among live ones. None once hd_dispatch.py closed it
  * (meta.open false: cleanup, stop and freeze set it only after `hc kill` and `hc rm`), even while the app's
- * terminal list still has it: that list can lag herdr-core, and Peek on it fails with "no running terminal".
+ * terminal list still has it: that list can lag herdr-core, and View on it fails with "no running terminal".
  */
 function terminalFor(meta, terminals) {
   if (meta.open === false) return null;

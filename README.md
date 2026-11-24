@@ -47,7 +47,7 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 
 ## Herdr 面板
 
-Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板只放 skill 才知道的：每次派发运行、各子 agent 的轮次、回报是否过 schema、失败原因、已结束运行的历史。行内可跳转、窥视、看回报 / 任务文件 / worktree 改动，或经确认把"请收回报 / 请诊断"发给派发它的 Claude、清理终端。
+Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板只放 skill 才知道的：每次派发运行、各子 agent 的轮次、回报是否过 schema、失败原因、已结束运行的历史。行内可跳转查看终端、看回报 / 任务文件 / worktree 改动，或经确认把"请收回报 / 请诊断"发给派发它的 Claude、清理终端。
 
 运行卡片标题行末尾有三个运行级图标按钮（悬停显示名称），点了都要再确认一次：
 
