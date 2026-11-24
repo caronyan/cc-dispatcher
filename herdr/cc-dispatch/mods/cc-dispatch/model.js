@@ -228,6 +228,8 @@ export function buildCall(meta, runDir, terminals) {
     // The main agents it had before an adopt ([{terminal, agent, session}], oldest first; hd_dispatch.py earlier_mains).
     earlierMains: Array.isArray(meta.mains) ? meta.mains.filter((m) => m && typeof m === "object") : [],
     title: term?.title ?? "",
+    // What hd_dispatch.py run --title gave it (Chinese since the panel went Chinese), shown on its row.
+    taskTitle: meta.title ?? "",
     dir: meta.dir ?? "",
     workdir: meta.workdir ?? "",
     reportPath: meta.report ?? "",
@@ -396,6 +398,9 @@ export const retryWords = (s) => String(s ?? "").replace(/^([a-z_]+)\s*(.*)$/, (
 /** A terminal's state or status (herdr) in words. */
 const STATE_WORDS = { working: "在干活", idle: "空闲", blocked: "等确认", done: "已完成", error: "出错", gone: "已关闭", finished: "已结束", live: "在线" };
 export const stateWord = (s) => STATE_WORDS[s] ?? String(s ?? "");
+
+/** A helper's row label: its call id and task title, else its terminal name. */
+export const callLabel = (c) => c.taskTitle ? `${c.call} ${c.taskTitle}` : c.name;
 
 /** The line under a call's name, after its stage: what the stage word does not already say. */
 export function callDetail(c) {
@@ -857,7 +862,25 @@ const VERDICT_KEYS = ["verdict", "status"];
 const LEAD_KEYS = ["summary", "answer"];
 // Fields that are trouble when they have anything in them.
 const FIELD_TONE = { failures: "bad", open_questions: "warn", deviations: "warn", blocked: "bad", retracted: "muted", skipped: "muted" };
-const label = (k) => String(k).replace(/_/g, " ");
+/** Report field names (the schemas' keys) and their short enum values, in words; anything else as it is. */
+const FIELD_WORDS = { status: "状态", verdict: "结论", summary: "摘要", answer: "回答", findings: "发现", severity: "严重度",
+  confidence: "把握", category: "类别", location: "位置", evidence: "证据", suggestion: "建议", recommendation: "建议",
+  problem: "问题", detail: "详情", title: "标题", path: "路径", change: "改动", files_changed: "改动的文件", tests: "测试",
+  tests_added: "新增测试", passed: "通过", failed: "失败", failures: "失败项", skipped: "跳过", command: "命令",
+  output_tail: "输出末尾", exit_code: "退出码", duration_s: "用时（秒）", open_questions: "待解决的问题", deviations: "偏离",
+  risks: "风险", reason: "原因", question: "问题", options: "选项", option: "选项", pros: "优点", cons: "缺点", effort: "工作量",
+  design: "设计", criteria_fit: "评估维度", consequence: "后果", conditions: "条件", claim: "论断", cases: "反例",
+  candidates: "候选", reproduce: "复现", repro: "复现", trigger: "触发条件", fix: "修复", fix_hint: "修复提示",
+  suggested_fix: "建议修法", proposed_change: "建议改动", expected: "预期", kind: "种类", name: "名称", ref: "出处",
+  area: "领域", scope: "范围", target: "对象", target_file: "目标文件", target_section: "目标章节", lesson: "经验",
+  addressed: "已处理", retracted: "已撤回", covers: "覆盖", existing_coverage: "已有覆盖", suites: "测试集", test: "测试",
+  run: "运行", occurrences: "出现次数", id: "编号" };
+const VALUE_WORDS = { done: "已完成", partial: "部分完成", blocked: "受阻", PASS: "通过", FAIL: "失败", BLOCKED: "受阻",
+  HOLDS: "成立", FAILS: "不成立", LGTM: "没问题", ISSUES: "有问题", critical: "严重", high: "高", medium: "中", low: "低",
+  must: "必须", should: "建议", verified: "已核实", likely: "很可能", speculative: "推测", reproduced: "已复现",
+  product: "产品问题", env: "环境问题", flaky: "不稳定" };
+const label = (k) => FIELD_WORDS[k] ?? String(k).replace(/_/g, " ");
+const valueWord = (v) => (typeof v === "string" && VALUE_WORDS[v]) || v;
 
 /** An object's fields as blocks: short scalars together as a table, prose, logs and nested values apart. */
 function fieldBlocks(o) {
@@ -867,7 +890,7 @@ function fieldBlocks(o) {
     if (isScalar(v) && !(typeof v === "string" && (v.length > 100 || v.includes("\n")))) {
       if (!kv) blocks.push(kv = { t: "kv", rows: [] });
       const str = typeof v === "string" ? v : v == null ? "—" : String(v);
-      kv.rows.push({ k: label(k), v: str || "（空）", tone: TONE_KEYS.includes(k) ? wordTone(v) : null,
+      kv.rows.push({ k: label(k), v: valueWord(str) || "（空）", tone: TONE_KEYS.includes(k) ? wordTone(v) : null,
         mono: typeof v !== "string" || /^[\w./:#@-]{1,100}$/.test(v) });
       continue;
     }
@@ -936,7 +959,7 @@ export function resultDoc(c, text, older = [], diff = null) {
   const over = { id: "overview", title: "概览", blocks: [], children: [] };
   const obj = v && typeof v === "object" && !Array.isArray(v) ? v : null;
   const verdictKey = obj && VERDICT_KEYS.find((k) => typeof obj[k] === "string");
-  if (verdictKey) { over.blocks.push({ t: "lead", label: label(verdictKey), text: obj[verdictKey], tone: wordTone(obj[verdictKey]) ?? "accent", short: true }); over.tone = wordTone(obj[verdictKey]); }
+  if (verdictKey) { over.blocks.push({ t: "lead", label: label(verdictKey), text: valueWord(obj[verdictKey]), tone: wordTone(obj[verdictKey]) ?? "accent", short: true }); over.tone = wordTone(obj[verdictKey]); }
   for (const k of LEAD_KEYS) if (obj && typeof obj[k] === "string" && obj[k]) over.blocks.push({ t: "lead", label: label(k), text: obj[k], tone: over.tone ?? "accent" });
   if (obj?.recommendation && typeof obj.recommendation === "object") {
     const r = obj.recommendation, key = itemTitle(r) ?? Object.keys(r).find((k) => typeof r[k] === "string");

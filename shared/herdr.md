@@ -66,11 +66,12 @@ Codex 不可用时由你接管，是这条分工的例外，按各 skill 的降�
 
 ```bash
 python3 $HD run --run $RD --call <调用名> --mode read|write|net --effort medium|high \
-  --dir <工作目录> --prompt <提示文件> --schema <回报 schema> --title "<任务的几个英文词>"
+  --dir <工作目录> --prompt <提示文件> --schema <回报 schema> --title "<任务的中文短标题>"
 ```
 
 - `--mode`：`read` 只读（摸底、调研、审查、复核）：子 agent 在 `/tmp/cc-dispatch` 下自己的目录里运行，`--dir` 指向的仓库或 worktree 能读不能写。`write` 在 `--dir` 里改动，终端不联网。`net` 同 `write`，但终端能联网，只在任务确实要装新依赖或访问外部接口时用，理由写进记录。三种模式都能用网页搜索查资料。
-- `--title`：几个英文单词概括这次调用在做什么（`token refresh`、`discount rounding`），让用户在 agent 列表里一眼认出它；调用名本身已经说清时（`unit`、`stress-r1`）可以省略。
+- `--title`：一个中文短标题概括这次调用在做什么（`刷新令牌`、`折扣取整`），面板上这一行显示为"调用名 标题"，让用户一眼认出它；调用名本身已经说清时（`unit`、`stress-r1`）可以省略。
+- 面板是中文的：写给面板和用户看的文字（`--title`、`state.json` 里卡片的 title、note、result，待决项的标题、上下文和选项）都用中文写；调用名、卡片编号、命令、路径保持原样。子 agent 的回报由 `hd_dispatch.py` 发给它的消息要求用中文写。
 - `--effort`：任务窄、只涉及几个文件时用 `medium`，跨模块推理或大量检索用 `high`。
 - **子 agent 默认是谁**（`--agent`，默认 `auto`）：按运行目录的类型选。research 运行默认派 Antigravity（`agy`），模型 `gemini-4-neon-<effort>`（`--model` 可指定别的，`$CC_HD_AGY_MODEL` 改全局默认）；dev、fix、test、review、retro 等其余运行都默认派 Codex（用它自己的全局默认模型）。要指定时写 `--agent codex|claude|agy`；SKILL.md 没要求时不写。
 - **agy 不可用时自动换 Codex**（`--fallback codex`，默认）：派 agy 前脚本先检查 agy 是否装了、`agy models` 里有没有这个模型、magpie 读到的 Gemini 额度是否用完。有一项不行就直接派 Codex，输出 `AGENT=codex` 和 `FALLBACK=agy→codex why=<原因>`，照常记下、照常 `wait`，向用户提一句即可。运行中的 agy 子 agent 因额度、登录、模型不可用停下或退出、又没交合格回报时，`wait`/`collect` 会自动把这个调用移交给 Codex（同一任务、同一回报路径，第 k+1 轮），输出 `FALLBACK=<调用名> agy→codex why=… round=… name=…`：这不是失败，不用处理，照常再启动 `wait`。输出 `FALLBACK_FAILED=` 时按它前面的 `FAILURE=` 处理。`--fallback none` 时不换，agy 不可用就输出 `AGENT_UNAVAILABLE`（`FAILURE=agent_unavailable`，退出码 3），只用于旁路调用（见各 SKILL.md）。

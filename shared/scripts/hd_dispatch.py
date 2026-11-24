@@ -181,8 +181,10 @@ from pathlib import Path
 HOME = Path(os.environ.get("CC_HD_HOME", "/tmp/cc-dispatch"))
 CHECK = Path(__file__).with_name("hd_check.py")
 SETTLED = {"done", "idle", "error", "blocked"}
-FIRST_MSG = "读取任务文件 {task}，按其中要求完成。"
-SEND_MSG = "读取任务文件 {task}，按其中要求处理。"
+# The panel is Chinese, so a report's prose is too; schema keys and enum values, code, commands and paths stay as they are.
+REPORT_LANG = "回报里的说明文字用中文写；字段名、schema 规定的取值、代码、命令和路径保持原样。"
+FIRST_MSG = "读取任务文件 {task}，按其中要求完成。" + REPORT_LANG
+SEND_MSG = "读取任务文件 {task}，按其中要求处理。" + REPORT_LANG
 
 # Error wording seen on a Codex screen; extend a pattern when a real failure is misclassified.
 PATTERNS = [
@@ -2471,7 +2473,7 @@ def main():
         r.add_argument(flag, required=True)
     r.add_argument("--mode", required=True, choices=["read", "write", "net"])
     r.add_argument("--effort", default="high", choices=["medium", "high"])
-    r.add_argument("--title", help="a few English words on the task, shown in herdr's agent list")
+    r.add_argument("--title", help="a short Chinese title for the task, shown on its row in the panel")
     r.add_argument("--agent", default="auto", choices=["auto", *AGENTS],
                    help="auto: agy for a research run, Codex for every other kind")
     r.add_argument("--model", help="agy's model (default $CC_HD_AGY_MODEL, else gemini-4-neon-<effort>)")

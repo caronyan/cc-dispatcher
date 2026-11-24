@@ -57,7 +57,7 @@ agents/            hd_dispatch.py 的调用记录（reviewer、reviewer-gemini�
    ```bash
    python3 $HD run --run $RD --call reviewer-gemini --agent agy --fallback none --mode read --effort high \
      --dir "$ROOT" --schema "$SKILL_DIR/references/review.schema.json" --prompt $RD/reviewer-prompt.md \
-     --title "gemini review"
+     --title "Gemini 复核"
    ```
    它是旁路，不顶替 Codex：`--fallback none` 让它在 agy 不可用（输出 `AGENT_UNAVAILABLE`，原因在同一行）时不派，运行中途失败时也不换成 Codex。不可用或失败时不重试、不改派，在 `state.json.gemini` 记 `unavailable` 和原因，继续只用 Codex 和你的两方结论，报告里注明。两个都派出后启动 `wait`，它们的 `NAME` 都写进 `state.json`。
 2. **在子 agent 运行期间，你独立完成审查**，写入 `claude-review.md`，使用同样的字段（位置/问题/证据/建议/严重度）。写完之前不读两个审查者的回报（`wait` 报回了也先放着），这是背对背的意义所在。你审的是全局：需求是否达成、架构与模块边界、契约和跨模块影响、方案层面的遗漏；逐行细节由审查者覆盖。代码模式下先看 `git diff --stat`，改动超过约 300 行时只细读核心路径上的文件。

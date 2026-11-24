@@ -10,7 +10,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord } from "./model.js";
+import { callTags, callStage, runStage, stageSummary, cardCounts, cardView, CARD_WORDS, parkedWhy, groupByStage, SETTLED, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, canArchive, archivedAway, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { runTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -224,7 +224,7 @@ function toggle() {
       .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(() => run("layout.toggle", { id: PANEL }))
-      .child(mark(14, on ? t.foreground : t.muted)).child("派发")
+      .child(mark(14, on ? t.foreground : t.muted)).child("Dispatch")
       .when(live.length > 0, (el) => el.child(h_flex().h(16).px(5).items_center().rounded(8).bg(busy ? t.working : t.selected)
         .text_size(11).text_color(busy ? t.background : t.muted).child(String(busy || live.length)))));
 }
@@ -279,7 +279,6 @@ export default class Dispatch extends View {
   shown() { return !find(layout(), PANEL)?.hidden; }
 
   // The shown space, as Herdr's Spaces list names it.
-  spaceName() { return spaces().find((s) => s.active)?.name || (this.repo ? baseName(this.repo) : ""); }
 
   // The shown space's runs, and other spaces' live runs by space.
   split() {
@@ -412,8 +411,8 @@ export default class Dispatch extends View {
       .bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(S().body)
       .child(h_flex().h(42).flex_none().pl(14).pr(8).gap(8).items_center().border_b(1).border_color(t.border)
         .child(mark(17, t.accent))
-        .child(div().text_size(S().title).font_semibold().child("cc-dispatch"))
-        .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(this.spaceName()))
+        .child(div().text_size(S().title).font_semibold().child("Dispatch"))
+        .child(div().flex_1())
         .child(h_flex().id("refresh").size(24).justify_center().items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", stop).on_click((_e, cx) => this.refresh(cx))
           .child(this.loading ? icon("ring", 13, t.muted).spin(900) : icon("refresh", 13, t.muted)))
@@ -828,7 +827,7 @@ export default class Dispatch extends View {
       .when(here, (el) => el.border_l(2).border_color(t.accent))
       .on_click((_e, cx) => { this.open = open ? null : c.key; cx.notify(); })
       .child(termDot(t, c))
-      .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().body).text_color(live ? t.foreground : t.muted).child(c.name))
+      .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().body).text_color(live ? t.foreground : t.muted).child(callLabel(c)))
       .children(callTags(c).map((x) => tag(x)))
       .when(Boolean(agentTag(c)), (el) => el.child(tag(agentTag(c).text, agentTag(c).weak ? t.ansi3 : t.muted)))
       .when(Boolean(c.handingTo), (el) => el.child(tag(`→ ${c.handingTo}`, t.accent)))

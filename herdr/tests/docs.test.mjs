@@ -27,6 +27,7 @@ test("resultDoc leads with the verdict, then a node per field, then the worktree
   assert.equal(over.blocks[0].t, "lead");
   assert.equal(over.blocks[0].tone, "warn");
   assert.equal(over.blocks[0].short, true);
+  assert.deepEqual([over.blocks[0].label, over.blocks[0].text, findings.title], ["结论", "有问题", "发现"]);
   assert.equal(over.blocks[1].text, "two problems");
   assert.equal(findings.children.length, 2);
   assert.equal(findings.tone, "bad");

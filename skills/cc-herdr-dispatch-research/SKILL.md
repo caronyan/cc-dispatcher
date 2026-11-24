@@ -70,7 +70,7 @@ spike 的 worktree：`git -C "$ROOT" worktree add --detach "$(dirname $ROOT)/.cc
 ```bash
 python3 $HD run --run $RD --call <线程> --mode read --effort high \
   --dir "$ROOT" --schema "$SKILL_DIR/references/findings.schema.json" --prompt $RD/<线程>-prompt.md \
-  --title "<子问题的英文简写>"
+  --title "<子问题的中文短标题>"
 ```
 
 不写 `--agent`：research 运行的子 agent 默认是 Antigravity（`agy`），模型 `gemini-4-neon-<effort>`；agy 没装、模型不可用或 Gemini 额度用完时脚本自动改派 Codex（全局默认模型），输出 `FALLBACK=agy→codex why=…`，运行中途因额度等原因停下的也会自动移交给 Codex 接着做（见 shared/herdr.md"派发"）。把输出的 `AGENT=` 记进 `state.json.threads.<线程>.agent`，报告里不必区分。用户点名要某个 agent 或模型时才加 `--agent`/`--model`。

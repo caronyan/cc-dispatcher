@@ -67,7 +67,7 @@ git -C "$ROOT" worktree add --detach "$FIX_WT" $SNAP
 cp -R "<--repro 目录>" "$FIX_WT/cc-repro"   # 有复现时
 python3 $HD run --run $RD --call fix --mode write --effort high \
   --dir "$FIX_WT" --schema "$SKILL_DIR/references/fix.schema.json" --prompt $RD/fix-prompt.md \
-  --title "<问题的英文简写>"
+  --title "<问题的中文短标题>"
 ```
 
 提示按 [references/fixer.md](references/fixer.md) 构造。依赖由你在 worktree 里装好或从 `$TARGET` 软链过去。问题少、范围只在一两个文件时用 `--effort medium`。派出后按 shared/herdr.md 启动 `wait`。小活档的问题等子 agent 交回报后你再改，避免同时写同一个 worktree。

@@ -97,7 +97,7 @@ git -C "$REPO" worktree add -b cc/$RUN/T<n> "$WT_ROOT/T<n>" cc/$RUN/integration
 ```bash
 python3 $HD run --run $RD --call T<n> --mode write --effort high \
   --dir "$WT_ROOT/T<n>" --schema "$SKILL_DIR/references/report.schema.json" --prompt $RD/tasks/T<n>-prompt.md \
-  --title "<卡片标题的英文简写>"
+  --title "<卡片的中文短标题>"
 ```
 小卡（一两个文件、几十行改动、验收命令现成）用 `--effort medium`。把 `NAME` 写入 `state.json` 中这张卡，状态改为 `running`。因为依赖未完成而暂不派发的卡保持 `pending`，`depends_on` 写全，面板会把它列在"还没有子 agent"下并显示还在等哪些卡。全部派出后，按 shared/herdr.md 启动 `wait`。派发前先看 `state.json.codex`：如果是 `unavailable`，不要派发，按"Codex 不可用时"处理。
 
