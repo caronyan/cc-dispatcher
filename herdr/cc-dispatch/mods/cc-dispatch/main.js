@@ -107,7 +107,7 @@ const MARKS = {
   failed: ["close", "ansi1"], lost: ["close", "ansi1"], bad: ["close", "ansi3"], stopped: ["close", "muted"], abandoned: ["close", "muted"],
   blocked: ["question", "ansi3"], paused: ["pause", "ansi3"], parked: ["pause", "muted"], offline: ["wifi-off", "ansi3"],
   retrying: ["refresh", "ansi3"], await: ["clock-dashed", "accent"], collect: ["inbox", "accent"], review: ["clipboard-check", "accent"],
-  handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["pencil", "muted"],
+  handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["draft", "muted"],
   pending: ["hourglass", "muted"], accepting: ["clipboard-check", "accent"],
 };
 const MARK_WORDS = { ...STAGE_WORDS, ...CARD_WORDS, done: "已完成", stopped: "已终止", stopping: "终止中", handoff: "交接中",
