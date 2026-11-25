@@ -133,7 +133,7 @@ function action(id, label, iconName, t, onClick, opts = {}) {
 function dialogFrame(t, id, title, body, buttons, onClose, extra = null) {
   return v_flex().id(id).size_full().min_h(0).p(18).gap(14).bg(t.popover).text_size(S().body).text_color(t.foreground)
     .child(h_flex().flex_none().items_center().gap(8)
-      .child(div().flex_1().min_w(0).truncate().text_size(S().dialog).font_semibold().child(title))
+      .child(div().flex_1().min_w(0).truncate().tooltip(String(title)).text_size(S().dialog).font_semibold().child(title))
       .when(Boolean(extra), (el) => el.child(extra))
       .child(h_flex().id("x").size(24).justify_center().items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click(onClose).child(icon("close", 14, t.muted))))
@@ -191,13 +191,13 @@ function docBlock(t, b, id) {
         .child(h_flex().w(26).h(17).flex_none().justify_center().items_center().rounded(4).bg(t.selected)
           .font_family(mono()).text_size(z.label).font_semibold().text_color(k[f.kind]).child(KIND_MARK[f.kind] ?? f.code))
         .child(div().w(62).flex_none().text_size(z.label).text_color(k[f.kind]).child(KIND_SHORT[f.kind]))
-        .child(div().flex_1().min_w(0).truncate().font_family(mono()).text_size(z.small)
+        .child(div().flex_1().min_w(0).truncate().tooltip(String(f.path)).font_family(mono()).text_size(z.small)
           .text_color(f.kind === "deleted" ? t.muted : t.foreground).child(f.path))));
     }
     case "stat": {
       const max = Math.max(1, ...b.rows.map((r) => r.n)), W = 110;
       return v_flex().gap(2).children(b.rows.map((r, i) => h_flex().id(`${id}-${i}`).h(22).gap(8).items_center()
-        .child(div().flex_1().min_w(0).truncate().font_family(mono()).text_size(z.small).child(r.path))
+        .child(div().flex_1().min_w(0).truncate().tooltip(String(r.path)).font_family(mono()).text_size(z.small).child(r.path))
         .child(div().w(70).flex_none().text_size(z.label).font_family(mono())
           .child(h_flex().gap(4).child(div().text_color(t.ansi2).child(`+${r.plus}`)).child(div().text_color(t.ansi1).child(`−${r.minus}`))))
         .child(h_flex().w(W).h(6).flex_none().rounded(3).bg(t.selected).overflow_hidden()
@@ -639,7 +639,7 @@ export default class Dispatch extends View {
         .when(Boolean(g.id), (el) => el.on_click(() => run("space.select", { id: g.id })))
         .child(dot(t, waiting ? "blocked" : "working"))
         .child(v_flex().flex_1().min_w(0)
-          .child(div().truncate().text_size(S().body).font_semibold().child(g.name))
+          .child(div().truncate().tooltip(String(g.name)).text_size(S().body).font_semibold().child(g.name))
           .child(div().text_size(S().label).text_color(t.muted)
             .child(`${g.topics.length} 个 Topic · ${g.topics.reduce((n, topic) => n + topic.tasks.length, 0)} 个 Task`)))
         .when(Boolean(g.id), (el) => el.child(icon("chevron-right", 12, t.muted))));
@@ -657,7 +657,7 @@ export default class Dispatch extends View {
       .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 12, t.muted))
       .child(dot(t, waiting ? "blocked" : active ? "working" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
-      .child(div().flex_1().min_w(0).truncate().text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
+      .child(div().flex_1().min_w(0).truncate().tooltip(String(topic.title)).text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
       .child(h_flex().id(`summary-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6)
         .tooltip("查看摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click((_e, cx) => {
@@ -745,7 +745,7 @@ export default class Dispatch extends View {
       .when(Boolean(r) && group !== "done", (el) => el.child(termDot(t, { state: main ? "live" : "gone", status: main?.status ?? null })))
       .when(Boolean(executor), (el) => el.child(executor))
       .child(pill(t, task.kind))
-      .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().small).font_semibold().child(task.title))
+      .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(S().small).font_semibold().child(task.title))
       .children([statusMark(t, `mark-${key}`, stage)].filter(Boolean))
       .child(div().flex_1())
       .child(h_flex().id(`tasksum-${key}`).size(22).flex_none().justify_center().items_center().rounded(6)
@@ -777,7 +777,7 @@ export default class Dispatch extends View {
         .child(note(t, "内部进度"))
         .children(away.map((k) => h_flex().id(`card-${r.dir}|${k.id}`).gap(7).items_center()
           .child(div().flex_none().text_size(S().label).child(k.id))
-          .child(div().flex_1().min_w(0).truncate().text_size(S().small).text_color(t.muted).child(k.title ?? ""))
+          .child(div().flex_1().min_w(0).truncate().tooltip(String(k.title ?? "")).text_size(S().small).text_color(t.muted).child(k.title ?? ""))
           .children([statusMark(t, `mark-${r.dir}|${k.id}`, k.status)].filter(Boolean))
           .tooltip(k.waits.length ? `等 ${k.waits.join("、")}` : k.note ?? ""))));
     }
@@ -951,7 +951,7 @@ export default class Dispatch extends View {
     return h_flex().flex_none().min_h(34).px(12).py(5).gap(8).items_center().border_t(1).border_color(t.border)
       .bg(state === "paused" ? t.background : t.surface)
       .child(mark)
-      .child(div().flex_1().min_w(0).truncate().text_size(S().label).text_color(color).child(banner))
+      .child(div().flex_1().min_w(0).truncate().tooltip(String(banner)).text_size(S().label).text_color(color).child(banner))
       .when(state === "stopped", (el) => el.child(action(`stopmd-${r.dir}`, "总结", "file", t,
         (_e, cx) => this.showText(cx, `${r.id} · 终止总结`, () => loadStopReport(io(on), r), "还没有 stop.md。"))))
       .when(state === "handoff", (el) => el
@@ -978,7 +978,7 @@ export default class Dispatch extends View {
     const key = `takeover|${r.dir}`;
     return h_flex().flex_none().min_h(34).px(12).py(5).gap(8).items_center().border_t(1).border_color(t.border).bg(t.surface)
       .child(icon("handover", 11, t.accent))
-      .child(div().flex_1().min_w(0).truncate().text_size(S().label).text_color(t.accent).child(takeoverBanner(r)))
+      .child(div().flex_1().min_w(0).truncate().tooltip(String(takeoverBanner(r))).text_size(S().label).text_color(t.accent).child(takeoverBanner(r)))
       .child(action(`takeover-${r.dir}`, this.copied === key ? "已复制" : "复制接手提示", "task", t, (_e, cx) => {
         cx.write_to_clipboard(takeoverPrompt(r));
         this.copied = key; cx.notify();
@@ -1017,7 +1017,7 @@ export default class Dispatch extends View {
         .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
         .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
         .child(icon("decide", 11, open ? t.ansi3 : t.muted))
-        .child(div().flex_1().min_w(0).truncate().text_size(z.label).font_semibold().text_color(open ? t.ansi3 : t.muted)
+        .child(div().flex_1().min_w(0).truncate().tooltip(open ? "需要你处理" : "已回答 · 等主 agent 处理").text_size(z.label).font_semibold().text_color(open ? t.ansi3 : t.muted)
           .child(open ? "需要你处理" : "已回答 · 等主 agent 处理"))
         .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(open ? t.ansi3 : t.selected)
           .text_size(z.label).text_color(open ? t.background : t.foreground).child(String(open || items.length))));
@@ -1028,12 +1028,12 @@ export default class Dispatch extends View {
         .on_mouse_down("left", stop).on_click(() => this.openDecide(r, x))
         .child(h_flex().gap(7).items_center()
           .child(done ? icon("check", 11, t.done) : icon(x.kind === "decision" ? "decide" : "question", 11, x.kind === "decision" ? t.ansi3 : t.accent))
-          .child(div().flex_1().min_w(0).truncate().text_size(z.small).text_color(color).child(x.title))
+          .child(div().flex_1().min_w(0).truncate().tooltip(String(x.title)).text_size(z.small).text_color(color).child(x.title))
           .when(Boolean(x.card), (el) => el.child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected)
             .font_family(mono()).text_size(z.label - 1.5).text_color(t.muted).child(x.card)))
           .when(Boolean(x.asked), (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(ago(x.asked)))))
-        .child(div().pl(18).truncate().text_size(z.label).text_color(t.accent).child(`Task ${task.id} · ${task.title}`))
-        .child(div().pl(18).truncate().text_size(z.label).text_color(t.muted).child(itemLine(x)));
+        .child(div().pl(18).truncate().tooltip(String(`Task ${task.id} · ${task.title}`)).text_size(z.label).text_color(t.accent).child(`Task ${task.id} · ${task.title}`))
+        .child(div().pl(18).truncate().tooltip(String(itemLine(x))).text_size(z.label).text_color(t.muted).child(itemLine(x)));
     }));
     return box;
   }
@@ -1057,12 +1057,12 @@ export default class Dispatch extends View {
         .child(h_flex().h(30).pl(inset).pr(10).gap(7).items_center()
           .child(h_flex().w(10).flex_none().justify_center().child(running ? icon("ring", 10, t.working).spin(1400) : div().size(6).rounded(3).bg(statusColor[task.status] ?? t.muted)))
           .child(icon(kindIcon[task.kind] ?? "terminal", 12, t.muted))
-          .child(div().min_w(0).flex_shrink(1).truncate().text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
+          .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
           .child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected).text_size(z.label - 1.5).text_color(t.muted)
             .child(`后台${kindWord[task.kind] ? ` · ${kindWord[task.kind]}` : ""}`))
           .child(div().flex_1())
           .child(div().flex_none().text_size(z.label).text_color(statusColor[task.status] ?? t.muted).child(running ? `运行 ${word}` : `${word} · ${age}`)))
-        .when(Boolean(sub), (el) => el.child(div().pl(inset + 17).pr(10).pb(5).mt(-4).truncate().font_family(mono()).text_size(z.label - 1).text_color(t.muted).child(sub)));
+        .when(Boolean(sub), (el) => el.child(div().pl(inset + 17).pr(10).pb(5).mt(-4).truncate().tooltip(String(sub)).font_family(mono()).text_size(z.label - 1).text_color(t.muted).child(sub)));
     };
     const box = v_flex().flex_none();
     box.children(bg.running.map(row));
@@ -1109,7 +1109,7 @@ export default class Dispatch extends View {
         const own = ids.length ? cardView(run) : null, stage = this.taskStage(topic, task);
         return h_flex().gap(6).items_center().h(18)
           .child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div()))
-          .child(div().min_w(0).flex_1().truncate().text_size(z.small).child(task.title))
+          .child(div().min_w(0).flex_1().truncate().tooltip(String(task.title)).text_size(z.small).child(task.title))
           .when(ids.length > 0, (el) => el
             .child(div().w(84).flex_none().child(bar(cardCounts({ status }).map(([st, n]) => [n, colors[st] ?? t.muted]), ids.length)))
             .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${own.merged}/${own.goal}`)));
@@ -1158,7 +1158,7 @@ export default class Dispatch extends View {
       .on_click((_e, cx) => { this.open = open ? null : c.key; cx.notify(); })
       .child(termDot(t, c))
       .children([this.renderExecutor(t, c.agent ?? "codex")].filter(Boolean))
-      .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().body).text_color(live ? t.foreground : t.muted).child(callLabel(c)))
+      .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(callLabel(c))).text_size(S().body).text_color(live ? t.foreground : t.muted).child(callLabel(c)))
       .when(tagged, (el) => el.children([statusMark(t, `mark-${c.key}`, stage)].filter(Boolean)))
       .children(callTags(c).map((x) => tag(x)))
       .when(Boolean(agentTag(c)?.weak), (el) => el.child(tag("弱隔离", t.ansi3)))
@@ -1285,7 +1285,7 @@ export default class Dispatch extends View {
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
       .child(div().flex_1().min_w(0).truncate().tooltip(text).child(text))
-      .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().text_color(t.ansi3).child(this.statsError)));
+      .when(Boolean(this.statsError), (el) => el.child(div().flex_none().max_w(160).truncate().tooltip(String(this.statsError)).text_color(t.ansi3).child(this.statsError)));
   }
 
   // ---- Dialogs ----
@@ -1303,10 +1303,10 @@ export default class Dispatch extends View {
         .on_click((_e, cx) => { this.docSel = id; cx.notify(); })
         .when(Boolean(opts.group), (el) => el.child(tdot(c ?? t.border, 7)))
         .when(!opts.group && Boolean(c) && opts.tone !== "muted", (el) => el.child(tdot(c, 5)))
-        .child(div().flex_1().min_w(0).truncate().text_size(opts.group ? z.small : z.label)
+        .child(div().flex_1().min_w(0).truncate().tooltip(String(title)).text_size(opts.group ? z.small : z.label)
           .when(Boolean(opts.group), (el) => el.font_semibold())
           .text_color(on || opts.group ? t.foreground : t.muted).child(title))
-        .when(Boolean(opts.badge), (el) => el.child(div().flex_none().max_w(90).truncate().text_size(z.label - 1).text_color(opts.tone === "accent" ? t.accent : t.muted).child(opts.badge)));
+        .when(Boolean(opts.badge), (el) => el.child(div().flex_none().max_w(90).truncate().tooltip(String(opts.badge)).text_size(z.label - 1).text_color(opts.tone === "accent" ? t.accent : t.muted).child(opts.badge)));
     };
     const nav = v_flex().id("doc-nav").w(230).flex_none().min_h(0).overflow_y_scrollbar().p(6).gap(1).rounded(8)
       .border_1().border_color(t.border).bg(t.background)
@@ -1319,7 +1319,7 @@ export default class Dispatch extends View {
       return level === 0
         ? h_flex().gap(8).items_center().pb(6).border_b(1).border_color(t.border)
           .child(div().w(4).h(16).flex_none().rounded(2).bg(c ?? t.accent))
-          .child(div().flex_1().min_w(0).truncate().text_size(z.title + 1).font_semibold().child(n.title))
+          .child(div().flex_1().min_w(0).truncate().tooltip(String(n.title)).text_size(z.title + 1).font_semibold().child(n.title))
           .when(Boolean(n.badge), (el) => el.child(pill(t, n.badge, n.tone === "accent" ? t.accent : t.muted)))
         : h_flex().gap(7).items_center().pt(depth > 0 ? 2 : 4)
           .when(Boolean(c) && n.tone !== "muted", (el) => el.child(tdot(c, 7)))
@@ -1594,7 +1594,7 @@ export default class Dispatch extends View {
           .child(h_flex().gap(7).items_center()
             .child(div().flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(c.id))
             .children([c.agent && this.renderExecutor(t, c.agent)].filter(Boolean))
-            .child(div().min_w(0).flex_shrink(1).truncate().text_size(z.small).font_semibold().child(c.title || c.id))
+            .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(c.title || c.id)).text_size(z.small).font_semibold().child(c.title || c.id))
             .children([statusMark(t, `tasksum-mark-${c.id}`, c.stage)].filter(Boolean))
             .child(div().flex_none().text_size(z.label).text_color(t.muted).child(MARK_WORDS[c.stage] ?? c.stage))
             .when(c.rounds > 1, (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`${c.rounds} 轮`))))

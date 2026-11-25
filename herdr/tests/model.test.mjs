@@ -275,6 +275,16 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.ok(texts(rendered).includes("做完了"));
   });
 
+  await t.test("text cut short in the panel carries its full text as a tooltip", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const src = await readFile(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+    const bare = src.split("\n").map((l, i) => [i + 1, l]).filter(([, l]) => /\.truncate\(\)/.test(l) && !/\.truncate\(\)\.tooltip\(/.test(l));
+    // Fixed short words (stat tiles, buttons, a status line), not names that can run long.
+    const fixed = ["需要你处理", "child(value)", "child(label)", "child(item.text.split", "child(`${run.id"];
+    const left = bare.filter(([, l]) => !fixed.some((f) => l.includes(f)));
+    assert.deepEqual(left, [], "被截断的文字要带 .tooltip(全文)，鼠标悬停时能看到完整内容");
+  });
+
   await t.test("the Task summary lists each card with its status, executor and report conclusion", () => {
     const { topic, task } = groupedTask({ state: { tasks: { a: { status: "merged", title: "卡 A", note: "合入了" }, T9: { status: "pending", title: "还没派" } } } });
     const cards = model.taskCards(task);
