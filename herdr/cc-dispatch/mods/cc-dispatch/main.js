@@ -99,7 +99,7 @@ const termDot = (t, c) => c.held && c.state === "live" && c.status !== "working"
     : div().w(8).h(8).flex_none().rounded_full().border(1.5).border_color(t.muted);
 
 
-// A status as a small icon right after a title: a tick once the work landed, a cross when it failed or was
+// A status as a small icon after a row's title and its tags, never between them: a tick once the work landed, a cross when it failed or was
 // stopped, nothing while it works (the dot in front already spins), and a mark of its own for each state
 // between. The word shows on hover.
 const MARKS = {
@@ -1120,9 +1120,9 @@ export default class Dispatch extends View {
         .when(running, (el) => el.child(h_flex().w(10).flex_none().justify_center().child(icon("ring", 10, t.working).spin(1400))))
         .child(icon(kindIcon[task.kind] ?? "terminal", 12, t.muted))
         .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
-        .when(!running, (el) => el.child(statusMark(t, `${id}-mark`, marks[task.status] ?? "lost")))
         .child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected).text_size(z.label - 1.5).text_color(t.muted)
           .child(kindTag[task.kind] ?? task.kind ?? "shell cmd"))
+        .when(!running, (el) => el.child(statusMark(t, `${id}-mark`, marks[task.status] ?? "lost")))
         .child(div().flex_1())
         .child(div().flex_none().text_size(z.label).text_color(running ? t.working : t.muted).child(running ? `运行 ${age}` : age));
     };
@@ -1215,7 +1215,7 @@ export default class Dispatch extends View {
     const tag = (text, color) => h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected)
       .font_family(mono()).text_size(S().label - 1.5).text_color(color ?? t.muted).child(text);
     // One line: the terminal dot, the name (white while its terminal is open, grey once closed), small
-    // tags for mode·effort ("wh") and round ("r2"), a failure or retry word, and its tokens at the right.
+    // tags for mode·effort ("wh") and round ("r2"), a failure or retry word, the status mark after all of them, and its tokens at the right.
     const row = h_flex().id(`call-${c.key}`).h(30).flex_none().pl(inset).pr(10).gap(7).items_center().cursor_pointer()
       .bg(open || here ? t.raised : t.surface).hover((s) => s.bg(open || here ? t.raised : t.hover))
       .when(here, (el) => el.border_l(2).border_color(t.accent))
@@ -1223,12 +1223,12 @@ export default class Dispatch extends View {
       .child(termDot(t, c))
       .children([this.renderExecutor(t, c.agent ?? "codex")].filter(Boolean))
       .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(callLabel(c))).text_size(S().body).text_color(live ? t.foreground : t.muted).child(callLabel(c)))
-      .when(tagged, (el) => el.children([statusMark(t, `mark-${c.key}`, stage)].filter(Boolean)))
       .children(callTags(c).map((x) => tag(x)))
       .when(Boolean(agentTag(c)?.weak), (el) => el.child(tag("弱隔离", t.ansi3)))
       .when(Boolean(c.handingTo), (el) => el.child(tag(`→ ${c.handingTo}`, t.accent)))
       .when(Boolean(c.failure && c.failure !== "exited" && c.failure !== "blocked"), (el) => el.child(tag(failureWord(c.failure), t.ansi1)))
       .when(Boolean(c.retry), (el) => el.child(tag(c.retry.split(" ").pop(), t.ansi3)))
+      .when(tagged, (el) => el.children([statusMark(t, `mark-${c.key}`, stage)].filter(Boolean)))
       .child(div().flex_1())
       .when(Boolean(spent?.tokens), (el) => el.child(div().flex_none().text_size(S().label).text_color(t.muted).child(fmtTok(spent.tokens.input + spent.tokens.output))));
     if (!open) return row;
