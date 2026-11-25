@@ -1497,6 +1497,11 @@ def cmd_cleanup(a):
     run = Path(a.run).resolve()
     for c in ([a.call] if a.call else calls(run)):
         meta = load(run, c)
+        if meta.get("report_check") is None and Path(meta["report"]).is_file():
+            # A report read without wait or collect is still the round's verdict; record it before the terminal goes.
+            line = report_line(meta)
+            meta["report_check"] = {"REPORT_OK": "ok", "REPORT_BAD": "bad"}.get(line.splitlines()[0] if line else "", "missing")
+            event(meta, "settle", state="gone", status=None, turn=None, report=meta["report_check"])
         backup_report(meta)
         hc("kill", meta.get("address") or meta["name"])
         hc("rm", meta.get("address") or meta["name"])

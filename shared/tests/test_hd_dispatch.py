@@ -652,6 +652,17 @@ class Lost(unittest.TestCase):
         w.hd("cleanup", "--run", str(w.run_dir), "--call", "a")
         self.assertNotIn("lost", w.meta("a"))
 
+    def test_cleanup_records_a_report_that_was_read_without_collect(self):
+        w = Env()
+        w.dispatch("a")
+        Path(w.meta("a")["report"]).write_text('{"status": "done"}')
+        w.hd("cleanup", "--run", str(w.run_dir), "--call", "a")
+        self.assertEqual(w.meta("a")["report_check"], "ok")
+        self.assertIn(("settle", "ok"), [(e["ev"], e.get("report")) for e in w.events("a")])
+        w.dispatch("b")
+        w.hd("cleanup", "--run", str(w.run_dir), "--call", "b")
+        self.assertIsNone(w.meta("b").get("report_check"))  # nothing handed in: still not a finished card
+
     def test_cleaned_up_is_not_lost(self):
         w = Env()
         w.dispatch("a")
