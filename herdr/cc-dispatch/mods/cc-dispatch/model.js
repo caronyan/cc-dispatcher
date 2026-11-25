@@ -189,8 +189,11 @@ export function parseStates(text) {
 
 /** Summaries are last, so marker text inside them never enters the older section parsers. */
 export function parseMessageSummaries(text) {
-  const out = [];
-  for (const chunk of String(text ?? "").split(new RegExp(`(?:^|\\n)${MESSAGE_SUMMARY_SEP}`)).slice(1)) {
+  // Each section starts a line; JSON never holds a raw newline, so "\n<marker>" only matches real sections.
+  // Plain string search: the panel's runtime stalls on a pattern split of the whole ~1MB dump.
+  const out = [], marker = `\n${MESSAGE_SUMMARY_SEP}`, all = `\n${String(text ?? "")}`, start = all.indexOf(marker);
+  if (start < 0) return out;
+  for (const chunk of all.slice(start).split(marker).slice(1)) {
     const nl = chunk.indexOf("\n"), path = chunk.slice(0, nl).trim();
     const match = path.match(/^(.*)\/\.cc-dispatch\/messages\/([^/]+)\.summary\.json$/);
     const summary = nl >= 0 ? parseJSON(chunk.slice(nl + 1)) : null;

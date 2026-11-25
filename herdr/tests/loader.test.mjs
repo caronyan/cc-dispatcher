@@ -197,3 +197,10 @@ test("loadSummary reads scanned explicit summaries including empty drafts, and h
   writeFileSync(join(run, "research.md"), "Research");
   assert.equal(await loadSummary(io, implicit), "Research");
 });
+
+test("the run-list dump is cut into sections by plain string search, never a pattern split", () => {
+  // The panel's script runtime stalls on a pattern split over the ~1MB dump, and the list never loads.
+  const src = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/model.js", import.meta.url), "utf8");
+  const offenders = src.split("\n").map((line, i) => [i + 1, line]).filter(([, line]) => /\.split\(\s*(new RegExp|\/)/.test(line));
+  assert.deepEqual(offenders, [], "model.js: split the dump with indexOf/split(\"<marker>\") like beforeSections, not with a RegExp");
+});
