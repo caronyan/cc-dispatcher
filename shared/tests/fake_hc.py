@@ -123,10 +123,11 @@ def main(argv):
         labels = dict(rest[i + 1].split("=", 1) for i, a in enumerate(rest) if a == "--label")
         addr = f"t{100 + len(st['terminals'])}"
         pos = [a for i, a in enumerate(rest) if not a.startswith("--") and (i == 0 or rest[i - 1] not in
-               ("--name", "--cwd", "--label", "--template")) and a != "--bg"]
+               ("--name", "--cwd", "--label", "--template", "--parent")) and a != "--bg"]
         st["terminals"][name] = {"address": addr, "state": "live", "status": "working", "turn": 1,
                                  "labels": labels, "cwd": cwd, "argv": pos[:1], "sent": pos[1:],
-                                 "notify": "--no-notify" not in rest}
+                                 "notify": "--no-notify" not in rest,
+                                 "parent": rest[rest.index("--parent") + 1] if "--parent" in rest else None}
         reply = {"address": addr, "name": name, "first_message": {"sent": True}}
     elif cmd == "wait":
         pass

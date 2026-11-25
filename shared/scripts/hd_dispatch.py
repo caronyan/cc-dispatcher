@@ -924,6 +924,11 @@ def head_for(run: Path, meta: dict, agent: str) -> list:
     labels = [f"cc.run={run_tag(run)}", f"cc.call={meta['call']}", f"cc.kind={run_kind(run)}", f"cc.dir={run}",
               f"cc.mode={meta['mode']}", f"cc.round={meta['round']}", f"cc.agent={agent}"]
     head = ["run", "--bg", "--json", "--name", meta["name"], "--cwd", meta["workdir"]]
+    # Its main agent by address: hc's default parent is the terminal hd_dispatch.py runs in, and the panel's
+    # handover, retry and resume run in none, which left the helper outside its main agent in the Agents list.
+    parent = meta.get("parent")
+    if parent and (hc_json("get", parent) or {}).get("state") == "live":
+        head += ["--parent", parent]
     if agent == "agy":  # its passing blocked reports would reach the main agent as notes; wait reports real ones
         head.append("--no-notify")
     for l in labels:

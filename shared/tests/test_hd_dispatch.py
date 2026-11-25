@@ -355,6 +355,27 @@ class Handover(unittest.TestCase):
         # the new terminal is simply working: wait reports nothing until it settles
         self.assertIn("WAIT=timeout", w.hd("wait", "--run", str(w.run_dir), "--timeout", "1").stdout)
 
+    def test_from_the_panel_the_new_helper_stays_under_its_main_agent(self):
+        w = Env()
+        st = w.hc_state()
+        st["terminals"]["main"] = {"address": "t1", "state": "live", "app": "claude"}
+        w.state.write_text(json.dumps(st))
+        m = w.dispatch()
+        self.assertEqual(w.hc_state()["terminals"][m["name"]]["parent"], "t1")
+        w.patch(m["name"], status="error", turn=1, screen="■ Codex ran out of room in the model's context window.\n")
+        w.hd("collect", "--run", str(w.run_dir))
+        r = w.hd("handover", "--run", str(w.run_dir), "--call", "a", "--why", "manual", HC_TERMINAL_ID="")
+        self.assertEqual(w.kv(r).get("FIRST_MESSAGE"), "sent", r.stdout + r.stderr)
+        self.assertEqual(w.hc_state()["terminals"][w.meta()["name"]]["parent"], "t1")
+
+    def test_a_main_agent_that_is_gone_is_not_named_as_parent(self):
+        w = Env()
+        st = w.hc_state()
+        st["terminals"]["main"] = {"address": "t1", "state": "gone", "app": "claude"}
+        w.state.write_text(json.dumps(st))
+        m = w.dispatch()
+        self.assertIsNone(w.hc_state()["terminals"][m["name"]]["parent"])
+
     def test_to_claude_from_the_panel_tells_the_dispatcher(self):
         w = Env()
         m = w.dispatch(mode="read")
