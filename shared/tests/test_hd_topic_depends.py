@@ -1,4 +1,5 @@
 """Task dependencies and notices use temporary repositories and fake hc terminals."""
+import argparse
 import contextlib
 import io
 import json
@@ -6,7 +7,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from test_hd_dispatch import Env, HD, module
@@ -157,6 +160,39 @@ class TopicDepends(unittest.TestCase):
         cycle = self.hd.dependency_cycle(self.w.repo, self.a, f"k{count}", {self.a: data}, [])
         self.assertEqual(cycle[0], cycle[-1])
         self.assertIn(f"{self.a}:k1", cycle)
+
+    def test_dependency_chains_longer_than_the_call_stack_are_checked(self):
+        count = 3000
+        data = self.data(self.a)
+        data["tasks"] = {f"k{i}": {"depends_on": [f"k{i + 1}"] if i < count else []}
+                         for i in range(1, count + 1)}
+        self.assertEqual(self.hd.dependency_cycle(self.w.repo, self.a, "k1", {self.a: data}, []), [])
+        data["tasks"][f"k{count}"]["depends_on"] = ["k1"]
+        cycle = self.hd.dependency_cycle(self.w.repo, self.a, "k1", {self.a: data}, [])
+        self.assertEqual((len(cycle), cycle[0], cycle[-1]), (count + 1, f"{self.a}:k1", f"{self.a}:k1"))
+
+    def test_concurrent_dependency_edits_in_two_topics_cannot_commit_a_cycle(self):
+        validate = self.hd.validate_task_depends
+
+        def slow_validate(*args):
+            validate(*args)
+            time.sleep(0.2)
+
+        def edit(topic, tid, depends):
+            args = argparse.Namespace(repo=str(self.w.repo), topic=topic, topic_cmd="task-edit", task=tid,
+                                      title=None, kind=None, detail=None, depends=depends)
+            try:
+                self.hd.cmd_topic_task(args)
+                return "ok"
+            except SystemExit:
+                return "refused"
+
+        with mock.patch.object(self.hd, "validate_task_depends", side_effect=slow_validate), \
+                contextlib.redirect_stdout(io.StringIO()), ThreadPoolExecutor(max_workers=2) as pool:
+            results = sorted(pool.map(lambda job: edit(*job), [
+                (self.a, self.ka, f"{self.b}:{self.kb}"), (self.b, self.kb, f"{self.a}:{self.ka}")]))
+        self.assertEqual(results, ["ok", "refused"])
+        self.assertEqual(self.hd.dependency_cycle(self.w.repo, self.a, self.ka, {}, []), [])
 
     def test_readonly_dependency_checks_treat_invalid_historical_references_as_missing(self):
         self.request()

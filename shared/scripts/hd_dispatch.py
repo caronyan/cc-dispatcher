@@ -2087,7 +2087,17 @@ def topic_dir(repo, tid):
 
 @contextmanager
 def topic_lock(repo, tid):
-    path = topic_dir(repo, tid).parent / f".{tid}.lock"
+    with file_lock(topic_dir(repo, tid).parent / f".{tid}.lock"):
+        yield
+
+
+def depends_lock(repo):
+    """Taken before any Topic lock by every dependency edit; Topic locks are named .<id>.lock, so no clash."""
+    return file_lock(Path(repo).resolve() / ".cc-dispatch" / "topics" / "_depends.lock")
+
+
+@contextmanager
+def file_lock(path):
     key = (os.getpid(), str(path))
     lock = _TOPIC_LOCKS.setdefault(key, {"mutex": threading.RLock(), "depth": 0})
     with lock["mutex"]:
@@ -2218,30 +2228,37 @@ def dependency_snapshot(repo, topic, snapshots):
 
 
 def dependency_cycle(repo, topic, tid, snapshots, path):
+    """Iterative depth-first walk: chains of any length fit, and each task is expanded once."""
     path = list(path)
     active = {ref: i for i, ref in enumerate(path)}
     complete = set()
 
-    def visit(topic, tid):
+    def enter(topic, tid):
         ref = f"{topic}:{tid}"
         if ref in active:
             return path[active[ref]:] + [ref]
-        if ref in complete:
-            return []
-        task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
-        active[ref] = len(path)
-        path.append(ref)
-        for dep in (task or {}).get("depends_on", []):
-            target = parse_ref(topic, dep, strict=False)
-            cycle = visit(*target) if target else []
-            if cycle:
-                return cycle
-        path.pop()
-        del active[ref]
-        complete.add(ref)
+        if ref not in complete:
+            task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
+            active[ref] = len(path)
+            path.append(ref)
+            stack.append((topic, iter((task or {}).get("depends_on", []))))
         return []
 
-    return visit(topic, tid)
+    stack = []
+    cycle = enter(topic, tid)
+    while stack and not cycle:
+        owner, deps = stack[-1]
+        dep = next(deps, None)
+        if dep is None:
+            stack.pop()
+            ref = path.pop()
+            del active[ref]
+            complete.add(ref)
+            continue
+        target = parse_ref(owner, dep, strict=False)
+        if target:
+            cycle = enter(*target)
+    return cycle
 
 
 def depends_state(repo, src_topic, ref, _seen=None):
@@ -2336,7 +2353,10 @@ def cmd_topic_init(a):
 
 def cmd_topic_task(a):
     repo = topic_repo(a)
-    with topic_lock(repo, a.topic):
+    # Dependency edits in different Topics validate against each other's files; serializing them keeps
+    # two concurrent edits from committing a cycle.
+    depends = depends_lock(repo) if getattr(a, "depends", None) is not None else contextlib.nullcontext()
+    with depends, topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
         topic_writable(data)
         if a.topic_cmd == "task-add":
@@ -2656,8 +2676,23 @@ def MSG_DIR(repo):
     return Path(repo) / ".cc-dispatch" / "messages"
 
 
+def read_json_for_rewrite(path: Path, default):
+    """A file about to be rewritten: a missing file is empty, but a failed read must not pass as empty."""
+    if not path.exists():
+        return default
+    try:
+        text = path.read_text()
+    except OSError as e:
+        fail(f"cannot read {path.name}: {e}", failure="READ_FAILED", code=3)
+    try:
+        v = json.loads(text)
+    except ValueError:
+        return default
+    return v if isinstance(v, type(default)) else default
+
+
 def load_messages(repo, topic):
-    return read_json(MSG_DIR(repo) / f"{topic}.json", {"version": 0, "items": []})
+    return read_json_for_rewrite(MSG_DIR(repo) / f"{topic}.json", {"version": 0, "items": []})
 
 
 def question_state(item):
@@ -2744,7 +2779,7 @@ def outbox_add(repo, S, events):
         return
     MSG_DIR(repo).mkdir(parents=True, exist_ok=True)
     path = MSG_DIR(repo) / f"{S}.outbox.json"
-    data = read_json(path, {"events": []})
+    data = read_json_for_rewrite(path, {"events": []})
     for event in events:
         event = dict(event)
         event.setdefault("id", message_id("e"))
@@ -2800,7 +2835,7 @@ def flush_outbox(repo, only=None, updates=None):
                     else:
                         ensure_message_summary(repo, target, updates)
                 with topic_lock(repo, source):
-                    queued = read_json(path, {"events": []})
+                    queued = read_json_for_rewrite(path, {"events": []})
                     queued["events"] = [e for e in queued["events"]
                                         if (e["id"], e["to"]) != (event["id"], event["to"])]
                     write_json(path, queued)
@@ -3226,7 +3261,9 @@ def close_topic_messages(repo, topic, data):
     owner = data.get("owner") or {}
     sender = {"topic": topic, "title": clean_line(data.get("title")), "task": None, "run": None,
               "terminal": owner.get("terminal"), "agent": owner.get("agent")}
-    events = [{"op": "notice", "to": target, "from": sender,
+    # Ids fixed by the archive stamp: a cleanup redone after an interruption queues the same events again.
+    stamp = f"e-archived-{topic}-{data.get('archived')}"
+    events = [{"id": f"{stamp}-notice-{target}", "op": "notice", "to": target, "from": sender,
                "text": f"Topic「{sender['title']}」（{topic}）已归档，你发给它的未确认消息和待回答问题已作废。",
                "refs": [], "reason": "dropped"} for target in sorted(affected)]
     for path in message_files(repo):
@@ -3237,7 +3274,7 @@ def close_topic_messages(repo, topic, data):
                     and (item.get("from") or {}).get("topic") == topic
                     and question_state(item) == "open"]
         if selected:
-            events.append({"op": "withdraw", "to": path.stem, "from": sender,
+            events.append({"id": f"{stamp}-withdraw-{path.stem}", "op": "withdraw", "to": path.stem, "from": sender,
                            "ids": selected, "text": "", "refs": [], "reason": "archived"})
     outbox_add(repo, topic, events)
     if changed:
@@ -3388,7 +3425,7 @@ def cmd_topic_abandon(a):
 
 def cmd_topic_refined(a):
     repo = topic_repo(a)
-    with topic_lock(repo, a.topic):
+    with depends_lock(repo), topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
         backlog = load_backlog(repo, a.topic)
         path = topic_dir(repo, a.topic) / "refinements.json"

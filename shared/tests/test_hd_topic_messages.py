@@ -260,7 +260,7 @@ class Messages(unittest.TestCase):
         notices = self.inbox(self.a)["incoming"]
         self.assertEqual(len(notices), 1)
         self.assertEqual((notices[0]["kind"], notices[0]["from"]["topic"]), ("notice", self.b))
-        self.assertRegex(notices[0]["event"], r"^e\d+-[0-9a-f]{4}$")
+        self.assertTrue(notices[0]["event"].startswith(f"e-archived-{self.b}-"))
         self.command("archive", "--topic", self.b, HC_TERMINAL_ID="t2")
         self.assertEqual(len(self.messages(self.a)["items"]), 1)
         self.assertEqual(self.reply(question, code=3)["FAILURE"], "TOPIC_ARCHIVED")
@@ -379,6 +379,34 @@ class Messages(unittest.TestCase):
         self.assertEqual(self.hd.question_state(own), "dropped")
         self.command("deliver")
         self.assertEqual(len(self.messages(self.b)["items"]), 2)
+
+    def test_archive_cleanup_redone_after_queueing_sends_each_notice_once(self):
+        self.send()
+        with mock.patch.object(self.hd, "save_messages", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("archive", "--topic", self.b, HC_TERMINAL_ID="t2")
+        self.assertTrue(self.hd.load_topic(self.w.repo, self.b)["messages_pending"])
+        self.command("deliver")
+        self.command("deliver")
+        notices = [item for item in self.messages(self.a)["items"] if item["kind"] == "notice"]
+        self.assertEqual(len(notices), 1)
+
+    def test_a_mailbox_that_cannot_be_read_is_never_rewritten(self):
+        kept = self.send(kind="note")
+        path, read = self.path(self.b), self.hd.Path.read_text
+        failed = []
+
+        def read_once_failing(current, *args, **kwargs):
+            if current == path and not failed:
+                failed.append(True)
+                raise OSError("mailbox unavailable")
+            return read(current, *args, **kwargs)
+
+        with mock.patch.object(self.hd.Path, "read_text", new=read_once_failing):
+            with self.assertRaises(SystemExit):
+                self.invoke("msg", "--topic", self.a, "--to", self.b, "--kind", "note", "--text=Later")
+        self.assertTrue(failed)
+        self.assertEqual([item["id"] for item in self.messages(self.b)["items"]], [kept])
 
     def test_reopening_a_run_finishes_archive_cleanup_before_new_questions_are_sent(self):
         self.bind(self.a, self.w.run_dir, "t1")
