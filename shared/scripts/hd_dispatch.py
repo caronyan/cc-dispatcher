@@ -1401,6 +1401,7 @@ def held_line(run: Path):
 
 def cmd_collect(a):
     run = Path(a.run).resolve()
+    nudge(repo_of_run(run))
     if held_line(run):
         return
     if a.call:
@@ -1417,6 +1418,15 @@ def cmd_wait(a):
     deadline = time.time() + a.timeout
     heard = answers_size(run)
     while True:
+        messages = wait_messages(run)
+        try:
+            _, _, more = deliver_topics(repo_of_run(run), waiting=run, report=False)
+            messages.extend(more)
+        except (Exception, SystemExit):
+            pass
+        if messages:
+            out(wait="message", messages=",".join(dict.fromkeys(messages)))
+            return
         if answers_size(run) > heard and open_answers(run):
             out(wait="answer")  # the person answered in the panel; main() prints ANSWERS=
             return
@@ -2852,6 +2862,7 @@ def cmd_topic_msg(a):
                               "claiming": None, "delivered": None, "acked_at": None}
             save_messages(repo, topic, data)
         out(answered=a.reply_to)
+        nudge(repo)
         return
     target = a.to or (identity["topic"] if identity["user"] else None)
     if not target:
@@ -2870,11 +2881,157 @@ def cmd_topic_msg(a):
         data["items"].append(item)
         save_messages(repo, target, data)
     out(message=item["id"])
+    nudge(repo)
 
 
 def message_files(repo):
     return [path for path in sorted(MSG_DIR(repo).glob("*.json"))
             if not path.name.endswith((".summary.json", ".outbox.json"))]
+
+
+def undelivered(item_or_answer, owner_terminal, now):
+    delivered = item_or_answer.get("delivered") or {}
+    claiming = item_or_answer.get("claiming") or {}
+    return (item_or_answer.get("acked_at") is None
+            and item_or_answer.get("withdrawn_at") is None
+            and item_or_answer.get("dropped") is None
+            and (not delivered or delivered.get("terminal") != owner_terminal)
+            and (not claiming or now - claiming["at"] > 60
+                 or claiming.get("terminal") != owner_terminal))
+
+
+def topic_deliverable(repo, T):
+    data = read_json(topic_dir(repo, T) / "topic.json", {})
+    terminal = (data.get("owner") or {}).get("terminal")
+    if not data or any(data.get(key) is not None
+                       for key in ("archived", "deleting", "paused_at", "stopping_at")):
+        return False, terminal
+    for task in data.get("tasks", {}).values():
+        if not task.get("run"):
+            continue
+        run = Path(repo) / ".cc-dispatch" / task["run"]
+        if not topic_task_done(task, run):
+            c = control(run)
+            if c["state"] == "handoff" or (c.get("owner") and c["owner"] != terminal):
+                return False, terminal
+    return bool(terminal), terminal
+
+
+def topic_message_entries(repo, topic):
+    for item in load_messages(repo, topic)["items"]:
+        yield topic, item, "item"
+    for path in message_files(repo):
+        if path.stem == topic:
+            continue
+        for item in load_messages(repo, path.stem)["items"]:
+            if (item["kind"] == "question" and (item.get("from") or {}).get("topic") == topic
+                    and item.get("answer") is not None):
+                yield path.stem, item, "answer"
+
+
+def pending_for(repo, T):
+    ready, terminal = topic_deliverable(repo, T)
+    if not ready:
+        return []
+    now = time.time()
+    return [(topic, item["id"], slot) for topic, item, slot in topic_message_entries(repo, T)
+            if undelivered(item if slot == "item" else item["answer"], terminal, now)]
+
+
+def claim_messages(repo, topic, terminal, via):
+    """Recheck snapshots under each mailbox's lock so wait and terminal delivery cannot both win."""
+    grouped = {}
+    for file_topic, mid, slot in pending_for(repo, topic):
+        grouped.setdefault(file_topic, []).append((mid, slot))
+    claimed = []
+    claim = {"at": time.time(), "terminal": terminal}
+    for file_topic, entries in grouped.items():
+        with topic_lock(repo, file_topic):
+            ready, owner = topic_deliverable(repo, topic)
+            if not ready or owner != terminal:
+                break
+            data = load_messages(repo, file_topic)
+            by_id = {item["id"]: item for item in data["items"]}
+            changed = False
+            for mid, slot in entries:
+                item = by_id.get(mid)
+                value = item if slot == "item" else (item or {}).get("answer")
+                if value is None or not undelivered(value, terminal, time.time()):
+                    continue
+                if via == "wait":
+                    value.update(claiming=None, delivered={**claim, "via": "wait"})
+                else:
+                    value["claiming"] = claim
+                claimed.append((file_topic, mid, slot))
+                changed = True
+            if changed:
+                save_messages(repo, file_topic, data)
+    return claimed, claim
+
+
+def settle_message_claims(repo, entries, claim, delivered):
+    grouped = {}
+    for file_topic, mid, slot in entries:
+        grouped.setdefault(file_topic, []).append((mid, slot))
+    for file_topic, refs in grouped.items():
+        with topic_lock(repo, file_topic):
+            data = load_messages(repo, file_topic)
+            by_id = {item["id"]: item for item in data["items"]}
+            changed = False
+            for mid, slot in refs:
+                item = by_id.get(mid)
+                value = item if slot == "item" else (item or {}).get("answer")
+                if value is None or value.get("claiming") != claim:
+                    continue
+                value["claiming"] = None
+                if delivered:
+                    value["delivered"] = {"at": time.time(), "terminal": claim["terminal"],
+                                          "via": "terminal"}
+                changed = True
+            if changed:
+                save_messages(repo, file_topic, data)
+
+
+def wait_messages(run):
+    c = control(run)
+    if c["state"] != "running" or not_mine(c):
+        return []
+    repo = repo_of_run(run)
+    bound = topic_binding_snapshot(repo, run)
+    if not bound:
+        return []
+    ready, owner = topic_deliverable(repo, bound[0])
+    terminal = os.environ.get("HC_TERMINAL_ID") or owner
+    if not ready or terminal != owner:
+        return []
+    entries, _ = claim_messages(repo, bound[0], terminal, "wait")
+    return [mid for _, mid, _ in entries]
+
+
+def messages_check(run):
+    repo = repo_of_run(run)
+    bound = topic_binding_snapshot(repo, run)
+    if not bound:
+        return
+    ids = []
+    for _, item, slot in topic_message_entries(repo, bound[0]):
+        value = item if slot == "item" else item["answer"]
+        if (value.get("acked_at") is None and value.get("withdrawn_at") is None
+                and value.get("dropped") is None):
+            ids.append(item["id"])
+    if ids:
+        out(messages_unacked=",".join(dict.fromkeys(ids)))
+        out(message_hint=f"运行 python3 {shlex.quote(str(Path(__file__).resolve()))} topic inbox "
+                         f"--run {shlex.quote(str(run))} 读取，处理后 topic msg-ack")
+
+
+def nudge(repo):
+    try:
+        # Persist notifications even when another process owns the terminal delivery round.
+        flush_outbox(repo)
+        deliver_topics(repo, report=False)
+    except (Exception, SystemExit):
+        pass
 
 
 def message_location(repo, mid):
@@ -3094,7 +3251,7 @@ def cmd_topic_finish(a):
         state = read_json(state_path, {})
         state.update(topic=topic_id, task=task_id, finished=now)
         write_json(state_path, state)
-    flush_outbox(repo, only=topic_id)
+    nudge(repo)
     out(finished=task_id)
 
 
@@ -3129,7 +3286,7 @@ def cmd_topic_abandon(a):
             save_topic(repo, a.topic, data)
             result = dict(abandoned=a.task, run=run.name if retired else "-",
                           closed=retired["closed"] if retired else "-")
-    flush_outbox(repo, only=a.topic)
+    nudge(repo)
     out(**result)
 
 
@@ -3408,7 +3565,7 @@ def topic_owner_busy(repo, terminal):
     return False
 
 
-def deliver_topic_request(repo, data, request, task_id, item_ids):
+def topic_delivery_target(data):
     owner = data.get("owner") or {}
     terminal = owner.get("terminal")
     if not terminal:
@@ -3426,6 +3583,16 @@ def deliver_topic_request(repo, data, request, task_id, item_ids):
         prompts = re.findall(r"❯ ([^\r\n]*)", screen.stdout)
         if screen.returncode or (prompts and prompts[-1].strip()):
             return None
+    return info
+
+
+def deliver_topic_request(repo, data, request, task_id, item_ids):
+    info = topic_delivery_target(data)
+    if not info:
+        return None
+    terminal = data["owner"]["terminal"]
+    status = info["status"]["state"]
+    agent = main_key(agent_on(info))
     # Delivery always uses the actual owner; --agent also serves requests for a new tab.
     message = topic_message(repo, data, {**request, "agent": agent}, task_id, item_ids)
     if agent == "claude" and request["type"] == "dispatch":
@@ -3445,17 +3612,58 @@ def deliver_topic_request(repo, data, request, task_id, item_ids):
     return info.get("address") or terminal
 
 
-def cmd_topic_deliver(a):
-    repo = topic_repo(a)
+def deliver_topic_messages(repo, topic, owners):
+    ready, terminal = topic_deliverable(repo, topic)
+    if not ready or terminal in owners or not pending_for(repo, topic):
+        return None
+    data = read_json(topic_dir(repo, topic) / "topic.json", {})
+    info = topic_delivery_target(data)
+    if not info or info.get("address") in owners:
+        return None
+    entries, claim = claim_messages(repo, topic, terminal, "terminal")
+    if not entries:
+        return None
+    current = read_json(topic_dir(repo, topic) / "topic.json", {})
+    if (topic_deliverable(repo, topic) != (True, terminal)
+            or current.get("owner") != data.get("owner")):
+        settle_message_claims(repo, entries, claim, False)
+        return None
+    message = (f"[cc-dispatch 跨 Topic] Topic {clean_line(data.get('title'))} "
+               f"有 {len(entries)} 条来自其他 Topic 的消息，运行 python3 "
+               f"{shlex.quote(str(Path(__file__).resolve()))} topic inbox --topic {topic} 查看。")
+    condition = ("--if", "idle") if info["status"]["state"] == "idle" else ()
+    try:
+        result = hc("send", terminal, message, *condition, "--json")
+        try:
+            reply = json.loads(result.stdout)
+        except ValueError:
+            reply = {}
+        sent = (not result.returncode
+                and not (isinstance(reply, dict) and (reply.get("error") or reply.get("started") is False)))
+    except Exception:
+        settle_message_claims(repo, entries, claim, False)
+        raise
+    settle_message_claims(repo, entries, claim, sent)
+    return (info.get("address") or terminal) if sent else None
+
+
+def deliver_topics(repo, waiting=None, report=True):
     root = Path(repo) / ".cc-dispatch" / "topics"
     root.mkdir(parents=True, exist_ok=True)
-    delivered, owners = [], set()
+    delivered, message_delivered, messages, owners = [], [], [], set()
     with (root / ".deliver.lock").open("a") as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            out(delivered="")
-            return
+            return delivered, message_delivered, messages
+        flush_outbox(repo)
+        for path in message_files(repo):
+            with topic_lock(repo, path.stem):
+                ensure_message_summary(repo, path.stem)
+        if waiting is not None:
+            messages = wait_messages(waiting)
+            if messages:
+                return delivered, message_delivered, messages
         for path in sorted(root.glob("*/topic.json")):
             tid = path.parent.name
             with topic_lock(repo, tid):
@@ -3468,6 +3676,8 @@ def cmd_topic_deliver(a):
                 if not data or any(data.get(k) is not None
                                    for k in ("archived", "paused_at", "deleting", "stopping_at")):
                     continue
+                if not topic_deliverable(repo, tid)[0]:
+                    continue
                 owner = data.get("owner") or {}
                 if owner.get("terminal") != terminal or terminal in owners:
                     continue
@@ -3478,8 +3688,9 @@ def cmd_topic_deliver(a):
                 for entry in pending:
                     blockers = depends_blockers(repo, tid, data["tasks"][entry[1]]) if entry[1] else []
                     if blockers:
-                        report_depends(blockers)
-                        out(failure="DEPENDS_PENDING")
+                        if report:
+                            report_depends(blockers)
+                            out(failure="DEPENDS_PENDING")
                     else:
                         ready.append(entry)
                 pending = ready
@@ -3503,7 +3714,19 @@ def cmd_topic_deliver(a):
                     save_backlog(repo, tid, backlog)
                 owners.update((terminal, address))
                 delivered.append(f"{tid}:{request['id']}")
-    out(delivered=",".join(delivered))
+        for path in sorted(root.glob("*/topic.json")):
+            tid = path.parent.name
+            address = deliver_topic_messages(repo, tid, owners)
+            if address:
+                terminal = (read_json(path, {}).get("owner") or {}).get("terminal")
+                owners.update((terminal, address))
+                message_delivered.append(tid)
+    return delivered, message_delivered, messages
+
+
+def cmd_topic_deliver(a):
+    delivered, messages, _ = deliver_topics(topic_repo(a))
+    out(delivered=",".join(delivered), message_delivered=",".join(messages))
 
 
 def cmd_topic(a):
@@ -4265,6 +4488,7 @@ def main():
     if a.cmd in ("wait", "collect"):
         usage_check(Path(a.run).resolve())
         answers_check(Path(a.run).resolve())
+        messages_check(Path(a.run).resolve())
 
 
 if __name__ == "__main__":

@@ -239,8 +239,10 @@ class TopicDepends(unittest.TestCase):
         self.request(self.a, ready, "--cancel")
         self.start()
         self.finish()
+        # Finishing the dependency hands the unblocked request over right away.
+        self.assertIsNotNone(self.data(self.a)["tasks"][self.ka]["request"]["delivered_at"])
         self.w.patch("parent", status="idle", screen="\u276f ")
-        self.assertEqual(self.command("deliver")["DELIVERED"], f"{self.a}:{blocked}")
+        self.assertNotIn(f"{self.a}:{blocked}", self.command("deliver").get("DELIVERED", ""))
 
     def test_same_topic_dependencies_gate_dispatch_without_self_notices(self):
         consumer = self.task(self.b, "Local consumer", depends=self.kb)
