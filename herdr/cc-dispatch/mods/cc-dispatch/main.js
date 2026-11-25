@@ -332,7 +332,7 @@ export default class Dispatch extends View {
       return;
     }
     if (this.role !== "panel") return;
-    this.runs = []; this.topics = []; this.states = {}; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.liveKey = null;
+    this.runs = []; this.topics = []; this.states = {}; this.error = null; this.repo = null; this.on = null; this.ctxKey = null; this.place = null; this.liveKey = null;
     this.open = null; this.fold = new Map(); this.groupFold = new Map(); this.bgMore = new Map(); this.showOld = false; this.showArchived = false; this.loading = false; this.token = 0; this.lastAgent = null;
     this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.statsBusy = false;
     this.bg = { runs: {}, sessions: {} };
@@ -378,6 +378,14 @@ export default class Dispatch extends View {
     return { on: space.machine ?? null, folder: cwd || space.folder || "" };
   }
 
+  // A new repo: forget what was read and opened for the last one.
+  startOver() {
+    this.open = null; this.error = null; this.statsError = null;
+    this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.bg = { runs: {}, sessions: {} }; this.quota = {};
+    this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
+    this.fold.clear(); this.groupFold.clear(); this.bgMore.clear(); this.showOld = false; this.showArchived = false; this.lastAgent = null;
+  }
+
   refresh(cx) {
     if (this.loading) return;
     this.loading = true;
@@ -390,6 +398,8 @@ export default class Dispatch extends View {
         if (token !== this.token) return;
         const { runs, topics, states, error } = await loadRuns(files, repo, terminals() ?? []);
         if (token !== this.token) return;
+        const place = `${ctx?.on ?? null}|${repo}`;
+        if (place !== this.place) { this.place = place; this.startOver(); }
         this.repo = repo; this.runs = runs; this.topics = topics; this.states = states; this.error = error;
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
@@ -512,14 +522,11 @@ export default class Dispatch extends View {
     if (this.role !== "panel") return this.renderDialog();
     const t = theme();
 
-    // Follow the shown space and its focused folder; a new place starts over.
+    // Follow the shown space and its focused folder. Focus moving (a dialog or peek opening and closing,
+    // another folder of the same repo) only re-reads; what is shown starts over only when the repo changes.
     const ctx = this.context(), key = ctx ? `${ctx.on}|${ctx.folder}` : "";
     if (key !== this.ctxKey) {
-      this.ctxKey = key; this.ctx = ctx; this.token++; this.loading = false; this.statsBusy = false; this.open = null;
-      this.runs = []; this.topics = []; this.states = {}; this.repo = null; this.error = null; this.statsError = null;
-      this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.bg = { runs: {}, sessions: {} }; this.quota = {};
-      this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
-      this.fold.clear(); this.groupFold.clear(); this.bgMore.clear(); this.showOld = false; this.showArchived = false; this.lastAgent = null;
+      this.ctxKey = key; this.ctx = ctx; this.token++; this.loading = false; this.statsBusy = false;
       later(cx, (cx) => this.refresh(cx));
     }
     // Helpers came, went or relabelled themselves: re-read meta.json now, not at the next poll.

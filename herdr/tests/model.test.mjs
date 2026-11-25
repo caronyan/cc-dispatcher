@@ -418,6 +418,28 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.equal(closed, 1);
     assert.equal(missingMarker.failed, "没有成功标记");
   });
+
+  await t.test("focus moving within the same repo keeps what the panel shows; another repo starts over", async () => {
+    let repo = "/r";
+    Object.assign(context, {
+      findRepo: async () => repo, loadRuns: async () => ({ runs: [], topics: [], states: {}, error: null }),
+      terminals: () => [], checking: () => true, knownAgents: async () => [],
+    });
+    const jobs = [], cx2 = { notify() {}, sleep: async () => {}, spawn(fn) { jobs.push(fn(cx2)); } };
+    const settle = async () => { while (jobs.length) await Promise.all(jobs.splice(0)); };
+    const view = new context.TaskView();
+    Object.assign(view, { token: 0, loading: false, place: null, fold: new Map(), groupFold: new Map(), bgMore: new Map() });
+    const go = async (folder) => { view.ctx = { on: null, folder }; view.token++; view.loading = false; view.refresh(cx2); await settle(); };
+    await go("/r");
+    view.open = "run-a"; view.fold.set("topic-a", true);
+    await go("/r/.cc-dispatch-wt/peek");  // a dialog or peek took focus, then gave it back
+    assert.equal(view.open, "run-a", "关掉弹窗不应清空面板");
+    assert.ok(view.fold.get("topic-a"));
+    repo = "/other";
+    await go("/other");
+    assert.equal(view.open, null);
+    assert.equal(view.fold.size, 0);
+  });
 });
 
 test("Topics are listed running first, then paused, then the rest, with archived last", () => {
