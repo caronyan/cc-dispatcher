@@ -187,8 +187,19 @@ class TopicDepends(unittest.TestCase):
             return read(current, *args, **kwargs)
 
         with mock.patch.object(self.hd.Path, "read_text", new=unreadable), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(self.hd.FileUnreadable):
             self.hd.depends_blockers(self.w.repo, self.a, self.data(self.a)["tasks"][self.ka])
+
+    def test_a_damaged_dependency_holds_its_request_while_other_topics_deliver(self):
+        blocked = self.request()["REQUEST"]
+        self.depend()
+        damaged = self.topic_path(self.b).read_text() + "trailing damage"
+        self.topic_path(self.b).write_text(damaged)
+        self.w.patch("parent", status="idle", screen="\u276f ")
+        result = self.command("deliver")
+        self.assertIn("damaged", result["SKIPPED"])
+        self.assertNotIn(f"{self.a}:{blocked}", result.get("DELIVERED", ""))
+        self.assertIsNone(self.data(self.a)["tasks"][self.ka]["request"]["delivered_at"])
 
     def test_concurrent_dependency_edits_in_two_topics_cannot_commit_a_cycle(self):
         validate = self.hd.validate_task_depends

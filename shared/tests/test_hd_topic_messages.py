@@ -415,6 +415,53 @@ class Messages(unittest.TestCase):
         item = next(i for i in self.messages(self.b)["items"] if i["id"] == question)
         self.assertEqual(self.hd.question_state(item), "withdrawn")
 
+    def test_archive_cleanup_waits_for_a_damaged_recipient_mailbox_to_be_repaired(self):
+        question = self.send()
+        original = self.path(self.b).read_text()
+        self.path(self.b).write_text(original + "trailing damage")
+        self.assertEqual(self.command("archive", "--topic", self.a, code=3)["FAILURE"], "FILE_DAMAGED")
+        self.assertIn("damaged", self.command("deliver")["SKIPPED"])
+        self.assertTrue(self.hd.load_topic(self.w.repo, self.a)["messages_pending"])
+        self.path(self.b).write_text(original)
+        self.command("deliver")
+        item = next(i for i in self.messages(self.b)["items"] if i["id"] == question)
+        self.assertEqual(self.hd.question_state(item), "withdrawn")
+
+    def test_an_outbox_notice_stays_queued_while_its_recipient_topic_is_unreadable(self):
+        with self.hd.topic_lock(self.w.repo, self.a):
+            self.hd.outbox_add(self.w.repo, self.a, [{
+                "op": "notice", "to": self.b, "from": {"topic": self.a},
+                "text": "Kept", "refs": [], "reason": "follow"}])
+        path, read = self.topic_path(self.b), self.hd.Path.read_text
+
+        def unreadable(current, *args, **kwargs):
+            if current == path:
+                raise OSError("topic unavailable")
+            return read(current, *args, **kwargs)
+
+        with mock.patch.object(self.hd.Path, "read_text", new=unreadable):
+            self.hd.flush_outbox(self.w.repo)
+        self.assertEqual(len(json.loads(self.path(self.a, ".outbox.json").read_text())["events"]), 1)
+        self.hd.flush_outbox(self.w.repo)
+        self.assertEqual([i["kind"] for i in self.messages(self.b)["items"]], ["notice"])
+
+    def test_task_end_notices_wait_while_a_follower_topic_is_unreadable(self):
+        self.command("follow", "--topic", self.b, "--target", self.a, HC_TERMINAL_ID="t2")
+        task = self.command("task-add", "--topic", self.a, "--title", "Watched", "--kind", "dev")["TASK"]
+        self.command("start", "--run", self.w.run_dir, "--topic", self.a, "--task", task)
+        path, read = self.topic_path(self.b), self.hd.Path.read_text
+
+        def unreadable(current, *args, **kwargs):
+            if current == path:
+                raise OSError("topic unavailable")
+            return read(current, *args, **kwargs)
+
+        with mock.patch.object(self.hd.Path, "read_text", new=unreadable), self.assertRaises(SystemExit):
+            self.invoke("finish", "--run", self.w.run_dir, "--done", "x", "--line", "Done")
+        self.assertTrue(self.hd.load_topic(self.w.repo, self.a)["tasks"][task]["end_event"]["pending"])
+        self.command("deliver")
+        self.assertEqual([i["kind"] for i in self.messages(self.b)["items"]], ["notice"])
+
     def test_a_mailbox_that_cannot_be_read_is_never_rewritten(self):
         kept = self.send(kind="note")
         path, read = self.path(self.b), self.hd.Path.read_text

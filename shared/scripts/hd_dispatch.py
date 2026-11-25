@@ -2228,7 +2228,7 @@ def parse_ref(src_topic, ref, strict=True):
 
 def dependency_snapshot(repo, topic, snapshots):
     if topic not in snapshots:
-        snapshots[topic] = read_json_present(topic_dir(repo, topic) / "topic.json", {})
+        snapshots[topic] = read_json_strict(topic_dir(repo, topic) / "topic.json", {})
     return snapshots[topic]
 
 
@@ -2684,32 +2684,32 @@ def MSG_DIR(repo):
     return Path(repo) / ".cc-dispatch" / "messages"
 
 
-def read_json_present(path: Path, default, damaged_ok=True):
-    """A missing file is empty; a file that exists but cannot be read never passes as empty."""
+class FileUnreadable(OSError):
+    """A file that exists but cannot be read or parsed: never treat it as missing or empty."""
+    def __init__(self, message, damaged):
+        super().__init__(message)
+        self.damaged = damaged
+
+
+def read_json_strict(path: Path, default):
+    """A missing file is empty; one that exists but cannot be read or is damaged raises FileUnreadable."""
     if not path.exists():
         return default
     try:
         text = path.read_text()
     except OSError as e:
-        fail(f"cannot read {path}: {e}", failure="READ_FAILED", code=3)
+        raise FileUnreadable(f"cannot read {path}: {e}", damaged=False) from e
     try:
         v = json.loads(text)
     except ValueError:
         v = None
-    if isinstance(v, type(default)):
-        return v
-    if not damaged_ok:
-        fail(f"{path} is damaged; repair or move it aside before retrying", failure="FILE_DAMAGED", code=3)
-    return default
-
-
-def read_json_for_rewrite(path: Path, default):
-    """A file about to be rewritten: anything other than a missing file must parse, or it would be overwritten."""
-    return read_json_present(path, default, damaged_ok=False)
+    if not isinstance(v, type(default)):
+        raise FileUnreadable(f"{path} is damaged; repair or move it aside before retrying", damaged=True)
+    return v
 
 
 def load_messages(repo, topic):
-    return read_json_for_rewrite(MSG_DIR(repo) / f"{topic}.json", {"version": 0, "items": []})
+    return read_json_strict(MSG_DIR(repo) / f"{topic}.json", {"version": 0, "items": []})
 
 
 def question_state(item):
@@ -2796,7 +2796,7 @@ def outbox_add(repo, S, events):
         return
     MSG_DIR(repo).mkdir(parents=True, exist_ok=True)
     path = MSG_DIR(repo) / f"{S}.outbox.json"
-    data = read_json_for_rewrite(path, {"events": []})
+    data = read_json_strict(path, {"events": []})
     for event in events:
         event = dict(event)
         event.setdefault("id", message_id("e"))
@@ -2824,7 +2824,7 @@ def flush_outbox(repo, only=None, updates=None):
                 target, changed = event["to"], False
                 with topic_lock(repo, target):
                     data = load_messages(repo, target)
-                    topic = read_json(topic_dir(repo, target) / "topic.json", {})
+                    topic = read_json_strict(topic_dir(repo, target) / "topic.json", {})
                     if event["op"] == "withdraw":
                         selected = set(event.get("ids", []))
                         for item in data["items"]:
@@ -2852,7 +2852,7 @@ def flush_outbox(repo, only=None, updates=None):
                     else:
                         ensure_message_summary(repo, target, updates)
                 with topic_lock(repo, source):
-                    queued = read_json_for_rewrite(path, {"events": []})
+                    queued = read_json_strict(path, {"events": []})
                     queued["events"] = [e for e in queued["events"]
                                         if (e["id"], e["to"]) != (event["id"], event["to"])]
                     write_json(path, queued)
@@ -3286,7 +3286,7 @@ def close_topic_messages(repo, topic, data):
     for path in message_files(repo):
         if path.stem == topic:
             continue
-        items = read_json_present(path, {"items": []})["items"]
+        items = read_json_strict(path, {"items": []})["items"]
         selected = [item["id"] for item in items if item["kind"] == "question"
                     and (item.get("from") or {}).get("topic") == topic
                     and question_state(item) == "open"]
@@ -3324,7 +3324,7 @@ def queue_task_notices(repo, topic, data, tid, kind, reason=None):
         target = path.parent.name
         if target == topic:
             continue
-        other = read_json(path, {})
+        other = read_json_strict(path, {})
         reasons = []
         if any(f"{topic}:{tid}" in item.get("depends_on", [])
                for item in other.get("tasks", {}).values()):
@@ -3806,6 +3806,12 @@ def deliver_topic_messages(repo, topic, owners):
 def deliver_topics(repo, waiting=None, report=True, updates=None):
     root = Path(repo) / ".cc-dispatch" / "topics"
     delivered, message_delivered, messages, owners = [], [], [], set()
+
+    def skipped(error):
+        # One unreadable or damaged file holds back only its own Topic; its pending work stays queued.
+        if report:
+            out(skipped=clean_line(str(error)))
+
     if not root.is_dir():
         return delivered, message_delivered, messages
     with (root / ".deliver.lock").open("a") as stream:
@@ -3815,81 +3821,95 @@ def deliver_topics(repo, waiting=None, report=True, updates=None):
             return delivered, message_delivered, messages
         for path in sorted(root.glob("*/topic.json")):
             tid = path.parent.name
-            with topic_lock(repo, tid):
-                data = read_json(path, {})
-                if data.get("messages_pending"):
-                    close_topic_messages(repo, tid, data)
-                    data.pop("messages_pending", None)
-                    save_topic(repo, tid, data)
-                    if updates is not None:
-                        updates.add(tid)
-                for task_id, task in data.get("tasks", {}).items():
-                    marker = task.get("end_event") or {}
-                    if marker.get("pending"):
-                        task_end_event(repo, tid, data, task_id, marker["kind"], marker.get("reason"))
+            try:
+                with topic_lock(repo, tid):
+                    data = read_json(path, {})
+                    if data.get("messages_pending"):
+                        close_topic_messages(repo, tid, data)
+                        data.pop("messages_pending", None)
+                        save_topic(repo, tid, data)
                         if updates is not None:
                             updates.add(tid)
+                    for task_id, task in data.get("tasks", {}).items():
+                        marker = task.get("end_event") or {}
+                        if marker.get("pending"):
+                            task_end_event(repo, tid, data, task_id, marker["kind"], marker.get("reason"))
+                            if updates is not None:
+                                updates.add(tid)
+            except FileUnreadable as e:
+                skipped(e)
         flush_outbox(repo, updates=updates)
         for path in message_files(repo):
-            with topic_lock(repo, path.stem):
-                ensure_message_summary(repo, path.stem, updates)
+            try:
+                with topic_lock(repo, path.stem):
+                    ensure_message_summary(repo, path.stem, updates)
+            except FileUnreadable as e:
+                skipped(e)
         if waiting is not None:
             messages = wait_messages(waiting)
             if messages:
                 return delivered, message_delivered, messages
         for path in sorted(root.glob("*/topic.json")):
             tid = path.parent.name
-            with topic_lock(repo, tid):
-                data = read_json(path, {})
-                terminal = (data.get("owner") or {}).get("terminal")
-            # Scan other Topics without holding this Topic's lock.
-            busy = bool(terminal) and topic_owner_busy(repo, terminal)
-            with topic_lock(repo, tid):
-                data = read_json(path, {})
-                if not data or any(data.get(k) is not None
-                                   for k in ("archived", "paused_at", "deleting", "stopping_at")):
-                    continue
-                if not topic_deliverable(repo, tid)[0]:
-                    continue
-                owner = data.get("owner") or {}
-                if owner.get("terminal") != terminal or terminal in owners:
-                    continue
-                backlog = load_backlog(repo, tid)
-                pending = [entry for entry in topic_pending_requests(data, backlog)
-                           if not busy or entry[0]["type"] != "dispatch"]
-                ready = []
-                for entry in pending:
-                    blockers = depends_blockers(repo, tid, data["tasks"][entry[1]]) if entry[1] else []
-                    if blockers:
-                        if report:
-                            report_depends(blockers)
-                            out(failure="DEPENDS_PENDING")
+            try:
+                with topic_lock(repo, tid):
+                    data = read_json(path, {})
+                    terminal = (data.get("owner") or {}).get("terminal")
+                # Scan other Topics without holding this Topic's lock.
+                busy = bool(terminal) and topic_owner_busy(repo, terminal)
+                with topic_lock(repo, tid):
+                    data = read_json(path, {})
+                    if not data or any(data.get(k) is not None
+                                       for k in ("archived", "paused_at", "deleting", "stopping_at")):
+                        continue
+                    if not topic_deliverable(repo, tid)[0]:
+                        continue
+                    owner = data.get("owner") or {}
+                    if owner.get("terminal") != terminal or terminal in owners:
+                        continue
+                    backlog = load_backlog(repo, tid)
+                    pending = [entry for entry in topic_pending_requests(data, backlog)
+                               if not busy or entry[0]["type"] != "dispatch"]
+                    ready = []
+                    for entry in pending:
+                        blockers = depends_blockers(repo, tid, data["tasks"][entry[1]]) if entry[1] else []
+                        if blockers:
+                            if report:
+                                report_depends(blockers)
+                                out(failure="DEPENDS_PENDING")
+                        else:
+                            ready.append(entry)
+                    pending = ready
+                    if not pending:
+                        continue
+                    request, task_id, item_ids = pending[0]
+                    info = hc_json("get", terminal) if terminal else None
+                    if (info or {}).get("address") in owners:
+                        continue
+                    address = deliver_topic_request(repo, data, request, task_id, item_ids)
+                    if not address:
+                        continue
+                    now = time.time()
+                    if task_id:
+                        data["tasks"][task_id]["request"]["delivered_at"] = now
+                        save_topic(repo, tid, data)
                     else:
-                        ready.append(entry)
-                pending = ready
-                if not pending:
-                    continue
-                request, task_id, item_ids = pending[0]
-                info = hc_json("get", terminal) if terminal else None
-                if (info or {}).get("address") in owners:
-                    continue
-                address = deliver_topic_request(repo, data, request, task_id, item_ids)
-                if not address:
-                    continue
-                now = time.time()
-                if task_id:
-                    data["tasks"][task_id]["request"]["delivered_at"] = now
-                    save_topic(repo, tid, data)
-                else:
-                    for item in backlog["items"]:
-                        if (item.get("request") or {}).get("id") == request["id"]:
-                            item["request"]["delivered_at"] = now
-                    save_backlog(repo, tid, backlog)
-                owners.update((terminal, address))
-                delivered.append(f"{tid}:{request['id']}")
+                        for item in backlog["items"]:
+                            if (item.get("request") or {}).get("id") == request["id"]:
+                                item["request"]["delivered_at"] = now
+                        save_backlog(repo, tid, backlog)
+                    owners.update((terminal, address))
+                    delivered.append(f"{tid}:{request['id']}")
+            except FileUnreadable as e:
+                skipped(e)
+
         for path in sorted(root.glob("*/topic.json")):
             tid = path.parent.name
-            address = deliver_topic_messages(repo, tid, owners)
+            try:
+                address = deliver_topic_messages(repo, tid, owners)
+            except FileUnreadable as e:
+                skipped(e)
+                continue
             if address:
                 terminal = (read_json(path, {}).get("owner") or {}).get("terminal")
                 owners.update((terminal, address))
@@ -4658,9 +4678,12 @@ def main():
     hf.add_argument("--no-notes", action="store_true", help="hand off without <run>/handoff-notes.md")
     register_topic_parser(sub)
     a = p.parse_args()
-    {"topic": cmd_topic, "recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "delete": cmd_delete, "retire": cmd_retire, "ask": cmd_ask, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
-     "status": cmd_status, "diagnose": cmd_diagnose, "cleanup": cmd_cleanup, "freeze": cmd_freeze,
-     "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop}[a.cmd](a)
+    try:
+        {"topic": cmd_topic, "recover": cmd_recover, "adopt": cmd_adopt, "takeover": cmd_takeover, "runs": cmd_runs, "delete": cmd_delete, "retire": cmd_retire, "ask": cmd_ask, "handoff": cmd_handoff, "handover": cmd_handover, "probe": cmd_probe, "run": cmd_run, "send": cmd_send, "wait": cmd_wait, "collect": cmd_collect,
+         "status": cmd_status, "diagnose": cmd_diagnose, "cleanup": cmd_cleanup, "freeze": cmd_freeze,
+         "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop}[a.cmd](a)
+    except FileUnreadable as e:
+        fail(str(e), failure="FILE_DAMAGED" if e.damaged else "READ_FAILED", code=3)
     if a.cmd in ("wait", "collect"):
         usage_check(Path(a.run).resolve())
         answers_check(Path(a.run).resolve())
