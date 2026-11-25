@@ -768,9 +768,9 @@ export default class Dispatch extends View {
       const control = task.abandonedAt == null ? this.renderControl(t, r) : null, take = group !== "done" ? this.renderTakeover(t, r) : null;
       if (control) box.child(control);
       if (take) box.child(take);
-      box.children(r.calls.map((c) => this.renderCall(t, c, true, inset)));
       const bg = bgView(assigned[r.dir] ?? [], Boolean(this.mainAgentOf(r)), this.bgMore.get(key) ?? 0);
       if (bg.running.length || bg.ended.length) box.child(this.renderBg(t, key, bg, inset));
+      box.children(r.calls.map((c) => this.renderCall(t, c, true, inset)));
       const away = cardView(this.stats.runs[r.dir], r.calls.map((c) => c.call)).undispatched;
       if (away.length) box.child(v_flex().pl(inset).pr(10).py(6).gap(4)
         .child(note(t, "内部进度"))
@@ -1041,7 +1041,7 @@ export default class Dispatch extends View {
   renderBg(t, key, bg, inset) {
     const z = S(), on = this.ctx?.on ?? null;
     const kindIcon = { shell: "terminal", monitor: "eye", agent: "bot" };
-    const kindWord = { shell: "命令", monitor: "监视", agent: "子任务" };
+    const kindTag = { shell: "shell cmd", monitor: "monitor", agent: "agent" };
     const statusColor = { running: t.working, completed: t.done, failed: t.ansi1, killed: t.ansi3, stopped: t.ansi3, lost: t.muted };
     const row = (task) => {
       const running = task.status === "running", age = fmtDur((task.ended || Date.now()) - (task.started || Date.now()));
@@ -1058,12 +1058,14 @@ export default class Dispatch extends View {
           .child(icon(kindIcon[task.kind] ?? "terminal", 12, t.muted))
           .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
           .child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected).text_size(z.label - 1.5).text_color(t.muted)
-            .child(`后台${kindWord[task.kind] ? ` · ${kindWord[task.kind]}` : ""}`))
+            .child(kindTag[task.kind] ?? task.kind ?? "shell cmd"))
           .child(div().flex_1())
           .child(div().flex_none().text_size(z.label).text_color(statusColor[task.status] ?? t.muted).child(running ? `运行 ${word}` : `${word} · ${age}`)))
         .when(Boolean(sub), (el) => el.child(div().pl(inset + 17).pr(10).pb(5).mt(-4).truncate().tooltip(String(sub)).font_family(mono()).text_size(z.label - 1).text_color(t.muted).child(sub)));
     };
-    const box = v_flex().flex_none();
+    // Its own framed area under the Task's title, apart from the helper rows.
+    const box = v_flex().id(`bg-${key}`).flex_none().ml(inset - 8).mr(10).my(4).rounded(6).border_1().border_color(t.border).overflow_hidden();
+    inset = 8;
     box.children(bg.running.map(row));
     box.children(bg.ended.map(row));
     // Newest ended first; "n earlier" shows BG_MORE more each click, "show fewer" folds back to the first few.

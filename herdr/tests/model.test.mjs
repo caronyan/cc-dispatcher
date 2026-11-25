@@ -326,6 +326,15 @@ test("Task abandonment controls and confirmation follow the command contract", a
     const rendered = panel.renderTask(colors, topic, task, { [task.run.dir]: [bgTask] });
     assert.ok(byId(rendered, "bg-topic-a|k1|s1|b1"), "后台任务应显示在所属 Task 里");
     assert.ok(texts(rendered).includes("npm test"));
+    assert.ok(texts(rendered).includes("shell cmd"));
+    assert.ok(!texts(rendered).some((x) => x.includes("后台")), "标签写 shell cmd，不写“后台命令”");
+    const stub = panel.renderCall;
+    panel.renderCall = (_t, c) => node().id(`call-${c.key}`);
+    const ids = elements(panel.renderTask(colors, topic, task, { [task.run.dir]: [bgTask] })).map((el) => String(el.attrs.id ?? ""));
+    panel.renderCall = stub;
+    const area = ids.indexOf("bg-topic-a|k1"), firstCall = ids.findIndex((id) => id.startsWith("call-"));
+    assert.ok(area >= 0, "后台命令在 Task 里有自己的区域");
+    assert.ok(firstCall > area, "后台命令区域在子 agent 行之前，紧跟 Task 标题");
     assert.ok(!byId(panel.renderTask(colors, topic, task, {}), "bg-topic-a|k1|s1|b1"));
   });
 
