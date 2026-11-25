@@ -40,7 +40,7 @@ agents/            hd_dispatch.py 的调用记录，调用名即线程 id（code
 
 如果 $ARGUMENTS 指向一个已有的 `.cc-dispatch/research-*` 目录，或用户要你续上、接手之前没做完或中断的运行（"接着上次的""续上""接手"，没给路径也算），这是续跑：先按 shared/herdr.md 的"接手运行"找到运行（没给路径时 `runs` 列出来问用户）并 `takeover`，向用户复述现状、等确认；再按 [references/codex-failures.md](references/codex-failures.md) 的"续跑与恢复"处理。
 
-建好 `$RD` 并按上文排除 `.cc-dispatch/` 后，运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为立题输入，原有范围核对和用户确认照常进行。
+建好 `$RD` 并按上文排除 `.cc-dispatch/` 后，运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；`--topic`、`--task`、`--parent` 都没收到时，先按 shared/herdr.md「归到哪个 Topic」选 Topic；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为立题输入，原有范围核对和用户确认照常进行。
 
 ### 1. 立题
 

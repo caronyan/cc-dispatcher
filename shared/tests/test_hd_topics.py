@@ -302,6 +302,41 @@ class Topics(unittest.TestCase):
         self.assertEqual(self.start(run=child, parent=self.w.run_dir)["TASK"], result["TASK"])
         self.assertEqual(len(self.data(result["TOPIC"])["tasks"]), 2)
 
+    def test_start_with_only_a_topic_adds_a_task_there_and_retry_finds_it(self):
+        original = self.start(title="Build")
+        review = self.new_run("review-later")
+        args = ("start", "--run", review, "--topic", original["TOPIC"], "--title", "Review the build")
+        result = self.command(*args)
+        self.assertEqual(result["TOPIC"], original["TOPIC"])
+        self.assertNotEqual(result["TASK"], original["TASK"])
+        saved = self.data(original["TOPIC"])["tasks"][result["TASK"]]
+        self.assertEqual((saved["kind"], saved["run"], saved["title"], saved.get("parent_task")),
+                         ("review", review.name, "Review the build", None))
+        self.assertEqual(self.command(*args)["TASK"], result["TASK"])
+        self.assertEqual(len(self.data(original["TOPIC"])["tasks"]), 2)
+        self.command("start", "--run", self.new_run("test-x"), "--topic", original["TOPIC"],
+                     "--parent", review, code=2)
+
+    def test_first_start_in_herdr_claims_a_topic_without_owner(self):
+        topic = self.init("Made outside herdr", HC_TERMINAL_ID="")
+        self.assertIsNone(self.data(topic)["owner"]["terminal"])
+        self.command("start", "--run", self.w.run_dir, "--topic", topic)
+        self.assertTrue(self.data(topic)["owner"]["terminal"])
+
+    def test_list_shows_this_terminals_open_topics_and_their_tasks(self):
+        mine = self.start(title="Build")
+        self.command("finish", "--run", self.w.run_dir, "--line", "built it")
+        other = self.init("Someone else's", HC_TERMINAL_ID="w9:9")
+        gone = self.init("Archived")
+        self.alter(gone, archived=1)
+        r = self.w.hd("topic", "list", "--repo", str(self.w.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TOPIC {mine['TOPIC']}\tBuild", r.stdout)
+        self.assertIn(f"  {mine['TASK']}\tdev\t{self.w.run_dir.name}\tBuild\tbuilt it", r.stdout)
+        self.assertNotIn(other, r.stdout)
+        self.assertNotIn(gone, r.stdout)
+        self.assertIn("TOPICS=1", r.stdout)
+
     def test_start_refuses_stale_taken_or_mismatched_requests(self):
         topic = self.init()
         task = self.task(topic)

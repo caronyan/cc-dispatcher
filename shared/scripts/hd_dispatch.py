@@ -2353,9 +2353,19 @@ def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
     out(topic=topic_id, task=task_id, detail=json.dumps(task["detail"], ensure_ascii=False))
 
 
+def claim_owner(data):
+    """A Topic with no owner (made without one, e.g. outside herdr) is owned by the first main agent in herdr
+    that starts work in it, so its backlog can be refined."""
+    if not (data.get("owner") or {}).get("terminal") and os.environ.get("HC_TERMINAL_ID"):
+        data["owner"] = topic_owner()
+    return data
+
+
 def cmd_topic_start(a):
-    if bool(a.task) != bool(a.topic):
-        a.topic_parser.error("--topic and --task must be supplied together")
+    if a.task and not a.topic:
+        a.topic_parser.error("--task needs --topic")
+    if a.topic and a.parent:
+        a.topic_parser.error("--topic and --parent are exclusive")
     if a.request and not a.task:
         a.topic_parser.error("--request needs --task")
     run = Path(a.run).resolve()
@@ -2368,10 +2378,13 @@ def cmd_topic_start(a):
     if a.task or bound:
         topic_id, task_id = (a.topic, a.task) if a.task else bound
         with topic_lock(repo, topic_id):
-            bind_topic_run(repo, topic_id, task_id, load_topic(repo, topic_id), run, a.request, agent, a.kind)
+            bind_topic_run(repo, topic_id, task_id, claim_owner(load_topic(repo, topic_id)), run, a.request,
+                           agent, a.kind)
         return
     parent_task = None
-    if a.parent:
+    if a.topic:  # a new Task in a chosen Topic
+        topic_id, parent_task = a.topic, ""
+    elif a.parent:
         parent = Path(a.parent).resolve()
         if repo_of_run(parent) != repo:
             a.topic_parser.error("--parent must belong to the same repository")
@@ -2382,11 +2395,11 @@ def cmd_topic_start(a):
     kind = a.kind or run_kind(run)
     if kind not in TOPIC_KINDS or kind != run_kind(run):
         fail("task kind does not match run", failure="KIND_MISMATCH", code=3)
-    if parent_task:
+    if parent_task is not None:
         with topic_lock(repo, topic_id):
-            data = load_topic(repo, topic_id)
+            data = claim_owner(load_topic(repo, topic_id))
             topic_writable(data, active=True)
-            task_id = add_topic_task(data, a.title or run.name, kind, parent_task=parent_task)
+            task_id = add_topic_task(data, a.title or run.name, kind, parent_task=parent_task or None)
             bind_topic_run(repo, topic_id, task_id, data, run, a.request, agent, a.kind)
         return
     owner = topic_owner()
@@ -2399,6 +2412,26 @@ def cmd_topic_start(a):
             task_id = add_topic_task(data, a.title or run.name, kind)
             bind_topic_run(repo, topic_id, task_id, data, run, a.request, agent, a.kind)
             return
+
+
+def cmd_topic_list(a):
+    """This terminal's unarchived Topics (every one outside herdr) and their Tasks, for a main agent choosing
+    where new work belongs: `TOPIC <id>\t<title>` then `  <task>\t<kind>\t<run|->\t<title>[\t<summary>]`."""
+    repo = topic_repo(a)
+    me = os.environ.get("HC_TERMINAL_ID")
+    shown = 0
+    for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
+        data = read_json(path, {})
+        if not data or data.get("archived") or data.get("deleting") is not None:
+            continue
+        if me and (data.get("owner") or {}).get("terminal") != me:
+            continue
+        shown += 1
+        print(f"TOPIC {data['id']}\t{data.get('title', '')}")
+        for tid, task in data.get("tasks", {}).items():
+            line = f"  {tid}\t{task.get('kind')}\t{task.get('run') or '-'}\t{task.get('title', '')}"
+            print(line + (f"\t{task['summary_line']}" if task.get("summary_line") else ""))
+    out(topics=shown)
 
 
 def cmd_topic_finish(a):
@@ -2782,7 +2815,7 @@ def cmd_topic_deliver(a):
 
 def cmd_topic(a):
     handlers = {"init": cmd_topic_init, "request": cmd_topic_request, "start": cmd_topic_start,
-                "finish": cmd_topic_finish, "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
+                "finish": cmd_topic_finish, "list": cmd_topic_list, "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
                 "pause": cmd_topic_pause, "resume": cmd_topic_resume, "stop": cmd_topic_stop,
                 "archive": cmd_topic_archive, "unarchive": cmd_topic_unarchive, "delete": cmd_topic_delete}
     handler = (cmd_topic_task if a.topic_cmd.startswith("task-") else
@@ -2796,12 +2829,12 @@ def register_topic_parser(sub):
     topic.add_argument("--repo")
     commands = topic.add_subparsers(dest="topic_cmd", required=True)
     for name in ("init", "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
-                 "request", "deliver", "start", "finish", "refined", "pause", "resume", "stop",
+                 "request", "deliver", "start", "finish", "list", "refined", "pause", "resume", "stop",
                  "archive", "unarchive", "delete"):
         c = commands.add_parser(name)
         c.set_defaults(topic_parser=c)
         c.add_argument("--repo", default=argparse.SUPPRESS)
-        if name not in ("init", "deliver", "start", "finish"):
+        if name not in ("init", "deliver", "start", "finish", "list"):
             c.add_argument("--topic", required=True)
         if name == "init":
             c.add_argument("--title", required=True)

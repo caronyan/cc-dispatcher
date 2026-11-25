@@ -42,7 +42,7 @@ agents/        hd_dispatch.py 的调用记录（fix、survey）
 
 1. 按 shared/herdr.md 运行 `probe`。不可用时直接按"Codex 不可用时"处理。
 2. 冻结快照：`SNAP=$(git -C "$TARGET" stash create); SNAP=${SNAP:-$(git -C "$TARGET" rev-parse HEAD)}`（不改动工作区）。`git -C "$TARGET" status --porcelain` 里有未跟踪的新文件时记下来，建好 worktree 后拷进去。
-3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为问题清单的输入，原有范围核对和用户确认照常进行。
+3. 建运行目录，把 `.cc-dispatch/` 写进 `$ROOT/.git/info/exclude`。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；`--topic`、`--task`、`--parent` 都没收到时，先按 shared/herdr.md「归到哪个 Topic」选 Topic；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为问题清单的输入，原有范围核对和用户确认照常进行。
 
 ### 1. 整理问题
 

@@ -60,11 +60,13 @@ Codex 不可用时由你接管，是这条分工的例外，按各 skill 的降�
 
 Topic 是一个问题或目标，Task 是其中一次 skill 工作（`research`、`review`、`dev`、`fix`、`test`、`retro`）。Task 先是草稿，启动后绑定一个运行目录；dev 在运行内拆出的 `T1`、`T2` 等任务卡仍记在该运行的 `state.json.tasks`。Topic 的记录在 `$ROOT/.cc-dispatch/topics/<id>/`：`topic.json` 记 Task 和请求，`backlog.json` 记待细化条目，`summary.md` 记各 Task 的结论。
 
-**准备时绑定**：建好 `$RD` 后、摸底或派出子 agent 前，调用一次 `python3 $HD topic start --run "$RD"`。把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加，未收到的参数不传；没有 `--task` 时加 `--title "<本次问题>"`。
+**准备时绑定**：建好 `$RD` 后、摸底或派出子 agent 前，调用一次 `python3 $HD topic start --run "$RD"`。把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加，未收到的参数不传；三者都没收到时先按下面「归到哪个 Topic」选；没有 `--task` 时加 `--title "<本次问题>"`。
 
 - 带 `--topic <id> --task <tid> [--request <rid>]`：核对请求、Task 的 kind 与运行目录类型，再绑定。成功输出 `TOPIC=`、`TASK=`、`DETAIL=`；`DETAIL` 是 JSON 编码的 Task 说明，按 JSON 解码后作为本次需求，照常保留对应 skill 的范围核对和用户确认点（含 dev 派卡前的确认）。
 - 只有 `--parent <父运行目录>`：读取父运行的 topic/task，在同一 Topic 建新 Task 并绑定；子运行继承 Topic。
-- 没有 `--task`、`--parent`：自动新建 Topic 和 Task，标题用 `--title`，kind 默认取运行目录类型。只想先建 Topic、不启动运行时，才用 `python3 $HD topic init --title "<目标>" [--owner <终端地址>]`，记下 `TOPIC=`。
+- 只有 `--topic <id>`：在这个 Topic 建新 Task 并绑定（不挂父 Task）。Topic 还没有负责人时（在 herdr 外建的），第一个在 herdr 里启动工作的主 agent 成为负责人，之后细化请求投给它。
+- **归到哪个 Topic**：`--topic`、`--task`、`--parent` 都没收到（用户直接手动启动 skill）时，先运行 `python3 $HD topic list`，列出本终端名下未归档的 Topic 及其 Task（`TOPIC <id>\t<标题>`，下面每行 `<task>\t<kind>\t<运行目录>\t<标题>\t<结论>`）。本次对象来自其中某个 Topic 时（例如要审查的提交、要修的问题、要测的改动出自该 Topic 某个 Task 的运行），带 `--topic <id>` 启动；拿不准就看那几个运行目录里的产物再定。都对不上才新建。开场跟用户说一句归到了哪个 Topic（或新建了 Topic）。
+- 没有 `--topic`、`--task`、`--parent`：自动新建 Topic 和 Task，标题用 `--title`，kind 默认取运行目录类型。只想先建 Topic、不启动运行时，才用 `python3 $HD topic init --title "<目标>" [--owner <终端地址>]`，记下 `TOPIC=`。
 - 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TOPIC_STOPPING`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数；成功后更新 `state.json` 时保留脚本写入的 `topic`、`task`。
 
 **面板派发**：Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 收到 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。照常进入对应 skill 的准备步骤。research、review、retro 的这类命令是用户从面板发起的调用；主 agent 不自行调用这些高层或独立 skill。

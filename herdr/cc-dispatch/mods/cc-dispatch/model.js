@@ -673,6 +673,22 @@ export function parkedWhy(card) {
   if (/dropped|abandon|不做|放弃/i.test(note)) return "dropped";
   return "user";
 }
+/**
+ * A run's cards for the stats: its task cards (state.json tasks) when it has any, else one card per helper
+ * call (a review or research run has no task cards): done once its report is in, parked when its terminal
+ * closed without one, running otherwise. `stats` is the stats script's {status, cards, checks} for the run.
+ */
+export function runCards(run, stats) {
+  if (Object.keys(stats?.status ?? {}).length || !run?.calls?.length) return stats ?? null;
+  const status = {}, cards = {};
+  for (const c of run.calls) {
+    const need = callNeed(c);
+    status[c.call] = need === "done" ? "done" : need === "gone" ? "parked" : "running";
+    cards[c.call] = { status: status[c.call], title: c.title ?? c.call };
+  }
+  return { status, cards, checks: stats?.checks ?? 0 };
+}
+
 export function cardCounts(cards) {
   const n = {};
   for (const s of Object.values(cards?.status ?? {})) n[s] = (n[s] ?? 0) + 1;

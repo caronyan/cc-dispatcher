@@ -43,7 +43,7 @@ Worktree 放在仓库**外面**，避免被主仓库的测试和构建扫到：`
 
 1. 按 shared/herdr.md 运行 `probe`，确认 Codex 可用。
 2. 确认在 git 仓库内（`git rev-parse --show-toplevel` → `$REPO`）。如果工作区不干净，告诉用户未提交的改动不会进入 worktree，问他们是先提交/stash 还是照常继续。
-3. 建运行目录，并把 `.cc-dispatch/` 写进 `$REPO/.git/info/exclude`（不改用户的 `.gitignore`）。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为本次需求。
+3. 建运行目录，并把 `.cc-dispatch/` 写进 `$REPO/.git/info/exclude`（不改用户的 `.gitignore`）。随后运行 `python3 $HD topic start --run "$RD"`，把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加；`--topic`、`--task`、`--parent` 都没收到时，先按 shared/herdr.md「归到哪个 Topic」选 Topic；没有 `--task` 时加 `--title "<本次问题>"`。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN` 或 `KIND_MISMATCH` 就停下告诉用户，不继续启动；其余拒绝按 shared/herdr.md"Topic 与面板请求"处理。带 `--task` 时将输出的 `DETAIL` 按 JSON 解码作为本次需求。
 4. 记下 `base_branch`、`base_sha`，建集成分支并检出到它自己的 worktree，所有合并和全量测试都在这里做：
    ```bash
    git -C "$REPO" worktree add -b cc/$RUN/integration "$WT_ROOT/integration" $base_sha

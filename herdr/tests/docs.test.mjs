@@ -131,3 +131,16 @@ test("free text typed in panel dialogs reaches hd_dispatch as --opt=value, so te
   assert.doesNotMatch(main, /"--(title|text|detail|line|decision|note)",\s*[a-z]/, "用户输入的自由文本用 `--title=${title}` 这样的单参数传给 hd_dispatch：分开传时以 - 开头的内容会被当成参数报错");
   assert.match(main, /`--text=\$\{text\}`/);
 });
+
+test("every skill that runs topic start without ids first picks a Topic by the shared rule", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const root = new URL("../../", import.meta.url);
+  const shared = readFileSync(new URL("shared/herdr.md", root), "utf8");
+  assert.match(shared, /\*\*归到哪个 Topic\*\*.*topic list/);
+  const skills = readdirSync(new URL("skills/", root)).filter((d) => d.startsWith("cc-herdr-dispatch-"));
+  const missing = skills.filter((d) => {
+    const doc = readFileSync(new URL(`skills/${d}/SKILL.md`, root), "utf8");
+    return doc.includes("topic start") && !doc.includes("「归到哪个 Topic」");
+  });
+  assert.deepEqual(missing, [], "add: --topic、--task、--parent 都没收到时，先按 shared/herdr.md「归到哪个 Topic」选 Topic");
+});

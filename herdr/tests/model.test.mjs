@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  runCards,
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
   summary, callDetail, runSpace, splitBySpace, callStage, runStage, stageSummary, groupByStage, SETTLED, cardCounts, ago, handoffAsk, handoffText, prettyReport, taskPath, timelineMarkdown, eventWords,
   CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, activeRuns, callTags,
@@ -783,4 +784,17 @@ test("buildRuns keeps the main agent a takeover replaced (meta.json mains)", () 
   ], []);
   assert.deepEqual(runs[0].mains, [{ agent: "codex", session: "th-codex" }, { agent: "claude", session: "s-old" }]);
   assert.equal(runs[0].adopted, true);
+});
+
+test("a run without task cards counts its helper calls as cards; task cards win when present", () => {
+  const run = { calls: [
+    { call: "reviewer", state: "gone", report: "ok" },
+    { call: "stress-r1", state: "live", status: "working" },
+    { call: "stress-r0", state: "gone", report: null },
+  ] };
+  const v = runCards(run, { status: {}, cards: {}, checks: 0 });
+  assert.deepEqual(v.status, { reviewer: "done", "stress-r1": "running", "stress-r0": "parked" });
+  const dev = { status: { T1: "merged" }, cards: { T1: { status: "merged" } }, checks: 0 };
+  assert.equal(runCards(run, dev), dev);
+  assert.equal(runCards({ calls: [] }, undefined), null);
 });

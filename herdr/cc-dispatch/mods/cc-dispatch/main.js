@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir } from "./model.js";
+import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, topicTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -659,7 +659,8 @@ export default class Dispatch extends View {
     const asks = this.renderAsks(t, topic);
     if (asks) card.child(asks);
     if (!folded) {
-      const totals = topicTotals(this.stats, topic);
+      // Runs without task cards (review, research…) count their helper calls as cards.
+      const totals = topicTotals({ ...this.stats, runs: Object.fromEntries(topic.runs.map((r) => [r.dir, runCards(r, this.stats.runs[r.dir])])) }, topic);
       if (totals.known || totals.cards || topic.tasks.length) card.child(this.renderStats(t, topic, totals));
       const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
       const mainLive = topic.runs.some((r) => this.mainAgentOf(r));
@@ -772,7 +773,9 @@ export default class Dispatch extends View {
             .when(editable, (el) => el.cursor_pointer().hover((s) => s.text_color(t.accent))
               .on_click(() => this.openForm("backlog", topic, { item }))).tooltip(item.text))
           .child(pill(t, state, item.status === "refining" ? t.accent : t.muted)))
-        .when(Boolean(req), (el) => el.child(note(t, req === "delivered" ? "已送达" : "已排队")))
+        .when(Boolean(req), (el) => el.child(note(t, req === "delivered" ? "已送达"
+          : !topic.owner?.terminal ? "已排队 · 这个 Topic 还没有负责人，在新标签页派发一个 Task 后会交给它"
+          : !(agents() ?? []).some((a) => a.address === topic.owner.terminal) ? "已排队 · 负责人不在线，上线后送达" : "已排队")))
         .when(Boolean(item.taskIds.length), (el) => el.child(note(t, `已生成 Task：${item.taskIds.join("、")}`)))
         .when(editable, (el) => el.child(h_flex().gap(6).flex_wrap()
           .child(action(`edit-${key}-${item.id}`, "编辑", "task", t, () => this.openForm("backlog", topic, { item })))
@@ -1039,11 +1042,11 @@ export default class Dispatch extends View {
     if (cells.length) box.child(h_flex().gap(8).children(cells));
     if (topic.tasks.length) {
       // One row per Task: its status, role and title, then one block per card it owns, coloured by the
-      // card's status. Merged counts leave parked cards out (they show in the key); review calls are not cards.
+      // card's status (or helper call's, for a run without task cards). Merged counts leave parked cards out (they show in the key).
       const colors = CARD_COLORS(t), done = topic.tasks.filter((task) => taskGroup(task, topic) === "done").length;
       const v = s.cards ? cardView(s.cards, topic.runs.flatMap((r) => r.calls.map((c) => `${r.dir}#${c.call}`))) : null;
       const rows = groupTasks(topic).flatMap((g) => g.tasks).map((task) => {
-        const run = task.runDir ? this.stats.runs[task.runDir] : null, status = run?.status ?? {};
+        const run = task.runDir ? runCards(topic.runs.find((r) => r.dir === task.runDir), this.stats.runs[task.runDir]) : null, status = run?.status ?? {};
         const ids = Object.keys(status).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
         const own = ids.length ? cardView(run) : null, stage = this.taskStage(topic, task);
         return h_flex().gap(6).items_center().h(18)
