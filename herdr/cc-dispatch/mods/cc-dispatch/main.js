@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, ACCEPTANCE_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
+import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -108,10 +108,10 @@ const MARKS = {
   blocked: ["question", "ansi3"], paused: ["pause", "ansi3"], parked: ["pause", "muted"], offline: ["wifi-off", "ansi3"],
   retrying: ["refresh", "ansi3"], await: ["clock-dashed", "accent"], collect: ["inbox", "accent"], review: ["clipboard-check", "accent"],
   handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["draft", "muted"],
-  pending: ["hourglass", "muted"], accepting: ["clipboard-check", "accent"],
+  pending: ["hourglass", "muted"], accepting: ["clipboard-check", "accent"], finishing: ["archive", "accent"],
 };
 const MARK_WORDS = { ...STAGE_WORDS, ...CARD_WORDS, done: "已完成", stopped: "已终止", stopping: "终止中", handoff: "交接中",
-  delivered: "已送达", queued: "已排队", draft: "草稿", abandoned: "已放弃" };
+  delivered: "已送达", queued: "已排队", draft: "草稿", abandoned: "已放弃", finishing: "待收尾" };
 const statusMark = (t, id, stage) => {
   const glyph = stage === "stopping" ? icon("ring", 11, t.ansi1).spin(900)
     : stage === "running" ? icon("ring", 11, t.working).spin(900)
@@ -572,6 +572,10 @@ export default class Dispatch extends View {
     return !topic.archived && (topic.pausedAt || topic.tasks.some((task) => ["active", "you"].includes(taskGroup(task, topic))));
   }
 
+  topicRunning(topic) {
+    return topic.tasks.some((task) => taskGroup(task, topic) === "active" && this.taskStage(topic, task) === "working");
+  }
+
   topicHD(topic) { return topic?.runs.find((r) => r.hd)?.hd ?? this.runs.find((r) => r.hd)?.hd ?? null; }
 
   topicRepo(topic) {
@@ -669,7 +673,7 @@ export default class Dispatch extends View {
       body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().px(10).py(6).gap(8).items_center().rounded(8)
         .border_1().border_dashed().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
         .when(Boolean(g.id), (el) => el.on_click(() => run("space.select", { id: g.id })))
-        .child(dot(t, waiting ? "blocked" : "working"))
+        .child(dot(t, waiting ? "blocked" : g.topics.some((topic) => this.topicRunning(topic)) ? "working" : "review"))
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().tooltip(String(g.name)).text_size(S().body).font_semibold().child(g.name))
           .child(div().text_size(S().label).text_color(t.muted)
@@ -685,11 +689,13 @@ export default class Dispatch extends View {
     const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
     const waiting = topic.tasks.some((task) => taskGroup(task, topic) === "you");
     const paused = Boolean(topic.pausedAt);
+    // Spins only while one of its Tasks runs; open work that waits on the main agent shows a still accent dot.
+    const running = this.topicRunning(topic);
     const messageCount = (topic.messages?.unacked ?? 0) + (topic.messages?.answersUnacked ?? 0);
     const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 12, t.muted))
-      .child(dot(t, waiting ? "blocked" : active ? "working" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
+      .child(dot(t, waiting ? "blocked" : running ? "working" : active ? "review" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
       .child(div().flex_1().min_w(0).truncate().tooltip(String(topic.title)).text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
       .when(!topic.implicit && (messageCount > 0 || topic.messages?.openOut > 0), (el) => el.child(
         h_flex().id(`messages-${topic.id}`).min_w(24).h(22).px(4).gap(4).flex_none().justify_center().items_center().rounded(6)
@@ -756,7 +762,8 @@ export default class Dispatch extends View {
     if (group === "you") return "blocked";
     const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
     const top = stages.length ? runStage(stages) : "working";
-    return top === "ended" ? "working" : top;
+    // Every helper has settled but the Task is not finished: the main agent still owes its wrap-up.
+    return FINISHING_STAGES.has(top) ? "finishing" : top;
   }
 
   renderExecutor(t, key) {
@@ -782,7 +789,7 @@ export default class Dispatch extends View {
     const executor = this.renderExecutor(t, task.agent ?? task.request?.agent ?? (task.request?.target === "owner" ? topic.owner?.agent : null));
     // The main agent's terminal dot, as on a card: it spins while that agent works.
     const main = r && group !== "done" ? this.mainAgentOf(r) : null;
-    const running = Boolean(r) && group === "active" && !ACCEPTANCE_STAGES.has(stage) && (stage === "working" || main?.status === "working");
+    const running = Boolean(r) && group === "active" && stage === "working";
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface);
     box.child(h_flex().id(`task-${key}`).min_h(32).pl(12).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })

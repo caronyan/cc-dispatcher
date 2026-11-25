@@ -1145,13 +1145,16 @@ test("an unfinished Task's timeline node lists the run's unanswered asks and car
   assert.ok(!node.open.some((x) => x.startsWith("T1") || x.includes("check")), JSON.stringify(node.open));
 });
 
-test("a Task row shows a lead spinner only while its work runs; awaiting acceptance shows none", async () => {
-  const { ACCEPTANCE_STAGES, callStage } = await import("../cc-dispatch/mods/cc-dispatch/model.js");
+test("a Task or Topic spins only while work runs; a Task whose helpers all settled but is not finished shows 待收尾", async () => {
+  const { FINISHING_STAGES, callStage, runStage } = await import("../cc-dispatch/mods/cc-dispatch/model.js");
   const c = (o) => ({ state: "gone", status: null, report: "ok", failure: null, ...o });
-  for (const card of ["accepting", "running"]) assert.ok(ACCEPTANCE_STAGES.has(callStage(c({}), card)), card);
-  assert.ok(!ACCEPTANCE_STAGES.has(callStage(c({ state: "live", status: "working" }), "running")));
+  for (const card of ["merged", "done", "parked"]) assert.ok(FINISHING_STAGES.has(runStage([callStage(c({}), card)])), card);
+  assert.ok(!FINISHING_STAGES.has(runStage([callStage(c({}), "merged"), callStage(c({}), "accepting")])));
+  assert.ok(!FINISHING_STAGES.has(runStage([callStage(c({}), "merged"), callStage(c({ state: "live", status: "working" }), "running")])));
   const { readFileSync } = await import("node:fs");
   const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
-  assert.match(main, /const running = .*!ACCEPTANCE_STAGES\.has\(stage\)/, "main.js: the Task row's lead spinner must skip acceptance stages");
-  assert.match(main, /\.when\(running, \(el\) => el\.child\(icon\("ring"/, "main.js: the Task row shows only a spinner, and only while running");
+  assert.match(main, /FINISHING_STAGES\.has\(top\) \? "finishing" : top/, "main.js: taskStage must turn a fully settled unfinished run into 待收尾");
+  assert.match(main, /const running = Boolean\(r\) && group === "active" && stage === "working";/, "main.js: the Task row spins only on its own running stage");
+  assert.match(main, /running \? "working" : active \? "review" : "done"/, "main.js: the Topic row spins only while one of its Tasks runs");
+  assert.match(main, /g\.topics\.some\(\(topic\) => this\.topicRunning\(topic\)\) \? "working"/, "main.js: another space's row spins only while one of its Tasks runs");
 });
