@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON } from "./model.js";
+import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -123,12 +123,16 @@ const pill = (t, text, color) => h_flex().h(18).px(7).flex_none().items_center()
   .text_size(S().label).text_color(color ?? t.muted).child(text);
 
 function action(id, label, iconName, t, onClick, opts = {}) {
-  const color = opts.color ?? t.foreground;
+  const enabled = opts.enabled !== false, color = enabled ? opts.color ?? t.foreground : t.muted;
   return h_flex().id(id).h(28).px(10).gap(5).flex_none().items_center().rounded(6).border_1().border_color(t.border)
-    .text_size(S().small).text_color(color).cursor_pointer().hover((s) => s.bg(t.hover))
-    .on_mouse_down("left", stop).on_click(onClick)
+    .text_size(S().small).text_color(color).on_mouse_down("left", stop)
+    .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(onClick))
+    .when(Boolean(opts.tooltip), (el) => el.tooltip(opts.tooltip))
     .child(icon(iconName, 12, color)).child(label);
 }
+
+const envelope = (color) => div().w(15).h(11).flex_none().rounded(2).border(1).border_color(color)
+  .child(icon("chevron-down", 13, color).h(8));
 
 function dialogFrame(t, id, title, body, buttons, onClose, extra = null) {
   return v_flex().id(id).size_full().min_h(0).p(18).gap(14).bg(t.popover).text_size(S().body).text_color(t.foreground)
@@ -309,6 +313,15 @@ export default class Dispatch extends View {
       });
       return;
     }
+    if (this.role === "messages" || this.role === "timeline") {
+      const p = blockProps() ?? {};
+      this.sending = false; this.failed = null; this.messagesLoading = false; this.messageData = null;
+      this.follows = [...(p.topic?.follows ?? [])]; this.messageKind = "note";
+      this.messageBox = TextareaState.new({ rows: 3, placeholder: "给这个 Topic 的负责人留言或提问" });
+      this.messageBox.on("change", (_e, cx) => cx.notify());
+      this.refreshMessages(cx, p);
+      return;
+    }
     if (this.role === "abandon" || this.role === "control") {
       this.sending = false; this.failed = null; this.failureCode = null; this.mode = blockProps()?.mode ?? "stop";
       this.reasonBox = TextareaState.new({ rows: 4, placeholder: "填写放弃原因，例如：不再继续这个 Task，或运行记录已找不到" });
@@ -404,13 +417,11 @@ export default class Dispatch extends View {
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
-        const pending = topics.some((topic) => !topic.implicit && this.topicRepo(topic) === repo && !topic.archived && !topic.pausedAt && !topic.deleting
-          && [...topic.tasks, ...topic.backlog].some((x) => x.request?.target === "owner" && x.request.deliveredAt == null));
-        if (repo && pending && !checking()) {
+        if (repo && !checking()) {
           const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", repo]);
           if (token !== this.token) return;
           if (!delivered.ok) this.error = `自动送达失败：${commandError(delivered.out)}`;
-          else if (outputValue(delivered.out, "DELIVERED")) {
+          else if (outputValue(delivered.out, "DELIVERED") || outputValue(delivered.out, "MESSAGE_DELIVERED")) {
             const next = await loadRuns(files, repo, terminals() ?? []);
             if (token !== this.token) return;
             this.runs = next.runs; this.topics = next.topics; this.states = next.states; this.error = next.error;
@@ -571,8 +582,21 @@ export default class Dispatch extends View {
   // Forms only need serializable metadata; render/group/summary keep the original model objects.
   topicProps(topic) {
     return topic ? { id: topic.id, title: topic.title, implicit: topic.implicit, archived: topic.archived, pausedAt: topic.pausedAt,
+      deleting: topic.deleting, follows: topic.follows ?? [], messages: topic.messages,
       owner: topic.owner, tasks: topic.tasks.map((task) => ({ id: task.id, title: task.title, run: task.runDir })),
       runs: topic.runs.map((r) => ({ id: r.id, dir: r.dir, hd: r.hd })) } : null;
+  }
+
+  communicationProps(topic) {
+    const repo = this.topicRepo(topic);
+    return { topic: this.topicProps(topic), repo, hd: this.topicHD(topic), on: this.ctx?.on ?? null,
+      peers: this.topics.filter((p) => !p.implicit && this.topicRepo(p) === repo)
+        .map((p) => ({ id: p.id, title: p.title, archived: p.archived, deleting: p.deleting })) };
+  }
+
+  openMessages(p) {
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 760, height: 720,
+      props: { ...p, role: "messages", title: `${p.topic.title} · 消息` } });
   }
 
   openForm(role, topic, extra = {}) {
@@ -618,12 +642,14 @@ export default class Dispatch extends View {
       return this.renderOthers(t, body, others);
     }
     const { running, paused, ended, archived } = orderTopics(mine);
-    const old = this.showOld ? ended : ended.slice(0, HISTORY);
-    body.children([...running, ...paused, ...old].map((topic) => this.renderTopic(t, topic)));
+    const unread = ended.filter((topic) => topic.messages?.unacked > 0);
+    const history = ended.filter((topic) => !(topic.messages?.unacked > 0));
+    const old = this.showOld ? history : history.slice(0, HISTORY);
+    body.children([...running, ...paused, ...unread, ...old].map((topic) => this.renderTopic(t, topic)));
     const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
-    if (ended.length > HISTORY) {
-      body.child(link("older", this.showOld ? "收起" : `再显示 ${ended.length - HISTORY} 个更早的`,
+    if (history.length > HISTORY) {
+      body.child(link("older", this.showOld ? "收起" : `再显示 ${history.length - HISTORY} 个更早的`,
         (_e, cx) => { this.showOld = !this.showOld; cx.notify(); }));
     }
     if (archived.length) {
@@ -659,11 +685,19 @@ export default class Dispatch extends View {
     const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
     const waiting = topic.tasks.some((task) => taskGroup(task, topic) === "you");
     const paused = Boolean(topic.pausedAt);
+    const messageCount = (topic.messages?.unacked ?? 0) + (topic.messages?.answersUnacked ?? 0);
     const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 12, t.muted))
       .child(dot(t, waiting ? "blocked" : active ? "working" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
       .child(div().flex_1().min_w(0).truncate().tooltip(String(topic.title)).text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
+      .when(!topic.implicit && (messageCount > 0 || topic.messages?.openOut > 0), (el) => el.child(
+        h_flex().id(`messages-${topic.id}`).min_w(24).h(22).px(4).gap(4).flex_none().justify_center().items_center().rounded(6)
+          .tooltip(messageCount ? `${messageCount} 条未确认消息` : "有问题待回答").cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", stop).on_click((_e, cx) => {
+            cx.stop_propagation(); this.openMessages(this.communicationProps(topic));
+          }).child(envelope(messageCount ? t.accent : t.muted))
+          .when(messageCount > 0, (node) => node.child(div().text_size(S().label).text_color(t.accent).child(String(messageCount))))))
       .child(h_flex().id(`summary-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6)
         .tooltip("查看摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click((_e, cx) => {
@@ -674,7 +708,8 @@ export default class Dispatch extends View {
           cx.spawn(async () => {
             const text = await loadSummary(files, topic).catch(() => null);
             openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 820, height: 680,
-              props: { role: "timeline", title: `${topic.title} · 摘要`, nodes, text: text ?? "", programs: this.programs } });
+              props: { ...this.communicationProps(topic), role: "timeline", title: `${topic.title} · 摘要`,
+                nodes, text: text ?? "", programs: this.programs } });
           });
         }).child(icon("file", 13, t.muted)))
       .children(this.topicControlButtons(t, topic))
@@ -737,6 +772,9 @@ export default class Dispatch extends View {
     const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
     const folded = this.fold.get(key) ?? !(group === "active" || group === "you"), inset = 42;
     const queued = group === "queued", request = requestState(task);
+    const dependencies = (task.dependsOn ?? []).map((ref) => dependsState(this.topics, topic, ref));
+    const blockers = dependencies.filter((dep) => ["pending", "stopped", "cycle"].includes(dep.state));
+    const dependencyHint = blockers.map((dep) => dependencyText(this.topics, topic, dep)).join("；");
     const stage = this.taskStage(topic, task);
     const working = request === "queued" && task.request?.target === "owner" && topic.owner?.terminal
       ? this.topics.flatMap((p) => p.owner?.terminal === topic.owner.terminal
@@ -758,6 +796,10 @@ export default class Dispatch extends View {
         .tooltip("Task 摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click((_e, cx) => { cx?.stop_propagation(); this.openTaskSummary(topic, task); }).child(icon("file", 13, t.muted)))
       .children(task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
+    for (const dep of dependencies.filter((dep) => dep.state !== "done")) {
+      box.child(note(t, dependencyText(this.topics, topic, dep), ["abandoned", "missing"].includes(dep.state) ? t.ansi3 : t.muted)
+        .pl(inset).pr(10).pb(5));
+    }
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
     if (queued && !topic.archived && !topic.deleting) {
@@ -765,11 +807,12 @@ export default class Dispatch extends View {
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
         .child(action(`remove-${key}`, "删除", "trash", t, (_e, cx) => this.command(cx, topic, "task-rm", ["--task", task.id]), { color: t.ansi1 }))
         .when(!topic.pausedAt, (el) => el.child(action(`dispatch-${key}`, request ? "改派…" : "派发…", "send", t,
-          () => this.openForm("dispatch", topic, { task }), { color: t.accent })))
+          () => this.openForm("dispatch", topic, { task, dependencyHint }), { color: t.accent, enabled: !blockers.length, tooltip: dependencyHint })))
         .when(Boolean(request), (el) => el.child(action(`cancel-${key}`, "撤销", "close", t,
           (_e, cx) => this.command(cx, topic, "request", ["--task", task.id, "--cancel"]))))
         .when(request === "delivered" && !topic.pausedAt, (el) => el.child(action(`resend-${key}`, "重发", "refresh", t,
-          (_e, cx) => this.command(cx, topic, "request", ["--task", task.id, "--resend"])))));
+          (_e, cx) => this.command(cx, topic, "request", ["--task", task.id, "--resend"]),
+          { enabled: !blockers.length, tooltip: dependencyHint }))));
     }
     if (r) {
       const control = task.abandonedAt == null ? this.renderControl(t, r) : null, take = group !== "done" ? this.renderTakeover(t, r) : null;
@@ -795,7 +838,11 @@ export default class Dispatch extends View {
     const node = topicTimeline(topic).find((n) => n.id === task.id) ?? null;
     openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 760, height: 680,
       props: { role: "tasksum", title: `${task.title} · 摘要`, node, detail: task.detail || "", on: this.ctx?.on ?? null,
-        deps: task.dependsOn.map((id) => topic.tasks.find((x) => x.id === id)?.title ?? id), programs: this.programs,
+        deps: task.dependsOn.map((ref) => {
+          const dep = dependsState(this.topics, topic, ref);
+          const title = `${this.topics.find((x) => x.id === dep.topic)?.title ?? dep.topic}·${dep.title || dep.task}`;
+          return dep.state === "done" ? title : `${title} · ${dependencyText(this.topics, topic, dep)}`;
+        }), programs: this.programs,
         cards: taskCards(task) } });
   }
 
@@ -1420,6 +1467,131 @@ export default class Dispatch extends View {
     ], close);
   }
 
+  async readMessages(p) {
+    const res = await topicCmd(io(p.on ?? null), p.hd,
+      ["topic", "inbox", "--repo", p.repo, "--topic", p.topic.id, "--as-user", "--all"]);
+    if (!res.ok) throw new Error(commandError(res.out));
+    const data = parseJSON(outputValue(res.out, "MESSAGE_DATA"));
+    if (!data || !Array.isArray(data.incoming) || !Array.isArray(data.answers) || !Array.isArray(data.outgoing)) {
+      throw new Error("消息数据无法读取，请刷新重试。");
+    }
+    this.messageData = data;
+  }
+
+  refreshMessages(cx, p) {
+    if (this.messagesLoading || this.sending) return;
+    this.messagesLoading = true; this.failed = null;
+    cx.spawn(async (cx) => {
+      try { await this.readMessages(p); }
+      catch (e) { this.failed = String(e?.message ?? e); }
+      finally { this.messagesLoading = false; cx.notify(); }
+    });
+  }
+
+  messageCommand(cx, p, op, args, clear = false) {
+    if (this.sending || this.messagesLoading) return;
+    this.sending = true; this.failed = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const res = await topicCmd(io(p.on ?? null), p.hd,
+          ["topic", op, "--repo", p.repo, "--as-user", "--topic", p.topic.id, ...args]);
+        if (!res.ok) this.failed = commandError(res.out);
+        else if (op === "follow") {
+          const follows = outputValue(res.out, "FOLLOWS");
+          if (follows == null) throw new Error("关注列表无法读取，请关闭摘要后重试。");
+          this.follows = follows.split(",").filter(Boolean);
+        } else if (clear) {
+          // A new state clears the editor without relying on an app-specific setter.
+          this.messageBox = TextareaState.new({ rows: 3, placeholder: "给这个 Topic 的负责人留言或提问" });
+          this.messageBox.on("change", (_e, cx) => cx.notify());
+        }
+        await this.readMessages(p);
+      } catch (e) { this.failed = [this.failed, String(e?.message ?? e)].filter(Boolean).join(" "); }
+      finally { this.sending = false; cx.notify(); }
+    });
+  }
+
+  renderMessages(t, p, close) {
+    const groups = messageGroups(this.messageData, p.peers ?? []);
+    const list = v_flex().id("message-list").flex_1().min_h(0).overflow_y_scrollbar().gap(14).p(12).rounded(8)
+      .border_1().border_color(t.border).bg(t.background);
+    if (!this.messageData) list.child(note(t, this.messagesLoading ? "正在读取消息…" : "还没有读取到消息。"));
+    else if (!groups.length) list.child(note(t, "还没有消息。"));
+    for (const group of groups) {
+      list.child(v_flex().id(`message-peer-${group.id}`).flex_none().gap(8)
+        .child(div().text_size(S().small).font_semibold().child(group.title))
+        .children(group.items.map(({ item, direction, status, canWithdraw, canAck }) => {
+          const box = v_flex().id(`message-${item.id}`).gap(5).px(10).py(8).rounded(6).bg(t.surface).border_1().border_color(t.border)
+            .child(h_flex().gap(7).items_center().flex_wrap()
+              .child(pill(t, item.kind === "question" ? "提问" : item.kind === "notice" ? "通知" : "留言"))
+              .child(note(t, `${direction === "incoming" ? "收到" : "发出"} · ${status}`))
+              .child(note(t, ago((Number(item.at) || 0) * 1000))))
+            .child(div().text_size(S().body).text_color(t.foreground).child(item.text ?? ""))
+            .children((item.refs ?? []).map((ref) => div().font_family(mono()).text_size(S().label).text_color(t.muted).child(ref)));
+          if (item.answer) box.child(v_flex().gap(4).pl(10).border_l(2).border_color(t.accent)
+            .child(note(t, `回答 · ${item.answer.acked_at != null ? "已确认" : item.answer.delivered ? "已送达" : "排队"}`, t.accent))
+            .child(div().text_size(S().body).child(item.answer.text ?? ""))
+            .children((item.answer.refs ?? []).map((ref) => div().font_family(mono()).text_size(S().label).text_color(t.muted).child(ref))));
+          if (canWithdraw || canAck) box.child(h_flex().gap(6)
+            .when(canWithdraw, (el) => el.child(action(`withdraw-${item.id}`, "撤销", "close", t,
+              (_e, cx) => this.messageCommand(cx, p, "msg-withdraw", ["--ids", item.id]), { enabled: !this.sending && !this.messagesLoading })))
+            .when(canAck, (el) => el.child(action(`ack-${item.id}`, "确认", "check", t,
+              (_e, cx) => this.messageCommand(cx, p, "msg-ack", ["--ids", item.id]), { enabled: !this.sending && !this.messagesLoading }))));
+          return box;
+        })));
+    }
+    const text = this.messageBox.value(), textLength = Array.from(text).length, editable = !p.topic.archived && !p.topic.deleting;
+    const ready = editable && text.trim() && textLength <= 4000 && !this.sending && !this.messagesLoading;
+    const composer = v_flex().flex_none().gap(7)
+      .child(h_flex().gap(5).items_center()
+        .children([["note", "留言"], ["question", "提问"]].map(([kind, word]) => h_flex().id(`message-kind-${kind}`).h(26).px(10).items_center().rounded(5)
+          .bg(this.messageKind === kind ? t.selected : t.background).text_color(this.messageKind === kind ? t.accent : t.muted)
+          .cursor_pointer().on_click((_e, cx) => { this.messageKind = kind; cx.notify(); }).child(word)))
+        .child(note(t, "以用户身份发给本 Topic 的负责人")))
+      .child(div().id("message-text").on_mouse_down("left", stop).child(Textarea.new(this.messageBox).w_full().h(90).px(10).py(8).rounded(8)
+        .border_1().border_color(t.input).bg(t.background).text_size(S().body).text_color(t.foreground)))
+      .when(!editable, (el) => el.child(note(t, "Topic 已归档或正在删除，无法发送新消息。", t.ansi3)))
+      .when(textLength > 4000, (el) => el.child(note(t, "消息最多 4000 字；较长内容请改用产物路径。", t.ansi3)));
+    return dialogFrame(t, "messages", p.title ?? `${p.topic.title} · 消息`, [
+      list, composer, this.failed && note(t, this.failed, t.ansi1),
+    ], [
+      dialogButton("message-refresh", "刷新", t, (_e, cx) => this.refreshMessages(cx, p), "secondary", !this.sending && !this.messagesLoading),
+      dialogButton("close", "关闭", t, close),
+      dialogButton("message-send", this.sending ? "处理中…" : "发送", t,
+        (_e, cx) => { if (ready) this.messageCommand(cx, p, "msg", ["--kind", this.messageKind, `--text=${text}`], true); }, "primary", Boolean(ready)),
+    ], close);
+  }
+
+  renderCommunicationSummary(t, p) {
+    const follows = this.follows ?? p.topic?.follows ?? [], peers = p.peers ?? [];
+    const editable = !p.topic?.archived && !p.topic?.deleting;
+    const box = v_flex().id("topic-communication").flex_none().max_h(240).overflow_y_scrollbar().gap(8);
+    box.child(h_flex().gap(7).items_center()
+      .child(action("summary-messages", "消息", "inbox", t, () => this.openMessages({ ...p, topic: { ...p.topic, follows } }), { color: t.accent }))
+      .when(this.messagesLoading, (el) => el.child(note(t, "正在读取消息…"))));
+    const recent = messageGroups(this.messageData, peers).flatMap((g) => g.items.map((x) => ({ ...x, peer: g.title })))
+      .sort((a, b) => Math.max(b.item.at, b.item.answer?.at ?? 0) - Math.max(a.item.at, a.item.answer?.at ?? 0)).slice(0, 5);
+    if (recent.length) box.child(v_flex().gap(4)
+      .children(recent.map(({ item, peer, status }) => div().text_size(S().label).text_color(t.muted)
+        .truncate().tooltip([peer, status, item.text, item.answer?.text].filter(Boolean).join("\n"))
+        .child(`${peer} · ${status} · ${String(item.answer?.text ?? item.text ?? "").split("\n")[0]}`))));
+    box.child(div().text_size(S().small).font_semibold().child("关注 Topic"));
+    if (!follows.length) box.child(note(t, "还没有关注其他 Topic。"));
+    for (const id of follows) {
+      const peer = peers.find((x) => x.id === id);
+      box.child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().tooltip(peer?.title ?? `${id}（已删除）`).text_size(S().small).child(peer?.title ?? `${id}（已删除）`))
+        .child(action(`unfollow-${id}`, "解除", "close", t,
+          (_e, cx) => this.messageCommand(cx, p, "follow", ["--target", id, "--remove"]), { enabled: !this.sending && !this.messagesLoading })));
+    }
+    const choices = peers.filter((peer) => peer.id !== p.topic?.id && !peer.archived && !peer.deleting && !follows.includes(peer.id));
+    if (editable && choices.length) box.child(v_flex().gap(5).child(note(t, "添加关注"))
+      .children(choices.map((peer) => action(`follow-${peer.id}`, `+ ${peer.title}`, "task", t,
+        (_e, cx) => this.messageCommand(cx, p, "follow", ["--target", peer.id]), { enabled: !this.sending && !this.messagesLoading }))));
+    if (this.failed) box.child(note(t, this.failed, t.ansi1));
+    return box;
+  }
+
   renderForm(t, p, close) {
     const role = p.role, topic = p.topic, task = p.task;
     const title = this.titleBox.value(), detail = this.detailBox.value(), text = this.backlogBox.value();
@@ -1466,6 +1638,7 @@ export default class Dispatch extends View {
       body.child(kinds).child(editor("说明", "task-detail", this.detailBox, role === "dispatch" ? 100 : 130));
       if (role === "task" && task?.request) body.child(note(t, "修改职责或说明会撤销当前派发请求。", t.ansi3));
       if (role === "dispatch") {
+        if (p.dependencyHint) body.child(note(t, p.dependencyHint, t.ansi3));
         body.child(note(t, "执行者", t.foreground));
         if (ownerLive) body.child(choice("owner", `当前主 agent（${ownerName}）`, "加入队列，等主 agent 空闲时自动送达"));
         else body.child(note(t, "主 agent 已离线 · 默认新开标签页。", t.ansi3));
@@ -1475,7 +1648,7 @@ export default class Dispatch extends View {
         if (this.programsError) body.child(note(t, this.programsError, t.ansi3));
       }
     }
-    const ready = role === "backlog" ? Boolean(text.trim()) : role === "dispatch" ? Boolean(picked) && !topic?.pausedAt
+    const ready = role === "backlog" ? Boolean(text.trim()) : role === "dispatch" ? Boolean(picked) && !topic?.pausedAt && !p.dependencyHint
       : Boolean(title.trim());
     const submit = (_e, cx) => {
       if (this.sending || !ready) return;
@@ -1669,6 +1842,7 @@ export default class Dispatch extends View {
     const t = theme(), p = blockProps() ?? {}, close = () => closeOverlay(p.overlay);
     if (["dispatch", "task", "backlog", "newtopic"].includes(p.role)) return this.renderForm(t, p, close);
     if (p.role === "abandon") return this.renderAbandon(t, p, close);
+    if (p.role === "messages") return this.renderMessages(t, p, close);
     if (p.role === "text") {
       const md = p.markdown ?? null, raw = !md || this.raw || md.length > MARKDOWN_LIMIT;
       const seg = (id, label, on, value) => h_flex().id(id).h(24).px(10).items_center().rounded(5).text_size(S().small)
@@ -1691,7 +1865,8 @@ export default class Dispatch extends View {
       const modes = h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
         .child(seg("timeline", "时间线", !this.raw, false)).child(seg("source", "原文", Boolean(this.raw), true));
       const body = this.raw ? monoBox(t, "out", p.text || "还没有 Task 完成摘要。") : this.renderTimeline(t, p.nodes ?? []);
-      return dialogFrame(t, "timeline", p.title ?? "", [body], [dialogButton("close", "关闭", t, close, "primary")], close, modes);
+      return dialogFrame(t, "timeline", p.title ?? "", [p.topic && this.renderCommunicationSummary(t, p), body],
+        [dialogButton("close", "关闭", t, close, "primary")], close, modes);
     }
     if (p.role === "bgtask") {
       const z = S(), task = p.task ?? {}, running = task.status === "running", pad = (n) => String(n).padStart(2, "0");

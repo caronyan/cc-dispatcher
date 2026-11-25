@@ -1,6 +1,6 @@
 // What the panel reads from disk. Takes its I/O as arguments ({ sh, py, readText }) so
 // herdr/tests/loader.test.mjs can run it under node; main.js passes Herdr's exec/readTextFile.
-import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, TOPIC_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, parseArchived, parseAsks, parseTopics, parseStates, ANSWER_SCRIPT, ARCHIVE_SCRIPT, buildRuns, buildTopics, topicDir, runRoots, prettyReport, taskPath } from "./model.js";
+import { LIST_SCRIPT, EXISTS_SCRIPT, DIFF_SCRIPT, CONTROL_SCRIPT, TOPIC_SCRIPT, QUOTA_SCRIPT, parseJSON, parseMetaDump, parseControls, parseArchived, parseAsks, parseTopics, parseStates, parseMessageSummaries, ANSWER_SCRIPT, ARCHIVE_SCRIPT, buildRuns, buildTopics, topicDir, runRoots, prettyReport, taskPath } from "./model.js";
 import { STATS_PY, statsRequest } from "./stats.js";
 import { BG_PY, bgRequest, LIVE_SCRIPT, parseLive } from "./bg.js";
 
@@ -22,7 +22,7 @@ export async function loadRuns({ sh }, repo, terminals) {
   if (r.code !== 0 && !r.stdout) return { runs: [], topics: [], states: {}, error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };
   const states = parseStates(r.stdout);
   const runs = buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout), states);
-  return { runs, topics: buildTopics(runs, parseTopics(r.stdout), states), states, error: null };
+  return { runs, topics: buildTopics(runs, parseTopics(r.stdout), states, parseMessageSummaries(r.stdout)), states, error: null };
 }
 
 /** Archive or unarchive a run (op "archive" | "unarchive"): { ok, error }. */
