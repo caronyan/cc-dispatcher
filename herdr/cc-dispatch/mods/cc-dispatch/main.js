@@ -1107,26 +1107,24 @@ export default class Dispatch extends View {
     const z = S(), on = this.ctx?.on ?? null;
     const kindIcon = { shell: "terminal", monitor: "eye", agent: "bot" };
     const kindTag = { shell: "shell cmd", monitor: "monitor", agent: "agent" };
-    const statusColor = { running: t.working, completed: t.done, failed: t.ansi1, killed: t.ansi3, stopped: t.ansi3, lost: t.muted };
+    // Ended rows read like finished cards: a mark after the title and the time on the right, one line each.
+    const marks = { completed: "done", failed: "failed", killed: "stopped", stopped: "stopped", lost: "lost" };
     const row = (task) => {
       const running = task.status === "running", age = fmtDur((task.ended || Date.now()) - (task.started || Date.now()));
-      const word = running ? age : ({ completed: "完成", failed: "失败", killed: "已停止", stopped: "已停止", lost: "失联" }[task.status] ?? task.status);
-      const sub = running ? (task.event || task.tail?.[task.tail.length - 1] || "") : bgSummary(task);
       const id = `bg-${key}|${task.session}|${task.id}`;
-      return v_flex().id(id).flex_none().bg(t.surface)
+      return h_flex().id(id).flex_none().h(30).pl(inset).pr(10).gap(7).items_center().bg(t.surface)
         .cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click(() => openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 860, height: 640,
-            props: { role: "bgtask", title: task.title, output: task.output ?? null, log: task.output ? null : task.log ?? null, on,
-              task: { started: task.started, ended: task.ended, command: task.command, status: task.status, kind: task.kind, summary: bgSummary(task) } } }))
-        .child(h_flex().h(30).pl(inset).pr(10).gap(7).items_center()
-          .child(h_flex().w(10).flex_none().justify_center().child(running ? icon("ring", 10, t.working).spin(1400) : div().size(6).rounded(3).bg(statusColor[task.status] ?? t.muted)))
-          .child(icon(kindIcon[task.kind] ?? "terminal", 12, t.muted))
-          .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
-          .child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected).text_size(z.label - 1.5).text_color(t.muted)
-            .child(kindTag[task.kind] ?? task.kind ?? "shell cmd"))
-          .child(div().flex_1())
-          .child(div().flex_none().text_size(z.label).text_color(statusColor[task.status] ?? t.muted).child(running ? `运行 ${word}` : `${word} · ${age}`)))
-        .when(Boolean(sub), (el) => el.child(div().pl(inset + 17).pr(10).pb(5).mt(-4).truncate().tooltip(String(sub)).font_family(mono()).text_size(z.label - 1).text_color(t.muted).child(sub)));
+        .on_click(() => openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 860, height: 640,
+          props: { role: "bgtask", title: task.title, output: task.output ?? null, log: task.output ? null : task.log ?? null, on,
+            task: { started: task.started, ended: task.ended, command: task.command, status: task.status, kind: task.kind, summary: bgSummary(task) } } }))
+        .when(running, (el) => el.child(h_flex().w(10).flex_none().justify_center().child(icon("ring", 10, t.working).spin(1400))))
+        .child(icon(kindIcon[task.kind] ?? "terminal", 12, t.muted))
+        .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(z.body).text_color(running ? t.foreground : t.muted).child(task.title))
+        .when(!running, (el) => el.child(statusMark(t, `${id}-mark`, marks[task.status] ?? "lost")))
+        .child(h_flex().h(15).px(4).flex_none().items_center().rounded(3).bg(t.selected).text_size(z.label - 1.5).text_color(t.muted)
+          .child(kindTag[task.kind] ?? task.kind ?? "shell cmd"))
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(z.label).text_color(running ? t.working : t.muted).child(running ? `运行 ${age}` : age));
     };
     // Its own framed area under the Task's title, apart from the helper rows.
     const box = v_flex().id(`bg-${key}`).flex_none().ml(inset - 8).mr(10).my(4).rounded(6).border_1().border_color(t.border).overflow_hidden();
@@ -1893,16 +1891,15 @@ export default class Dispatch extends View {
             .child(running ? icon("ring", 10, t.working).spin(1400) : div().size(6).rounded(3).bg(colors[task.status] ?? t.muted))
             .child(div().text_size(z.label).text_color(colors[task.status] ?? t.muted).child(words[task.status] ?? task.status ?? "")))
           .child(div().text_size(z.small).text_color(t.muted).child(facts.join(" · "))))
-        .when(Boolean(task.summary) && !running, (el) => el.child(div().text_size(z.small).text_color(t.foreground).child(task.summary)))
-        .when(Boolean(task.command), (el) => el.child(div().max_h(72).overflow_y_scrollbar().px(10).py(6).rounded(6).bg(t.raised)
-          .font_family(mono()).text_size(z.label).text_color(t.foreground).child(task.command)));
-      const section = (label, el) => v_flex().flex_1().min_h(0).gap(5).child(div().flex_none().text_size(z.label).text_color(t.muted).font_semibold().child(label)).child(el);
-      const out = this.outText === undefined ? "正在读取…" : this.outText ? this.outText.split("\n").slice(running ? -80 : -400).join("\n") : "没有输出。";
-      const outBox = monoBox(t, "out", out);
-      const body = [head];
-      if (running) body.push(section("进程", div().id("live").flex_1().min_h(0).overflow_y_scrollbar().px(14).py(10).rounded(8).border_1().border_color(t.border).bg(t.background)
-        .text_size(z.body).text_color(t.foreground).child(TextView.markdown("live-view", this.live ? liveMarkdown(task, this.live) : "正在读取它的进程…").selectable(true))));
-      body.push(section(running ? "最近输出" : "输出", outBox));
+        .when(Boolean(task.summary) && !running, (el) => el.child(div().text_size(z.small).text_color(t.foreground).child(task.summary)));
+      // Command, processes and output as one document, so the dialog scrolls once instead of splitting its height.
+      const fence = (text) => `~~~~\n${String(text).replace(/~{4,}/g, "~~~")}\n~~~~`;
+      const out = this.outText === undefined ? "正在读取…" : this.outText ? fence(this.outText.split("\n").slice(running ? -80 : -400).join("\n")) : "没有输出。";
+      const doc = [task.command && `### 命令\n\n${fence(task.command)}`,
+        running && `### 进程\n\n${this.live ? liveMarkdown(task, this.live).replace(/\n\*\*输出\*\*[\s\S]*$/, "") : "正在读取它的进程…"}`,
+        `### ${running ? "最近输出" : "输出"}\n\n${out}`].filter(Boolean).join("\n\n");
+      const body = [head, div().id("bg-doc").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(12).rounded(8).border_1().border_color(t.border).bg(t.background)
+        .text_size(z.body).text_color(t.foreground).child(TextView.markdown("bg-doc-view", doc).selectable(true))];
       const stamp = running ? h_flex().flex_none().gap(6).items_center().text_size(z.small).text_color(t.muted)
         .child(icon("ring", 11, t.working).spin(1400)).child(`实时 · 每 ${LIVE_POLL / 1000} 秒刷新`) : null;
       return dialogFrame(t, "bgtask", p.title ?? "后台任务", body, [dialogButton("close", "关闭", t, close, "primary")], close, stamp);
