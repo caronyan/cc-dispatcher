@@ -27,7 +27,7 @@ Task 的运行明细保留以下信息和操作：
 
 ## How it behaves
 
-- Topic 数据在 `<repo>/.cc-dispatch/topics/<id>/topic.json`、`backlog.json`、`summary.md`。`LIST_SCRIPT` 在原运行数据后增加独立分隔的 Topic（附 backlog）和运行 `state.json` 段；`parseTopics`、`parseStates` 跳过损坏的 JSON。`buildTopics` 只把 state.topic 指向存在的 Topic、且 Task.run 等于该运行的记录关联起来，其他运行转成 id 为 `run:<运行目录名>`、Task 为 `k1` 的隐式 Topic。
+- Topic 数据在 `<repo>/.cc-dispatch/topics/<id>/topic.json`、`backlog.json`、`summary.md`。`LIST_SCRIPT` 在原运行数据后增加独立分隔的 Topic（附 backlog）和运行 `state.json` 段；`parseTopics`、`parseStates` 跳过损坏的 JSON。`buildTopics` 按 topic.json 里 Task.run 等于运行目录名（同一仓库）把运行关联到 Task，不看运行 state.json 里的副本，其他运行转成 id 为 `run:<运行目录名>`、Task 为 `k1` 的隐式 Topic。
 - `taskGroup` 返回 `you`、`active`、`queued` 或 `done`，`groupTasks` 按该顺序省略空组；`requestState` 返回 null、`queued` 或 `delivered`。`topicTotals` 合并运行用量且不重复计数，elapsed 取时段并集；`assignTasks` 把每个后台任务只分给一个运行，Task 下直接取它运行的那份。`loadSummary` 读取显式 Topic 的 summary.md；隐式 Topic 读取运行内存在的 research.md、result.md 或 log.md。
 - `topicCmd(io, hd, args)` 通过 `TOPIC_SCRIPT` 执行 `hd_dispatch.py topic`，参数分别传 argv，先用 meta.hd，失效时从 `~/.claude/skills/cc-herdr-dispatch-*/shared/scripts/` 找脚本；Topic stop 用 nohup 在后台执行。`refresh()` 扫描后有未投递的 owner 请求时调 `topic deliver --repo <repo>`，`checking()` 时跳过。
 - 请求通过 `topic request --topic <id> (--task <tid> | --items b1,b2) --type dispatch|refine --target owner|new_tab` 创建。Claude Code 派发消息为 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 为 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。细化消息指明 backlog 条目与一次性 `topic refined --topic <id> --ack <rid> --drafts <json>` 提交，只建草稿。new_tab 把 MESSAGE 作为 `tab.new` 的 task，deliver 不处理它。

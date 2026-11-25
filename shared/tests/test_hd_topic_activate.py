@@ -16,6 +16,11 @@ class TopicActivation(unittest.TestCase):
         self.prompt = self.w.root / "again.md"
         self.prompt.write_text("Continue the task.")
 
+    def legacy_run(self):
+        """A run from before Topics: no Topic binds it in topic.json."""
+        self.w.run_dir = self.w.run_dir.parent / "dev-legacy"
+        self.w.run_dir.mkdir()
+
     def command(self, *args, code=0, **env):
         result = self.w.hd(*map(str, args), **env)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
@@ -188,6 +193,7 @@ class TopicActivation(unittest.TestCase):
         self.assertNotIn("retired", self.hd.control(self.w.run_dir))
 
     def test_legacy_run_has_no_topic_meta_and_keeps_ordinary_finished_state(self):
+        self.legacy_run()
         (self.w.run_dir / "state.json").write_text('{"finished": 42, "phase": "done"}')
         meta = self.w.dispatch()
         self.assertIsNone(meta.get("topic"))
@@ -198,6 +204,7 @@ class TopicActivation(unittest.TestCase):
         self.assertEqual(self.state(), {"finished": 42, "phase": "done"})
 
     def test_legacy_send_undoes_retirement_even_when_terminal_is_closed(self):
+        self.legacy_run()
         (self.w.run_dir / "state.json").write_text('{"phase": "done"}')
         self.w.dispatch()
         self.command("retire", "--run", self.w.run_dir, "--force")

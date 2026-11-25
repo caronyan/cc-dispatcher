@@ -311,7 +311,7 @@ def unarchive(run: Path):
 
 def activate_run(run: Path):
     """Check the authoritative Topic binding before reopening a run and its Task."""
-    topic = read_json(run / "state.json", {}).get("topic")
+    topic = run_topic(run)
     if not topic:
         unarchive(run)
         return
@@ -449,7 +449,7 @@ ADOPTED = ("RUN_ADOPTED: another main agent ({owner}) took this run over; leave 
 
 
 def refuse_unless_running(run: Path):
-    topic = read_json(run / "state.json", {}).get("topic")
+    topic = run_topic(run)
     if topic:
         repo = repo_of_run(run)
         with topic_lock(repo, topic):
@@ -1017,7 +1017,7 @@ def agy_ready(model: str) -> str | None:
 def run_topic_guard(run: Path):
     """Hold the Topic lock of `run`'s Topic (none for a run outside a Topic). Topic pause and stop take the
     same lock, so whatever starts or wakes a helper under it lands wholly before or after them."""
-    topic = read_json(run / "state.json", {}).get("topic")
+    topic = run_topic(run)
     if not topic:
         yield
         return
@@ -1028,7 +1028,7 @@ def run_topic_guard(run: Path):
 def topic_hold(run: Path):
     """The failure that keeps `run`'s helpers from being started or woken by its Topic (being deleted,
     being stopped or paused), or None. Read under run_topic_guard to act on it."""
-    topic = read_json(run / "state.json", {}).get("topic")
+    topic = run_topic(run)
     if not topic:
         return None
     data = read_json(topic_dir(repo_of_run(run), topic) / "topic.json", {})
@@ -1904,7 +1904,7 @@ def adopt_package(run: Path, data: dict, me: dict, c: dict) -> dict:
     """Record this main agent as every call's parent and put the run back in its state before the handoff,
     owned by this terminal. → what to print (KEY=value)."""
     old = (data.get("from") or {}).get("terminal")
-    topic = read_json(run / "state.json", {}).get("topic")
+    topic = run_topic(run)
     if topic:
         repo = repo_of_run(run)
         with topic_lock(repo, topic):
@@ -2326,6 +2326,22 @@ def cmd_topic_request(a):
         else:
             save_topic(repo, a.topic, data)
     out(**result)
+
+
+def run_topic(run: Path):
+    """The Topic `run` is bound to, or None. topic.json holds the binding; state.json keeps a copy that a main
+    agent rewriting state.json can drop, and a dropped copy is put back from topic.json."""
+    path = run / "state.json"
+    state = read_json(path, {})
+    if state.get("topic"):
+        return state["topic"]
+    bound = topic_binding(repo_of_run(run), run)
+    if not bound:
+        return None
+    if path.exists():
+        state.update(topic=bound[0], task=bound[1])
+        write_json(path, state)
+    return bound[0]
 
 
 def topic_binding(repo, run):

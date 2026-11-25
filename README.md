@@ -38,7 +38,7 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 运行中的文件：
 
 - 每次运行的记录在目标仓库的 `.cc-dispatch/<kind>-<run>/`（自动加进 `.git/info/exclude`）。
-- Topic 的记录在 `.cc-dispatch/topics/<id>/`：`topic.json` 保存目标、负责人、Task 与派发请求，`backlog.json` 保存待细化条目，`summary.md` 汇总各 Task 的结论。运行的 `state.json.topic/task` 指向它所属的 Topic 和 Task。
+- Topic 的记录在 `.cc-dispatch/topics/<id>/`：`topic.json` 保存目标、负责人、Task 与派发请求，`backlog.json` 保存待细化条目，`summary.md` 汇总各 Task 的结论。运行属于哪个 Topic 和 Task 以 `topic.json` 为准，运行的 `state.json.topic/task` 是副本，丢了会从 `topic.json` 补回。
 - worktree 在仓库旁的 `.cc-dispatch-wt/<repo>/` 下。
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。

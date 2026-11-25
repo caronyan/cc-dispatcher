@@ -96,6 +96,13 @@ test("a state Topic hint cannot claim a run bound to another directory in topic.
   assert.ok(topics.some((t) => t.id === "run:review-0107"));
 });
 
+test("a run whose state.json lost its Topic copy stays under the Task topic.json binds it to", () => {
+  const runs = buildRuns([], [], {}, {}, {}, { [RUN]: { mode: "review" } });
+  const topics = buildTopics(runs, { a: topicRecord({ k1: { run: "review-0107", kind: "review" } }) }, { [RUN]: { mode: "review" } });
+  assert.equal(topics.find((t) => t.id === "topic-a").tasks[0].run?.dir, RUN, "Task 归属以 topic.json 为准");
+  assert.ok(!topics.some((t) => t.id === "run:review-0107"), "不再另成一个 Topic");
+});
+
 function groupedTask({ state = {}, control = null, call = {}, terms = [], task = {}, asks = {}, answers = [], implicit = false } = {}) {
   const entries = [{ path: `${RUN}/agents/a/meta.json`, meta: meta("a", { parent: "t-main", report_check: "ok", ...call }) }];
   const runs = buildRuns(entries, terms, control ? { [RUN]: control } : {}, {}, { [RUN]: { asks, answers } });

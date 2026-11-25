@@ -87,6 +87,16 @@ class TopicHolds(unittest.TestCase):
         self.assertEqual((back, fresh, failed), ([], [], ["a"]))
         self.assertEqual([c for c in self.w.hc_state()["calls"][before:] if c[0] == "run"], [])
 
+    def test_a_run_whose_state_lost_its_topic_still_obeys_the_topic(self):
+        meta = self.w.dispatch()
+        self.w.patch(meta["name"], state="gone", status="idle")
+        (self.w.run_dir / "state.json").write_text(json.dumps({"mode": "dev"}))  # a main agent rewrote it
+        self.command("topic", "pause", "--repo", self.w.repo, "--topic", self.topic)
+        result = self.command("recover", "--run", self.w.run_dir, "--fresh", code=3)
+        self.assertEqual(result["FAILURE"], "TOPIC_PAUSED", "Topic 归属以 topic.json 为准，state.json 丢了也要守住暂停")
+        state = json.loads((self.w.run_dir / "state.json").read_text())
+        self.assertEqual((state["topic"], state["task"], state["mode"]), (self.topic, self.task, "dev"))
+
     def test_stopping_again_finishes_a_run_left_stopping_by_a_dead_process(self):
         meta = self.w.dispatch()
         code = """

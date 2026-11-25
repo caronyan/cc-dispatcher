@@ -453,8 +453,9 @@ export function buildTopics(runs, topics = {}, states = {}) {
     if (dir) topicDirs.set(topic, dir);
     for (const [id, t] of Object.entries(raw.tasks ?? {})) {
       if (!objectJSON(t)) continue;
-      const run = allRuns.find((r) => (states[r.dir]?.topic === raw.id)
-        && baseName(r.dir) === t.run && (!dir || parentOf(r.dir) === parentOf(parentOf(dir)))) ?? null;
+      // topic.json holds the binding; a main agent rewriting state.json can drop its copy of it.
+      const run = allRuns.find((r) => baseName(r.dir) === t.run
+        && (!dir || parentOf(r.dir) === parentOf(parentOf(dir)))) ?? null;
       const task = {
         id, title: t.title ?? id, kind: t.kind ?? run?.kind ?? "dev", detail: t.detail ?? "",
         dependsOn: Array.isArray(t.depends_on) ? [...t.depends_on] : [], parentTask: t.parent_task ?? null,
