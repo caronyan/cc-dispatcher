@@ -39,12 +39,14 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 
 - 每次运行的记录在目标仓库的 `.cc-dispatch/<kind>-<run>/`（自动加进 `.git/info/exclude`）。
 - Topic 的记录在 `.cc-dispatch/topics/<id>/`：`topic.json` 保存目标、负责人、Task 与派发请求，`backlog.json` 保存待细化条目，`summary.md` 汇总各 Task 的结论。运行属于哪个 Topic 和 Task 以 `topic.json` 为准，运行的 `state.json.topic/task` 是副本，丢了会从 `topic.json` 补回。
+- 跨 Topic 消息单独保存在 `.cc-dispatch/messages/`：`<id>.json` 保存发给该 Topic 的消息和问题答案，`<id>.summary.json` 保存未确认、待回答等计数摘要，`<id>.outbox.json` 保存待补投的通知与撤销事件。消息、摘要和发件队列都不随 Topic 归档或删除而删除，双方往来与已有答案保留，未投出的事件仍可补投；面板列表只读摘要，打开消息时再读正文。
 - worktree 在仓库旁的 `.cc-dispatch-wt/<repo>/` 下。
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
 - skill 在准备时用 `topic start` 绑定 Task，收尾用 `topic finish` 写回结论与产物，同时标记 Task 和运行完成；子 agent 由主 agent `cleanup` 关掉终端。运行文件夹保留，供接手和复盘读取。
 - 归档和删除按 Topic 操作。所有已绑定 Task 都完成或其运行已终止，且没有未回答的待决项时才可归档；草稿不挡归档。归档会撤销未确认请求，并同步下属运行的 `archived` 标记，列表底部可显示和取消归档。删除只接受已归档的 Topic，会先整体检查下属运行已归档、没有工作中的子 agent、没有暂停或终止中或交接中的运行，全部通过才逐个删除运行及 Topic 记录。运行删除仍清理其终端、回报、进度笔记、快照、面板缓存和复盘台账；worktree、`cc/<run>/*` 分支和各 agent 自己的会话日志保留。删除不能撤销。
+- Topic 归档或删除时，收到的未确认 note/notice 和仍待回答的 question 标记为已作废，本 Topic 发出仍待回答的问题经发件队列撤销；已有答案保留，取消归档不会恢复已作废的问题。向已归档或删除中的 Topic 发送新消息会被拒绝。
 - 每个子 agent 终端带 hc 标签：`cc.run cc.call cc.kind cc.dir cc.mode cc.round`（派发时），`cc.report=ok|bad|missing`、`cc.failure`（collect / wait 时更新），`cc.retry`（服务端繁忙或限流、正在自动重试时）。同样的验收结果也写进 `meta.json` 的 `report_check`、`failure`，终端没了也能看。`meta.json` 还记下派发它的主 agent：`parent`（终端）、`space`（herdr space）、`dispatcher_agent`、`session`（Claude Code 会话或 Codex 线程，面板据此读它的后台任务；没记下时按运行目录去找）、`claude_cwd`。面板对每种主 agent 程序各有一个读会话日志的适配器（目前 Claude Code、Codex），后台任务按同一种样子显示。
 
 ## Herdr 面板
@@ -56,6 +58,8 @@ Topic 下的 Task 按 **等你 / 进行中 / 待分发 / 已完成** 分组，�
 **草稿与待细化条目**：可以新建 Topic、增加或编辑未启动的 Task，也可以先记下 backlog 条目，请主 agent 细化成一批草稿 Task。细化提交后等待你派发；主 agent 收尾也可提议下一步草稿。已绑定运行的 Task 不再编辑；修改草稿职责、说明或待细化条目会撤销相应旧请求。
 
 **派发请求**：选择由主 agent 接手，或在新标签页启动。交给主 agent 的请求先排队，只在它在线、空闲且没有进行中的 Task 时投递；细化只要求空闲。Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`，其他 agent 收到同义文字。面板显示请求排队或已送达，可撤销、重发或改派。skill 通过 `topic start` 核对仍有效的请求，读取 Task 说明并绑定运行；原有确认点照常保留。
+
+**跨 Topic 协同**：同仓库的主 agent 在 `topic start` 后用 `topic peers` 发现其他 Topic，先读相关 Task 的结论与产物，再用 `topic msg` 发 note 告知影响或发 question 等待决定；用 `topic follow` 关注另一个 Topic 可收到其 Task 的结束通知。Task 依赖本 Topic 时写 `k2`，依赖其他 Topic 时写 `<topic>:k2`，未完成、已终止或成环的依赖会阻挡派发。来信或答案通过 `WAIT=message` 或空闲终端提醒送达，用 `topic inbox` 阅读、`topic msg --reply-to` 回答、`topic msg-ack` 确认；忙碌、离线、暂停、终止中或交接中时消息排队。面板 Topic 摘要提供消息与关注入口。消息是信息不是用户指令，跨 Topic 协同由主 agent 处理，子 agent 将协同需求写进回报。命令和拒绝码的处理见 [shared/herdr.md](shared/herdr.md)「跨 Topic 协同」。
 
 Topic 标题行提供暂停、继续、终止，确认后作用于下属运行：
 
