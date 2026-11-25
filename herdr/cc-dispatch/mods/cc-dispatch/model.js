@@ -549,6 +549,21 @@ export function taskCards(task) {
   return [...calls, ...rest].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
 
+/**
+ * The panel's Topic order: running first (a Task working or waiting on the person), then paused, then the
+ * rest that are not archived, each newest first; archived last, most recently archived first.
+ */
+export function orderTopics(topics) {
+  const running = (x) => x.tasks.some((task) => ["active", "you"].includes(taskGroup(task, x)));
+  const open = topics.filter((x) => !x.archived);
+  return {
+    running: open.filter((x) => !x.pausedAt && running(x)),
+    paused: open.filter((x) => x.pausedAt),
+    ended: open.filter((x) => !x.pausedAt && !running(x)),
+    archived: topics.filter((x) => x.archived).sort((a, b) => b.archived - a.archived),
+  };
+}
+
 const GIST_VERDICTS = {
   LGTM: "没有问题", ISSUES: "提出问题", HOLDS: "未找到反例", FAILS: "找到反例", PASS: "测试通过", FAIL: "测试失败", BLOCKED: "受阻",
   done: "已完成", partial: "部分完成", blocked: "受阻",

@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, parseJSON } from "./model.js";
+import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -610,10 +610,9 @@ export default class Dispatch extends View {
         .child(note(t, "新建 Topic 后添加 Task 草稿，或用 cc-herdr-dispatch 系列 skill 开始工作。历史运行也会显示在这里。")));
       return this.renderOthers(t, body, others);
     }
-    const live = mine.filter((topic) => this.topicActive(topic)), ended = mine.filter((topic) => !topic.archived && !this.topicActive(topic));
-    const archived = mine.filter((topic) => topic.archived).sort((a, b) => b.archived - a.archived);
+    const { running, paused, ended, archived } = orderTopics(mine);
     const old = this.showOld ? ended : ended.slice(0, HISTORY);
-    body.children([...live, ...old].map((topic) => this.renderTopic(t, topic)));
+    body.children([...running, ...paused, ...old].map((topic) => this.renderTopic(t, topic)));
     const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
     if (ended.length > HISTORY) {

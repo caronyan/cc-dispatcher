@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as bgModule from "../cc-dispatch/mods/cc-dispatch/bg.js";
 import * as statsModule from "../cc-dispatch/mods/cc-dispatch/stats.js";
 import {
-  runCards,
+  orderTopics, runCards,
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
   summary, callDetail, runSpace, splitBySpace, callStage, runStage, stageSummary, groupByStage, SETTLED, cardCounts, ago, handoffAsk, handoffText, prettyReport, taskPath, timelineMarkdown, eventWords,
   CONTROL_SEP, parseControls, controlOps, controlBanner, quotaAgent, runQuotaAgent, quotaView, runParent, activeRuns, callTags,
@@ -391,6 +391,19 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.equal(closed, 1);
     assert.equal(missingMarker.failed, "没有成功标记");
   });
+});
+
+test("Topics are listed running first, then paused, then the rest, with archived last", () => {
+  const live = { address: "t-helper", state: "live", status: "working" };
+  const topic = (id, extra, tasks = []) => ({ id, archived: null, pausedAt: null, tasks, ...extra });
+  const busy = groupedTask({ terms: [live, { address: "t-main", state: "live", program: { key: "codex" } }] }).task;
+  assert.equal(busy.group, "active");
+  const order = orderTopics([
+    topic("done", {}), topic("old-archive", { archived: 1 }), topic("paused", { pausedAt: 5 }, [busy]),
+    topic("run", {}, [busy]), topic("new-archive", { archived: 9 }, [busy]),
+  ]);
+  assert.deepEqual(Object.fromEntries(Object.entries(order).map(([k, v]) => [k, v.map((x) => x.id)])),
+    { running: ["run"], paused: ["paused"], ended: ["done"], archived: ["new-archive", "old-archive"] });
 });
 
 test("Task grouping ignores survey and review-check entries, and retired runs cannot stay live", () => {
