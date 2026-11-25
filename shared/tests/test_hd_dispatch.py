@@ -356,10 +356,7 @@ class Handover(unittest.TestCase):
         self.assertIn("WAIT=timeout", w.hd("wait", "--run", str(w.run_dir), "--timeout", "1").stdout)
 
     def test_from_the_panel_the_new_helper_stays_under_its_main_agent(self):
-        w = Env()
-        st = w.hc_state()
-        st["terminals"]["main"] = {"address": "t1", "state": "live", "app": "claude"}
-        w.state.write_text(json.dumps(st))
+        w = Env()  # its main agent is the live terminal "parent" at t1
         m = w.dispatch()
         self.assertEqual(w.hc_state()["terminals"][m["name"]]["parent"], "t1")
         w.patch(m["name"], status="error", turn=1, screen="■ Codex ran out of room in the model's context window.\n")
@@ -370,9 +367,7 @@ class Handover(unittest.TestCase):
 
     def test_a_main_agent_that_is_gone_is_not_named_as_parent(self):
         w = Env()
-        st = w.hc_state()
-        st["terminals"]["main"] = {"address": "t1", "state": "gone", "app": "claude"}
-        w.state.write_text(json.dumps(st))
+        w.patch("parent", state="gone")
         m = w.dispatch()
         self.assertIsNone(w.hc_state()["terminals"][m["name"]]["parent"])
 
