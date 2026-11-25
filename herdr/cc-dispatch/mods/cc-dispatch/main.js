@@ -417,11 +417,12 @@ export default class Dispatch extends View {
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
-        if (repo && !checking()) {
+        // Only a repository with Topics has requests, messages or queued notices to deliver.
+        if (repo && topics.some((topic) => !topic.implicit) && !checking()) {
           const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", repo]);
           if (token !== this.token) return;
           if (!delivered.ok) this.error = `自动送达失败：${commandError(delivered.out)}`;
-          else if (outputValue(delivered.out, "DELIVERED") || outputValue(delivered.out, "MESSAGE_DELIVERED")) {
+          else if (["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"].some((key) => outputValue(delivered.out, key))) {
             const next = await loadRuns(files, repo, terminals() ?? []);
             if (token !== this.token) return;
             this.runs = next.runs; this.topics = next.topics; this.states = next.states; this.error = next.error;
@@ -646,8 +647,9 @@ export default class Dispatch extends View {
       return this.renderOthers(t, body, others);
     }
     const { running, paused, ended, archived } = orderTopics(mine);
-    const unread = ended.filter((topic) => topic.messages?.unacked > 0);
-    const history = ended.filter((topic) => !(topic.messages?.unacked > 0));
+    const unacked = (topic) => (topic.messages?.unacked ?? 0) + (topic.messages?.answersUnacked ?? 0) > 0;
+    const unread = ended.filter(unacked);
+    const history = ended.filter((topic) => !unacked(topic));
     const old = this.showOld ? history : history.slice(0, HISTORY);
     body.children([...running, ...paused, ...unread, ...old].map((topic) => this.renderTopic(t, topic)));
     const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()

@@ -71,7 +71,7 @@ test("the real list script reads only summaries and keeps hostile message bodies
 });
 
 test("dependency snapshots distinguish completion, pending, stopping, abandonment, deletion and cross-Topic cycles", () => {
-  const states = { "/r/.cc-dispatch/dev-finished": { finished: 20 }, "/r/.cc-dispatch/dev-stopped": {}, "/r/.cc-dispatch/dev-retired": {} };
+  const states = { "/r/.cc-dispatch/dev-finished": { finished: 20 }, "/r/.cc-dispatch/dev-stopped": {}, "/r/.cc-dispatch/dev-retired": { finished: 30 } };
   const runs = model.buildRuns([], [], {
     "/r/.cc-dispatch/dev-stopped": { state: "stopped" },
     "/r/.cc-dispatch/dev-retired": { state: "running", retired: true },
@@ -308,23 +308,34 @@ test("dependency warnings stay visible on folded Tasks and blocking states disab
   }
 });
 
-test("each refresh delivers without requests and reloads for either delivery output", async () => {
-  for (const output of ["DELIVERED=\nMESSAGE_DELIVERED=A", "DELIVERED=request\nMESSAGE_DELIVERED=", "DELIVERED=\nMESSAGE_DELIVERED="]) {
+test("each refresh in a repository with Topics delivers without requests and reloads for any delivery change", async () => {
+  const explicit = model.buildTopics([], { A: record("A", {}) });
+  for (const output of ["DELIVERED=\nMESSAGE_DELIVERED=A", "DELIVERED=request\nMESSAGE_DELIVERED=", "UPDATED=1", "DELIVERED=\nMESSAGE_DELIVERED="]) {
     let loads = 0;
     const calls = [];
     const h = harness({}, {
       findRepo: async () => "/r",
-      loadRuns: async () => { loads++; return { runs: [], topics: [], states: {}, error: null }; },
+      loadRuns: async () => { loads++; return { runs: [], topics: explicit, states: {}, error: null }; },
       topicCmd: async (_files, _hd, args) => { calls.push(Array.from(args)); return { ok: true, out: output }; },
     });
     h.view.init({}, h.cx);
     Object.assign(h.view, { ctx: { on: "remote", folder: "/r" }, refreshStats() {}, refreshQuota() {}, refreshPrograms() {} });
     h.view.refresh(h.cx); await h.flush();
     assert.deepEqual(calls, [["topic", "deliver", "--repo", "/r"]]);
-    assert.equal(loads, output.includes("=A") || output.includes("=request") ? 2 : 1);
+    assert.equal(loads, /=(A|request|1)/.test(output) ? 2 : 1, output);
     h.view.refresh(h.cx); await h.flush();
     assert.equal(calls.length, 2);
   }
+  const calls = [];
+  const h = harness({}, {
+    findRepo: async () => "/plain",
+    loadRuns: async () => ({ runs: [], topics: [], states: {}, error: null }),
+    topicCmd: async (_files, _hd, args) => { calls.push(Array.from(args)); return { ok: true, out: "" }; },
+  });
+  h.view.init({}, h.cx);
+  Object.assign(h.view, { ctx: { folder: "/plain" }, refreshStats() {}, refreshQuota() {}, refreshPrograms() {} });
+  h.view.refresh(h.cx); await h.flush();
+  assert.deepEqual(calls, [], "a repository without Topics gets no deliver call");
 });
 
 test("static app checks retain the existing guard against delivery side effects", async () => {
@@ -338,4 +349,25 @@ test("static app checks retain the existing guard against delivery side effects"
   Object.assign(h.view, { ctx: { folder: "/r" }, refreshStats() {}, refreshQuota() {}, refreshPrograms() {} });
   h.view.refresh(h.cx); await h.flush();
   assert.equal(delivered, false);
+});
+
+test("marker text inside any dumped JSON value cannot cut or forge a list section", () => {
+  const title = `x ${model.MESSAGE_SUMMARY_SEP}y ${model.STATE_SEP}z ${model.TOPIC_SEP}w ${model.SEP}v ${model.ASKS_SEP}u`;
+  const dump = [
+    `\n${model.ASKS_SEP}/r/.cc-dispatch/dev-a/asks.json\n${JSON.stringify({ q1: { id: "q1", title } })}`,
+    `\n${model.TOPIC_SEP}/r/.cc-dispatch/topics/A/topic.json\n${JSON.stringify({ id: "A", title, tasks: {} })}`,
+    `\n${model.TOPIC_SEP}/r/.cc-dispatch/topics/B/topic.json\n${JSON.stringify({ id: "B", title: "b", tasks: {} })}`,
+    `\n${model.STATE_SEP}/r/.cc-dispatch/dev-a/state.json\n${JSON.stringify({ note: title })}`,
+  ].join("");
+  assert.deepEqual(Object.keys(model.parseTopics(dump)), ["A", "B"]);
+  assert.equal(model.parseTopics(dump).A.topic.title, title);
+  assert.equal(model.parseStates(dump)["/r/.cc-dispatch/dev-a"].note, title);
+  assert.equal(model.parseAsks(dump)["/r/.cc-dispatch/dev-a"].asks.q1.title, title);
+});
+
+test("the panel delivers only in a repository with Topics, reloads on any delivery change, and keeps Topics with unread answers in view", () => {
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  assert.match(main, /if \(repo && topics\.some\(\(topic\) => !topic\.implicit\) && !checking\(\)\)/, "main.js: call topic deliver only when the repository has Topics");
+  assert.match(main, /\["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"\]\.some/, "main.js: reload the list on UPDATED as well");
+  assert.match(main, /topic\.messages\?\.answersUnacked \?\? 0\) > 0/, "main.js: unread answers keep an ended Topic out of the earlier list");
 });

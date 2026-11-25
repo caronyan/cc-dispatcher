@@ -95,16 +95,19 @@ export function parseJSON(text) {
 }
 
 const objectJSON = (v) => v && typeof v === "object" && !Array.isArray(v);
+// Section headers always start a line (LIST_SCRIPT prints "\n<SEP>"); JSON values never hold a bare newline,
+// so marker text inside a file cannot cut or forge a section.
 const beforeSections = (text, separators) => {
-  const all = String(text ?? "");
-  const ends = separators.map((s) => all.indexOf(s)).filter((i) => i >= 0);
+  const all = `\n${String(text ?? "")}`;
+  const ends = separators.map((s) => all.indexOf(`\n${s}`)).filter((i) => i >= 0);
   return ends.length ? all.slice(0, Math.min(...ends)) : all;
 };
+const sectionsOf = (text, sep) => text.split(`\n${sep}`).slice(1);
 
 /** The SEP-separated dump of meta.json files → [{ path, meta }], skipping unreadable ones. */
 export function parseMetaDump(text) {
   const out = [];
-  for (const chunk of beforeSections(text, [TOPIC_SEP, STATE_SEP, MESSAGE_SUMMARY_SEP]).split(SEP).slice(1)) {
+  for (const chunk of sectionsOf(beforeSections(text, [TOPIC_SEP, STATE_SEP, MESSAGE_SUMMARY_SEP]), SEP)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), meta = parseJSON(chunk.slice(nl + 1));
@@ -116,7 +119,7 @@ export function parseMetaDump(text) {
 /** The control.json files at the head of the dump → { <run dir>: { state, at, held, report } }. */
 export function parseControls(text) {
   const out = {}, head = beforeSections(text, [SEP, TOPIC_SEP, STATE_SEP, MESSAGE_SUMMARY_SEP]);
-  for (const chunk of head.split(CONTROL_SEP).slice(1)) {
+  for (const chunk of sectionsOf(head, CONTROL_SEP)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), c = parseJSON(chunk.slice(nl + 1));
@@ -128,7 +131,7 @@ export function parseControls(text) {
 /** The archive markers in LIST_SCRIPT's output → { <run dir>: archived at (ms) }. */
 export function parseArchived(text) {
   const out = {}, head = beforeSections(text, [SEP, CONTROL_SEP, TOPIC_SEP, STATE_SEP, MESSAGE_SUMMARY_SEP]);
-  for (const chunk of head.split(ARCHIVE_SEP).slice(1)) {
+  for (const chunk of sectionsOf(head, ARCHIVE_SEP)) {
     const [path, at] = chunk.split("\n");
     if (path?.trim()) out[path.trim().replace(/\/archived$/, "")] = (Number(at) || 0) * 1000;
   }
@@ -140,18 +143,18 @@ export function parseAsks(text) {
   const head = beforeSections(text, [ARCHIVE_SEP, CONTROL_SEP, SEP, TOPIC_SEP, STATE_SEP, MESSAGE_SUMMARY_SEP]);
   const out = {};
   const at = (dir) => (out[dir] ??= { asks: {}, answers: [] });
-  for (const part of head.split(ASKS_SEP).slice(1)) {
-    const [chunk] = part.split(ANSWERS_SEP);
+  for (const part of sectionsOf(head, ASKS_SEP)) {
+    const [chunk] = part.split(`\n${ANSWERS_SEP}`);
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), v = parseJSON(chunk.slice(nl + 1));
     if (path && v && typeof v === "object" && !Array.isArray(v)) at(path.replace(/\/asks\.json$/, "")).asks = v;
   }
-  for (const chunk of head.split(ANSWERS_SEP).slice(1)) {
+  for (const chunk of sectionsOf(head, ANSWERS_SEP)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim();
-    const list = chunk.slice(nl + 1).split(ASKS_SEP)[0].split("\n").map((l) => parseJSON(l.trim())).filter((a) => a && typeof a === "object" && a.id);
+    const list = chunk.slice(nl + 1).split(`\n${ASKS_SEP}`)[0].split("\n").map((l) => parseJSON(l.trim())).filter((a) => a && typeof a === "object" && a.id);
     if (path) at(path.replace(/\/answers\.jsonl$/, "")).answers = list;
   }
   return out;
@@ -163,8 +166,8 @@ const topicDirs = new WeakMap(), taskContexts = new WeakMap(), runTerminals = ne
 /** Topic JSON and its optional backlog, following the existing run sections. */
 export function parseTopics(text) {
   const out = {};
-  for (const part of beforeSections(text, [STATE_SEP, MESSAGE_SUMMARY_SEP]).split(TOPIC_SEP).slice(1)) {
-    const [chunk, back] = part.split(BACKLOG_SEP), nl = chunk.indexOf("\n");
+  for (const part of sectionsOf(beforeSections(text, [STATE_SEP, MESSAGE_SUMMARY_SEP]), TOPIC_SEP)) {
+    const [chunk, back] = part.split(`\n${BACKLOG_SEP}`), nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), topic = parseJSON(chunk.slice(nl + 1));
     if (!path || !objectJSON(topic) || typeof topic.id !== "string" || !topic.id) continue;
@@ -178,7 +181,7 @@ export function parseTopics(text) {
 /** Every run's state.json; keys are absolute run directories, as in parseControls. */
 export function parseStates(text) {
   const out = {};
-  for (const chunk of beforeSections(text, [MESSAGE_SUMMARY_SEP]).split(STATE_SEP).slice(1)) {
+  for (const chunk of sectionsOf(beforeSections(text, [MESSAGE_SUMMARY_SEP]), STATE_SEP)) {
     const nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), state = parseJSON(chunk.slice(nl + 1));
@@ -581,9 +584,10 @@ export function dependsState(topics, srcTopic, ref) {
   const cycle = visit(target, item, []);
   if (cycle) return { ...result, state: "cycle", path: cycle };
   const state = taskContexts.get(item)?.state ?? item.run?.state ?? {};
-  const finished = item.finishedAt != null || Boolean(state.finished);
-  result.state = item.abandonedAt != null ? "abandoned" : finished ? "done"
-    : item.run?.control?.state === "stopped" || item.run?.control?.retired ? "stopped" : "pending";
+  // Same order as the script's depends_state: retiring writes state.finished too, so it is checked first.
+  result.state = item.abandonedAt != null ? "abandoned" : item.finishedAt != null ? "done"
+    : item.run?.control?.state === "stopped" || item.run?.control?.retired ? "stopped"
+    : state.finished != null ? "done" : "pending";
   return result;
 }
 
