@@ -540,12 +540,37 @@ export function taskCards(task) {
   const cards = Object.fromEntries(Object.entries(state.tasks ?? {}).filter(([, c]) => objectJSON(c)));
   const calls = (r?.calls ?? []).map((c) => ({
     id: c.call, title: c.taskTitle || cards[c.call]?.title || "", stage: callStage(c, cards[c.call]?.status),
-    agent: c.agent ?? null, rounds: c.round ?? 1, note: cards[c.call]?.note ?? null, reportPath: c.reportPath || null,
+    agent: c.agent ?? null, rounds: c.round ?? 1, round: c.round ?? 1, note: cards[c.call]?.note ?? null,
+    reportPath: c.reportPath || null, agentDir: c.agentDir || null,
   }));
   const have = new Set(calls.map((c) => c.id));
   const rest = Object.entries(cards).filter(([id, c]) => !have.has(id) && !c.check && id !== "survey" && !/-check-r\d+$/.test(id))
-    .map(([id, c]) => ({ id, title: c.title ?? "", stage: c.status ?? "pending", agent: null, rounds: 0, note: c.note ?? null, reportPath: null }));
+    .map(([id, c]) => ({ id, title: c.title ?? "", stage: c.status ?? "pending", agent: null, rounds: 0, note: c.note ?? null, reportPath: null, agentDir: null }));
   return [...calls, ...rest].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
+const GIST_VERDICTS = {
+  LGTM: "没有问题", ISSUES: "提出问题", HOLDS: "未找到反例", FAILS: "找到反例", PASS: "测试通过", FAIL: "测试失败", BLOCKED: "受阻",
+  done: "已完成", partial: "部分完成", blocked: "受阻",
+};
+/**
+ * What a helper's report says, for the Task summary: its verdict in words, its one-line summary (summary or
+ * answer) and the titles of what it found (findings, cases, failures, candidates), most severe first, at most 5.
+ */
+export function reportGist(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const raw = v.verdict ?? v.status, verdict = GIST_VERDICTS[raw] ?? (typeof raw === "string" ? raw : null);
+  const summary = [v.summary, v.answer, v.recommendation?.reason].find((x) => typeof x === "string" && x.trim()) ?? "";
+  const rank = { critical: 0, high: 1, medium: 2, low: 3 };
+  const found = ["findings", "cases", "failures", "candidates"].flatMap((k) => Array.isArray(v[k]) ? v[k] : [])
+    .filter((x) => x && typeof x === "object")
+    .sort((a, b) => (rank[a.severity] ?? 4) - (rank[b.severity] ?? 4));
+  const items = found.slice(0, 5).map((x) => {
+    const text = x.title ?? x.problem ?? x.claim ?? x.lesson ?? x.test ?? x.name ?? x.id ?? "";
+    const line = String(text).split("\n")[0], id = x.id && !line.startsWith(String(x.id)) ? x.id : null;
+    return [id, x.severity && `[${x.severity}]`, line].filter(Boolean).join(" ");
+  });
+  return { verdict, summary, items, more: Math.max(0, found.length - items.length), total: found.length };
 }
 
 /** A Task needs the person before it can be considered done, even after helpers have reported. */

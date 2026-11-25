@@ -281,9 +281,21 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.deepEqual(cards.map((c) => c.id), ["a", "T9"]);
     assert.equal(cards[1].stage, "pending");
     const view = new context.TaskView();
-    view.reports = { a: { summary: "回报里的结论" } };
+    view.reports = { a: model.reportGist({ status: "done", summary: "回报里的结论" }) };
     const body = view.renderTaskSummary(colors, { node: model.topicTimeline(topic)[0], detail: "要做的事", deps: [], cards });
-    for (const want of ["说明", "要做的事", "卡片 · 2", "回报里的结论", "主 agent 记录：合入了", "还没派"]) assert.ok(texts(body).includes(want), want);
+    for (const want of ["说明", "要做的事", "卡片 · 2", "回报：已完成", "回报里的结论", "主 agent 记录：合入了", "还没派"]) assert.ok(texts(body).includes(want), want);
+  });
+
+  await t.test("review and stress reports without a summary still give their verdict and findings", () => {
+    const review = model.reportGist({ verdict: "ISSUES", findings: [
+      { id: "R2", severity: "low", problem: "小问题" }, { id: "R1", severity: "high", problem: "终止不完整\n细节" }] });
+    assert.equal(review.verdict, "提出问题");
+    assert.deepEqual(review.items, ["R1 [high] 终止不完整", "R2 [low] 小问题"]);
+    const stress = model.reportGist({ verdict: "FAILS", cases: Array.from({ length: 7 }, (_, i) => ({ id: `C${i}`, title: `反例${i}` })), retracted: [] });
+    assert.equal(stress.verdict, "找到反例");
+    assert.equal(stress.items.length, 5);
+    assert.equal(stress.more, 2);
+    assert.equal(model.reportGist("x"), null);
   });
 
   await t.test("a run's background tasks render inside its Task, beside the helper rows", () => {

@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards } from "./model.js";
+import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, parseJSON } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -300,10 +300,10 @@ export default class Dispatch extends View {
       const p = blockProps() ?? {}, files = io(p.on ?? null);
       this.reports = {};
       cx.spawn(async (cx) => {
-        await Promise.all((p.cards ?? []).filter((c) => c.reportPath).map(async (c) => {
-          const text = await files.readText(c.reportPath).catch(() => null);
-          let v = null; try { v = text ? JSON.parse(text) : null; } catch { v = null; }
-          if (v && typeof v === "object") this.reports[c.id] = { summary: typeof v.summary === "string" ? v.summary : "", status: v.status ?? null };
+        await Promise.all((p.cards ?? []).filter((c) => c.reportPath || c.agentDir).map(async (c) => {
+          const { text } = await loadReport(files, c).catch(() => ({ text: null }));
+          const gist = reportGist(text ? parseJSON(text) : null);
+          if (gist) this.reports[c.id] = gist;
         }));
         cx.notify();
       });
@@ -1589,7 +1589,7 @@ export default class Dispatch extends View {
     box.child(v_flex().gap(8).child(head(`卡片 · ${cards.length}`))
       .when(!cards.length, (el) => el.child(note(t, "还没有派发卡片。")))
       .children(cards.map((c) => {
-        const rep = this.reports?.[c.id], text = rep?.summary || c.note || "";
+        const rep = this.reports?.[c.id], text = rep?.summary || (rep ? "" : c.note || "");
         return v_flex().gap(3).pl(10).border_l(2).border_color(t.border)
           .child(h_flex().gap(7).items_center()
             .child(div().flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(c.id))
@@ -1598,8 +1598,14 @@ export default class Dispatch extends View {
             .children([statusMark(t, `tasksum-mark-${c.id}`, c.stage)].filter(Boolean))
             .child(div().flex_none().text_size(z.label).text_color(t.muted).child(MARK_WORDS[c.stage] ?? c.stage))
             .when(c.rounds > 1, (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`${c.rounds} 轮`))))
+          .when(Boolean(rep?.verdict), (el) => el.child(div().text_size(z.label).text_color(t.muted)
+            .child(`回报：${rep.verdict}${rep.total ? ` · ${rep.total} 条` : ""}`)))
           .when(Boolean(text), (el) => el.child(div().text_size(z.small).text_color(t.foreground).child(text)))
-          .when(Boolean(rep?.summary && c.note), (el) => el.child(note(t, `主 agent 记录：${c.note}`)));
+          .children((rep?.items ?? []).map((x) => h_flex().gap(6).items_start()
+            .child(div().flex_none().mt(7).size(4).rounded(2).bg(t.muted))
+            .child(div().flex_1().min_w(0).text_size(z.small).text_color(t.foreground).child(x))))
+          .when(Boolean(rep?.more), (el) => el.child(note(t, `还有 ${rep.more} 条`)))
+          .when(Boolean(rep && c.note), (el) => el.child(note(t, `主 agent 记录：${c.note}`)));
       })));
     return box;
   }
