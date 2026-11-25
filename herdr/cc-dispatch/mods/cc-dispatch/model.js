@@ -531,6 +531,23 @@ export function topicTimeline(topic) {
   }).sort((a, b) => (a.status === "queued") - (b.status === "queued") || a.at - b.at || a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
 
+/**
+ * A Task's cards for its summary dialog, in id order: each dispatched helper (its stage, executor, the report
+ * to read its conclusion from, its card's note) and each card not dispatched yet (its status and note).
+ */
+export function taskCards(task) {
+  const r = task?.run, state = taskContexts.get(task)?.state ?? r?.state ?? {};
+  const cards = Object.fromEntries(Object.entries(state.tasks ?? {}).filter(([, c]) => objectJSON(c)));
+  const calls = (r?.calls ?? []).map((c) => ({
+    id: c.call, title: c.taskTitle || cards[c.call]?.title || "", stage: callStage(c, cards[c.call]?.status),
+    agent: c.agent ?? null, rounds: c.round ?? 1, note: cards[c.call]?.note ?? null, reportPath: c.reportPath || null,
+  }));
+  const have = new Set(calls.map((c) => c.id));
+  const rest = Object.entries(cards).filter(([id, c]) => !have.has(id) && !c.check && id !== "survey" && !/-check-r\d+$/.test(id))
+    .map(([id, c]) => ({ id, title: c.title ?? "", stage: c.status ?? "pending", agent: null, rounds: 0, note: c.note ?? null, reportPath: null }));
+  return [...calls, ...rest].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
 /** A Task needs the person before it can be considered done, even after helpers have reported. */
 export function taskGroup(task, topic) {
   if (task?.abandonedAt != null) return "done";

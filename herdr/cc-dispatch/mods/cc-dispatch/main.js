@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline } from "./model.js";
+import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -293,6 +293,19 @@ export default class Dispatch extends View {
         const v = text ? (() => { try { return JSON.parse(text); } catch { return null; } })() : null;
         const qs = Array.isArray(v?.open_questions) ? v.open_questions.filter((x) => typeof x === "string" && x.trim()) : [];
         if (qs.length) { this.extra = qs; cx.notify(); }
+      });
+      return;
+    }
+    if (this.role === "tasksum") {
+      const p = blockProps() ?? {}, files = io(p.on ?? null);
+      this.reports = {};
+      cx.spawn(async (cx) => {
+        await Promise.all((p.cards ?? []).filter((c) => c.reportPath).map(async (c) => {
+          const text = await files.readText(c.reportPath).catch(() => null);
+          let v = null; try { v = text ? JSON.parse(text) : null; } catch { v = null; }
+          if (v && typeof v === "object") this.reports[c.id] = { summary: typeof v.summary === "string" ? v.summary : "", status: v.status ?? null };
+        }));
+        cx.notify();
       });
       return;
     }
@@ -735,12 +748,12 @@ export default class Dispatch extends View {
       .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().small).font_semibold().child(task.title))
       .children([statusMark(t, `mark-${key}`, stage)].filter(Boolean))
       .child(div().flex_1())
+      .child(h_flex().id(`tasksum-${key}`).size(22).flex_none().justify_center().items_center().rounded(6)
+        .tooltip("Task 摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { cx?.stop_propagation(); this.openTaskSummary(topic, task); }).child(icon("file", 13, t.muted)))
       .children(task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
-    if (task.detail) box.child(div().pl(inset).pr(10).py(5).text_size(S().small).text_color(t.muted).child(task.detail));
-    if (task.dependsOn.length) box.child(note(t, `依赖：${task.dependsOn.map((id) => topic.tasks.find((x) => x.id === id)?.title ?? id).join("、")}`).pl(inset).pr(10).py(3));
-    if (task.abandonedAt != null) box.child(note(t, `放弃原因：${task.abandonReason ?? "未记录"}`).pl(inset).pr(10).py(5));
     if (queued && !topic.archived && !topic.deleting) {
       box.child(h_flex().pl(inset).pr(10).py(6).gap(6).flex_wrap()
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
@@ -768,9 +781,16 @@ export default class Dispatch extends View {
           .children([statusMark(t, `mark-${r.dir}|${k.id}`, k.status)].filter(Boolean))
           .tooltip(k.waits.length ? `等 ${k.waits.join("、")}` : k.note ?? ""))));
     }
-    if (task.summaryLine) box.child(note(t, task.summaryLine, t.done).pl(inset).pr(10).py(5));
-    if (task.artifact) box.child(note(t, `产物：${task.artifact}`).pl(inset).pr(10).pb(5));
     return box;
+  }
+
+  /** The Task summary dialog: what the Task is, where it ended up, and each card with its status and report. */
+  openTaskSummary(topic, task) {
+    const node = topicTimeline(topic).find((n) => n.id === task.id) ?? null;
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 760, height: 680,
+      props: { role: "tasksum", title: `${task.title} · 摘要`, node, detail: task.detail || "", on: this.ctx?.on ?? null,
+        deps: task.dependsOn.map((id) => topic.tasks.find((x) => x.id === id)?.title ?? id), programs: this.programs,
+        cards: taskCards(task) } });
   }
 
   renderBacklog(t, topic) {
@@ -1541,6 +1561,49 @@ export default class Dispatch extends View {
     ], close, extra);
   }
 
+  renderTaskSummary(t, p) {
+    const z = S(), n = p.node ?? { done: [], open: [] };
+    const looks = { done: [t.done, "已完成"], active: [t.working, "进行中"], you: [t.ansi3, "等你处理"], abandoned: [t.muted, "已放弃"], queued: [t.muted, "未开始"] };
+    const [color, word] = looks[n.status] ?? looks.active;
+    const pad = (x) => String(x).padStart(2, "0");
+    const when = (ms) => { const d = new Date(ms); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    const head = (label, c = t.muted) => div().text_size(z.label).text_color(c).font_semibold().child(label);
+    const bullets = (items, c) => items.map((x) => h_flex().gap(6).items_start()
+      .child(div().flex_none().mt(7).size(4).rounded(2).bg(c))
+      .child(div().flex_1().min_w(0).text_size(z.small).text_color(t.foreground).child(x)));
+    const box = v_flex().id("tasksum-body").flex_1().min_h(0).overflow_y_scrollbar().gap(14).px(18).py(14).rounded(8)
+      .border_1().border_color(t.border).bg(t.background);
+    box.child(h_flex().gap(7).items_center().flex_wrap()
+      .when(Boolean(n.kind), (el) => el.child(pill(t, n.kind)))
+      .children([this.renderExecutor(t, n.agent)].filter(Boolean))
+      .child(div().text_size(z.label).text_color(color).child(word))
+      .when(Boolean(n.at), (el) => el.child(div().font_family(mono()).text_size(z.label).text_color(t.muted)
+        .child(`${when(n.at)}${n.end ? ` → ${when(n.end)}` : ""}`))));
+    if (p.detail) box.child(v_flex().gap(4).child(head("说明")).child(div().text_size(z.small).text_color(t.foreground).child(p.detail)));
+    if (p.deps?.length) box.child(v_flex().gap(4).child(head("依赖")).child(div().text_size(z.small).child(p.deps.join("、"))));
+    if (n.line) box.child(v_flex().gap(4).child(head("结论")).child(div().text_size(z.small).text_color(n.status === "abandoned" ? t.muted : t.foreground).child(n.line)));
+    if (n.done.length) box.child(v_flex().gap(3).child(head("已完成", t.done)).children(bullets(n.done, t.done)));
+    if (n.open.length) box.child(v_flex().gap(3).child(head("遗留待决", t.ansi3)).children(bullets(n.open, t.ansi3)));
+    if (n.artifact) box.child(v_flex().gap(4).child(head("产物")).child(div().font_family(mono()).text_size(z.label).text_color(t.foreground).child(n.artifact)));
+    const cards = p.cards ?? [];
+    box.child(v_flex().gap(8).child(head(`卡片 · ${cards.length}`))
+      .when(!cards.length, (el) => el.child(note(t, "还没有派发卡片。")))
+      .children(cards.map((c) => {
+        const rep = this.reports?.[c.id], text = rep?.summary || c.note || "";
+        return v_flex().gap(3).pl(10).border_l(2).border_color(t.border)
+          .child(h_flex().gap(7).items_center()
+            .child(div().flex_none().font_family(mono()).text_size(z.label).text_color(t.muted).child(c.id))
+            .children([c.agent && this.renderExecutor(t, c.agent)].filter(Boolean))
+            .child(div().min_w(0).flex_shrink(1).truncate().text_size(z.small).font_semibold().child(c.title || c.id))
+            .children([statusMark(t, `tasksum-mark-${c.id}`, c.stage)].filter(Boolean))
+            .child(div().flex_none().text_size(z.label).text_color(t.muted).child(MARK_WORDS[c.stage] ?? c.stage))
+            .when(c.rounds > 1, (el) => el.child(div().flex_none().text_size(z.label).text_color(t.muted).child(`${c.rounds} 轮`))))
+          .when(Boolean(text), (el) => el.child(div().text_size(z.small).text_color(t.foreground).child(text)))
+          .when(Boolean(rep?.summary && c.note), (el) => el.child(note(t, `主 agent 记录：${c.note}`)));
+      })));
+    return box;
+  }
+
   /** The Topic summary's timeline: one node per Task, oldest first; drafts not started yet come last. */
   renderTimeline(t, nodes) {
     const z = S(), pad = (n) => String(n).padStart(2, "0");
@@ -1605,6 +1668,8 @@ export default class Dispatch extends View {
           .text_size(S().body).text_color(t.foreground).child(TextView.markdown("md-view", md).selectable(true));
       return dialogFrame(t, "text", p.title ?? "", [body], [dialogButton("close", "关闭", t, close, "primary")], close, modes);
     }
+    if (p.role === "tasksum") return dialogFrame(t, "tasksum", p.title ?? "", [this.renderTaskSummary(t, p)],
+      [dialogButton("close", "关闭", t, close, "primary")], close);
     if (p.role === "timeline") {
       const seg = (id, label, on, value) => h_flex().id(id).h(24).px(10).items_center().rounded(5).text_size(S().small)
         .bg(on ? t.raised : t.popover).text_color(on ? t.foreground : t.muted).cursor_pointer()

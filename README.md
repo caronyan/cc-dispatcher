@@ -51,7 +51,7 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 
 Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"；`herdr/cc-dispatch` 面板按 **Topic → Task** 组织工作。一个 Topic 对应一个问题或目标；每个 Task 有标题、职责（research / review / dev / fix / test / retro）、说明和依赖，启动后绑定一次 skill 运行。dev 运行里的 T1、T2 等任务卡在 Task 的运行明细内展示。
 
-Topic 下的 Task 按 **等你 / 进行中 / 待分发 / 已完成** 分组，展开可读说明、结论与产物，再看运行中的任务卡、子 agent 轮次、回报检查、失败原因和历史。行内可跳转终端、读回报与任务文件、看 worktree 改动，或经确认请主 agent 收回报、诊断和清理终端。Topic 的汇总统计合并下属运行，后台任务按会话与任务编号去重。
+Topic 下的 Task 按 **等你 / 进行中 / 待分发 / 已完成** 分组，摘要按钮里看说明、结论、产物和每张卡片的回报，展开看运行中的任务卡、子 agent 轮次、回报检查、失败原因和历史。行内可跳转终端、读回报与任务文件、看 worktree 改动，或经确认请主 agent 收回报、诊断和清理终端。Topic 的汇总统计合并下属运行，后台任务按会话与任务编号去重。
 
 **草稿与待细化条目**：可以新建 Topic、增加或编辑未启动的 Task，也可以先记下 backlog 条目，请主 agent 细化成一批草稿 Task。细化提交后等待你派发；主 agent 收尾也可提议下一步草稿。已绑定运行的 Task 不再编辑；修改草稿职责、说明或待细化条目会撤销相应旧请求。
 

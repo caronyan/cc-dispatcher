@@ -275,6 +275,17 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.ok(texts(rendered).includes("做完了"));
   });
 
+  await t.test("the Task summary lists each card with its status, executor and report conclusion", () => {
+    const { topic, task } = groupedTask({ state: { tasks: { a: { status: "merged", title: "卡 A", note: "合入了" }, T9: { status: "pending", title: "还没派" } } } });
+    const cards = model.taskCards(task);
+    assert.deepEqual(cards.map((c) => c.id), ["a", "T9"]);
+    assert.equal(cards[1].stage, "pending");
+    const view = new context.TaskView();
+    view.reports = { a: { summary: "回报里的结论" } };
+    const body = view.renderTaskSummary(colors, { node: model.topicTimeline(topic)[0], detail: "要做的事", deps: [], cards });
+    for (const want of ["说明", "要做的事", "卡片 · 2", "回报里的结论", "主 agent 记录：合入了", "还没派"]) assert.ok(texts(body).includes(want), want);
+  });
+
   await t.test("a run's background tasks render inside its Task, beside the helper rows", () => {
     const { topic, task } = groupedTask();
     panel.fold.set("topic-a|k1", false);
@@ -295,7 +306,9 @@ test("Task abandonment controls and confirmation follow the command contract", a
     const rendered = panel.renderTask(colors, topic, task);
     assert.equal(panel.taskStage(topic, task), "abandoned");
     assert.equal(byId(rendered, "mark-topic-a|k1").attrs.tooltip, "已放弃");
-    assert.ok(texts(rendered).includes("放弃原因：不再继续"));
+    assert.ok(byId(rendered, "tasksum-topic-a|k1"), "Task 行有摘要按钮");
+    assert.ok(!texts(rendered).some((x) => /放弃原因|产物：/.test(x)), "说明、放弃原因和产物收进 Task 摘要，不在卡片里");
+    assert.equal(model.topicTimeline(topic).find((n) => n.id === "k1").line, "已放弃：不再继续");
     assert.equal(panel.topicActive(topic), false);
     assert.equal(panel.topicControlButtons(colors, topic).length, 0);
     assert.equal(panel.archiveButton(colors, topic)[0].attrs.id, "archive-topic-a");
