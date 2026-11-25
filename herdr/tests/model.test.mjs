@@ -232,10 +232,12 @@ test("Task abandonment controls and confirmation follow the command contract", a
     renderTakeover: () => null, renderCall: node, itemsOf: () => [{ answer: null }],
   });
 
-  await t.test("only expanded bound unfinished Tasks in editable explicit Topics offer abandon", () => {
+  await t.test("a bound unfinished Task whose run is gone offers abandon on its stop square, folded or not", () => {
+    const stub = panel.controlButtons;
+    panel.controlButtons = context.TaskView.prototype.controlButtons;
     for (const [taskData, topicData, folded, expected] of [
       [{ run: "dev-missing" }, {}, false, true],
-      [{ run: "dev-missing" }, {}, true, false],
+      [{ run: "dev-missing" }, {}, true, true],
       [{}, {}, false, false],
       [{ run: "dev-missing", finished_at: 20 }, {}, false, false],
       [{ run: "dev-missing", abandoned_at: 20 }, {}, false, false],
@@ -257,6 +259,9 @@ test("Task abandonment controls and confirmation follow the command contract", a
         assert.equal(opened[2].task.id, "k1");
       }
     }
+    assert.ok(!byId(panel.renderTask(colors, buildTopics([], { a: topicRecord({ k1: { run: "dev-missing" } }) })[0], buildTopics([], { a: topicRecord({ k1: { run: "dev-missing" } }) })[0].tasks[0]), "abandon-topic-a|k1").nodes.some((x) => x === "放弃"),
+      "放弃不再是单独的文字按钮，并入 Task 的终止方块");
+    panel.controlButtons = stub;
   });
 
   await t.test("a run's background tasks render inside its Task, beside the helper rows", () => {

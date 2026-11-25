@@ -296,8 +296,8 @@ export default class Dispatch extends View {
       });
       return;
     }
-    if (this.role === "abandon") {
-      this.sending = false; this.failed = null; this.failureCode = null;
+    if (this.role === "abandon" || this.role === "control") {
+      this.sending = false; this.failed = null; this.failureCode = null; this.mode = blockProps()?.mode ?? "stop";
       this.reasonBox = TextareaState.new({ rows: 4, placeholder: "填写放弃原因，例如：不再继续这个 Task，或运行记录已找不到" });
       this.reasonBox.on("change", (_e, cx) => cx.notify());
       return;
@@ -735,17 +735,12 @@ export default class Dispatch extends View {
       .child(div().min_w(0).flex_shrink(1).truncate().text_size(S().small).font_semibold().child(task.title))
       .children([statusMark(t, `mark-${key}`, stage)].filter(Boolean))
       .child(div().flex_1())
-      .children(r && task.abandonedAt == null ? this.controlButtons(t, r, topic) : []));
+      .children(task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
     if (task.detail) box.child(div().pl(inset).pr(10).py(5).text_size(S().small).text_color(t.muted).child(task.detail));
     if (task.dependsOn.length) box.child(note(t, `依赖：${task.dependsOn.map((id) => topic.tasks.find((x) => x.id === id)?.title ?? id).join("、")}`).pl(inset).pr(10).py(3));
     if (task.abandonedAt != null) box.child(note(t, `放弃原因：${task.abandonReason ?? "未记录"}`).pl(inset).pr(10).py(5));
-    if (!topic.implicit && task.runDir && group !== "done" && !topic.archived && !topic.deleting) {
-      box.child(h_flex().pl(inset).pr(10).py(6)
-        .child(action(`abandon-${key}`, "放弃", "close", t,
-          () => this.openForm("abandon", topic, { task: { id: task.id, title: task.title } }), { color: t.ansi1 })));
-    }
     if (queued && !topic.archived && !topic.deleting) {
       box.child(h_flex().pl(inset).pr(10).py(6).gap(6).flex_wrap()
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
@@ -847,27 +842,44 @@ export default class Dispatch extends View {
 
   // The run's Pause / Resume / Stop, icons only, at the end of its head. Each opens a "control"
   // dialog to confirm; hd_dispatch.py does the work.
-  controlButtons(t, r, topic = null) {
+  controlButtons(t, r, topic = null, task = null) {
+    // A bound, unfinished Task of an editable Topic can also be abandoned: the stop dialog offers it as its
+    // second choice, and when its run can no longer be stopped (gone, stopped, handed off) the square opens
+    // the abandon dialog on its own.
+    const abandonable = Boolean(task) && !topic?.implicit && Boolean(task.runDir) && taskGroup(task, topic) !== "done"
+      && !topic?.archived && !topic?.deleting;
+    const abandon = abandonable ? () => ({ topic: this.topicProps(topic), repo: this.topicRepo(topic), hd: this.topicHD(topic),
+      task: { id: task.id, title: task.title } }) : null;
+    const square = (id, tip, fn) => h_flex().id(id).size(22).flex_none().justify_center().items_center().rounded(6).bg(t.ansi1)
+      .cursor_pointer().hover((s) => s.opacity(0.82)).tooltip(tip)
+      .on_mouse_down("left", stop).on_click(fn).child(icon("square", 13, t.background));
+    if (!r) return abandon ? [square(`abandon-${topic.id}|${task.id}`, "放弃 Task", (_e, cx) => { cx?.stop_propagation(); this.openForm("abandon", topic, { task: { id: task.id, title: task.title } }); })] : [];
     const confirm = (op) => (_e, cx) => {
       cx.stop_propagation();
       const working = r.calls.filter((c) => c.state === "live" && c.status === "working").map((c) => c.name);
       const held = r.calls.filter((c) => c.held && c.state === "live").map((c) => c.name);
       const settled = r.calls.filter((c) => c.state === "live" && c.status !== "working" && !c.held).map((c) => c.name);
       const parentLive = Boolean(r.parent) && (terminals() ?? []).some((x) => x.address === r.parent && x.state === "live");
-      openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 480, height: op === "stop" ? 330 : 280,
-        props: { role: "control", op, on: this.ctx?.on ?? null, run: { dir: r.dir, hd: r.hd, id: r.id }, working, held, settled, parentLive } });
+      openOverlay({ mod: "cc-dispatch", kind: "dialog", width: op === "stop" && abandon ? 560 : 480, height: op === "stop" ? (abandon ? 500 : 330) : 280,
+        props: { role: "control", op, on: this.ctx?.on ?? null, run: { dir: r.dir, hd: r.hd, id: r.id }, working, held, settled, parentLive,
+          abandon: op === "stop" && abandon ? abandon() : null } });
     };
     // Solid chips, the icon in the panel's background color: a filled pause on `foreground`, a filled
     // play on `accent`, a hollow square on `ansi1`.
-    const look = { pause: ["pause-dot", "暂停运行", t.foreground], resume: ["play-fill", "继续运行", t.accent], stop: ["square", "终止运行", t.ansi1] };
+    const look = { pause: ["pause-dot", "暂停运行", t.foreground], resume: ["play-fill", "继续运行", t.accent], stop: ["square", abandon ? "终止或放弃" : "终止运行", t.ansi1] };
     const ops = controlOps(r, Boolean(this.states[r.dir]?.finished)).filter((op) => !(topic?.pausedAt && op === "resume") && !topic?.archived && !topic?.deleting);
+    if (abandon && !ops.includes("stop")) return [h_flex().flex_none().gap(6).items_center()
+      .children(ops.map((op) => this.controlChip(t, r, op, look, confirm)))
+      .child(square(`abandon-${topic.id}|${task.id}`, "放弃 Task", (_e, cx) => { cx?.stop_propagation(); this.openForm("abandon", topic, { task: { id: task.id, title: task.title } }); }))];
     if (!ops.length) return [];
-    return [h_flex().flex_none().gap(6).items_center().children(ops.map((op) => {
-      const [name, tip, color] = look[op];
-      return h_flex().id(`${op}-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6).bg(color)
-        .cursor_pointer().hover((s) => s.opacity(0.82)).tooltip(tip)
-        .on_mouse_down("left", stop).on_click(confirm(op)).child(icon(name, op === "stop" ? 13 : 11, t.background));
-    }))];
+    return [h_flex().flex_none().gap(6).items_center().children(ops.map((op) => this.controlChip(t, r, op, look, confirm)))];
+  }
+
+  controlChip(t, r, op, look, confirm) {
+    const [name, tip, color] = look[op];
+    return h_flex().id(`${op}-${r.dir}`).size(22).flex_none().justify_center().items_center().rounded(6).bg(color)
+      .cursor_pointer().hover((s) => s.opacity(0.82)).tooltip(tip)
+      .on_mouse_down("left", stop).on_click(confirm(op)).child(icon(name, op === "stop" ? 13 : 11, t.background));
   }
 
   archiveButton(t, topic) {
@@ -1483,7 +1495,7 @@ export default class Dispatch extends View {
     ], close);
   }
 
-  renderAbandon(t, p, close) {
+  renderAbandon(t, p, close, extra = null) {
     const ready = Boolean(this.reasonBox.value().trim());
     const canForce = ["HELPERS_AT_WORK", "MAIN_LIVE"].includes(this.failureCode);
     const submit = (force) => (_e, cx) => {
@@ -1511,9 +1523,9 @@ export default class Dispatch extends View {
         this.sending = false; cx.notify();
       });
     };
-    return dialogFrame(t, "abandon", `放弃 ${p.task.title}？`, [
+    return dialogFrame(t, "abandon", extra ? `结束 ${p.task.title}？` : `放弃 ${p.task.title}？`, [
       v_flex().id("abandon-fields").flex_1().min_h(0).overflow_y_scrollbar().gap(10)
-        .child(note(t, "放弃后，这个 Task 算结束，不再挡住 Topic 的终止和归档。", t.foreground))
+        .child(note(t, "不再做这个 Task：它就此结束并记下原因，不再挡住 Topic 的终止和归档。", t.foreground))
         .child(note(t, "会关掉它还开着的子 agent 终端，回报、运行记录和 worktree 都保留。"))
         .child(note(t, "放弃后不能撤销。", t.ansi1))
         .child(v_flex().flex_none().gap(5)
@@ -1526,7 +1538,7 @@ export default class Dispatch extends View {
       dialogButton("cancel", "取消", t, close),
       dialogButton("go", this.sending ? "正在放弃…" : "放弃 Task", t, submit(false), "danger", ready && !this.sending),
       canForce && dialogButton("force", "仍然放弃", t, submit(true), "danger", ready && !this.sending),
-    ], close);
+    ], close, extra);
   }
 
   /** The Topic summary's timeline: one node per Task, oldest first; drafts not started yet come last. */
@@ -1724,6 +1736,14 @@ export default class Dispatch extends View {
     }
     if (p.role === "control") {
       const run = p.run ?? {}, op = p.op;
+      const choice = p.abandon && op === "stop" ? (() => {
+        const seg = (id, label, value) => h_flex().id(id).h(24).px(10).items_center().rounded(5).text_size(S().small)
+          .bg(this.mode === value ? t.raised : t.popover).text_color(this.mode === value ? t.foreground : t.muted).cursor_pointer()
+          .on_click((_e, cx) => { this.mode = value; this.failed = null; this.failureCode = null; cx.notify(); }).child(label);
+        return h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
+          .child(seg("mode-stop", "终止", "stop")).child(seg("mode-abandon", "放弃", "abandon"));
+      })() : null;
+      if (choice && this.mode === "abandon") return this.renderAbandon(t, { ...p.abandon, on: p.on }, close, choice);
       const list = (names) => names?.length ? names.join("、") : "无";
       const text = p.topic ? {
         pause: [
@@ -1755,6 +1775,7 @@ export default class Dispatch extends View {
           `让所有还没交出合格回报的子 agent（${list([...(p.working ?? []), ...(p.held ?? []), ...(p.settled ?? [])])}）停下，把已经做完的写进回报，最多给 3 分钟，然后关掉它们的终端。worktree 和运行目录都保留。`,
           p.parentLive ? "然后主 agent 拿到 stop.md，总结哪些做完了、哪些没做完，再问你下一步怎么办。你决定之前它不会派发任何东西。"
             : "主 agent 不在运行，不会通知任何人；总结在 stop.md 里。",
+          ...(p.abandon ? ["Task 仍然保留，之后可以接着做。确定不再做了，切到“放弃”。"] : []),
         ],
       }[op] ?? [];
       const name = p.topic?.title ?? run.id;
@@ -1773,12 +1794,12 @@ export default class Dispatch extends View {
           cx.notify();
         });
       };
-      return dialogFrame(t, "control", title, [
+      return dialogFrame(t, "control", choice ? `结束 ${p.abandon.task.title}？` : title, [
         ...text.map((x, i) => note(t, x, i === 0 ? t.foreground : t.muted)),
         this.affectedTasks(t, p),
         this.failed && note(t, this.failed, t.ansi1),
       ], [dialogButton("cancel", "取消", t, close),
-        dialogButton("go", this.sending ? "处理中…" : label, t, go, op === "stop" ? "danger" : "primary", !this.sending)], close);
+        dialogButton("go", this.sending ? "处理中…" : label, t, go, op === "stop" ? "danger" : "primary", !this.sending)], close, choice);
     }
     return div();
   }
