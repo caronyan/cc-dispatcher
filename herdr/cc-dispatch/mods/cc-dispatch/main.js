@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
+import { callTags, callStage, runStage, ACCEPTANCE_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -782,11 +782,13 @@ export default class Dispatch extends View {
     const executor = this.renderExecutor(t, task.agent ?? task.request?.agent ?? (task.request?.target === "owner" ? topic.owner?.agent : null));
     // The main agent's terminal dot, as on a card: it spins while that agent works.
     const main = r && group !== "done" ? this.mainAgentOf(r) : null;
+    const running = Boolean(r) && group === "active" && !ACCEPTANCE_STAGES.has(stage) && (stage === "working" || main?.status === "working");
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface);
     box.child(h_flex().id(`task-${key}`).min_h(32).pl(12).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
-      .when(Boolean(r) && group !== "done", (el) => el.child(termDot(t, { state: main ? "live" : "gone", status: main?.status ?? null })))
+      // Only running work gets a lead mark; every other state is the status icon after the title.
+      .when(running, (el) => el.child(icon("ring", 10, t.working).spin(900)))
       .when(Boolean(executor), (el) => el.child(executor))
       .child(pill(t, task.kind))
       .child(div().min_w(0).flex_shrink(1).truncate().tooltip(String(task.title)).text_size(S().small).font_semibold().child(task.title))

@@ -1144,3 +1144,14 @@ test("an unfinished Task's timeline node lists the run's unanswered asks and car
   assert.ok(node.open.includes("T2 进行中的卡"), JSON.stringify(node.open));
   assert.ok(!node.open.some((x) => x.startsWith("T1") || x.includes("check")), JSON.stringify(node.open));
 });
+
+test("a Task row shows a lead spinner only while its work runs; awaiting acceptance shows none", async () => {
+  const { ACCEPTANCE_STAGES, callStage } = await import("../cc-dispatch/mods/cc-dispatch/model.js");
+  const c = (o) => ({ state: "gone", status: null, report: "ok", failure: null, ...o });
+  for (const card of ["accepting", "running"]) assert.ok(ACCEPTANCE_STAGES.has(callStage(c({}), card)), card);
+  assert.ok(!ACCEPTANCE_STAGES.has(callStage(c({ state: "live", status: "working" }), "running")));
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  assert.match(main, /const running = .*!ACCEPTANCE_STAGES\.has\(stage\)/, "main.js: the Task row's lead spinner must skip acceptance stages");
+  assert.match(main, /\.when\(running, \(el\) => el\.child\(icon\("ring"/, "main.js: the Task row shows only a spinner, and only while running");
+});

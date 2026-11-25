@@ -824,6 +824,9 @@ export function callStage(c, card) {
   return "ended";
 }
 
+/** Stages where the helpers are done and the work waits on the main agent's acceptance. */
+export const ACCEPTANCE_STAGES = new Set(["collect", "await", "review", "ok"]);
+
 /** A run's stage: its most urgent helper's. */
 export const runStage = (stages) => [...stages].sort((a, b) => STAGES.indexOf(a) - STAGES.indexOf(b))[0] ?? "ended";
 
