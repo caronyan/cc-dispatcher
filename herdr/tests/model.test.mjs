@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as bgModule from "../cc-dispatch/mods/cc-dispatch/bg.js";
+import * as statsModule from "../cc-dispatch/mods/cc-dispatch/stats.js";
 import {
   runCards,
   SEP, parseMetaDump, runDirOf, repoOf, kindOf, runRoots, buildCall, callNeed, buildRuns,
@@ -139,6 +141,205 @@ test("taskGroup puts unanswered questions, helper trouble, pauses, handoffs and 
   const helper = { address: "t-helper", state: "live", status: "working" };
   assert.equal(groupedTask({ call: working, terms: [helper] }).task.group, "you");
   assert.equal(groupedTask({ call: working, terms: [helper, { address: "t-main", state: "live", program: { key: "codex" } }] }).task.group, "active");
+});
+
+test("abandoned Tasks keep the reason and finish even when their run still appears active or needs input", () => {
+  const reason = "不再继续这个 Task";
+  for (const options of [
+    { state: { tasks: { a: { status: "running" } } }, call: { address: "t-helper", report_check: null },
+      terms: [{ address: "t-helper", state: "live", status: "working" }, { address: "t-main", state: "live", program: { key: "codex" } }] },
+    { control: { state: "paused" } },
+    { asks: { q: { kind: "question", title: "Choose", asked: 10 } } },
+    { state: { pending_decisions: { api: "Pick API" } } },
+  ]) {
+    const { task, topic } = groupedTask({ ...options, task: { abandoned_at: 200, abandon_reason: reason } });
+    assert.equal(task.abandonedAt, 200000);
+    assert.equal(task.abandonReason, reason);
+    assert.equal(task.finishedAt, null);
+    assert.equal(task.group, "done");
+    assert.equal(taskGroup(task, topic), "done");
+    assert.deepEqual(groupTasks(topic), [{ group: "done", tasks: [task] }]);
+    assert.equal(topic.updatedAt, 200000);
+  }
+  const { task } = groupedTask();
+  assert.equal(task.abandonedAt, null);
+  assert.equal(task.abandonReason, null);
+  assert.equal(taskGroup({ abandonedAt: 0, runDir: null }, {}), "done");
+});
+
+test("a Task stays abandoned when its bound run directory is missing", () => {
+  const topics = buildTopics([], { a: topicRecord({
+    k1: { run: "dev-missing", abandoned_at: 20, abandon_reason: "运行目录已找不到" },
+  }) });
+  const topic = topics[0], task = topic.tasks[0];
+  assert.equal(task.run, null);
+  assert.equal(task.runDir, "dev-missing");
+  assert.equal(task.abandonedAt, 20000);
+  assert.equal(task.abandonReason, "运行目录已找不到");
+  assert.equal(taskGroup(task, topic), "done");
+});
+
+test("Task abandonment controls and confirmation follow the command contract", async (t) => {
+  const { readFileSync } = await import("node:fs");
+  const { default: vm } = await import("node:vm");
+  const model = await import("../cc-dispatch/mods/cc-dispatch/model.js");
+  const node = () => {
+    const target = { attrs: {}, nodes: [] };
+    const proxy = new Proxy(target, {
+      get: (value, key) => key in value ? value[key] : (...args) => {
+        if (key === "id" || key === "tooltip" || key === "on_click") value.attrs[key] = args[0];
+        if (key === "child") value.nodes.push(args[0]);
+        if (key === "children") value.nodes.push(...args[0]);
+        if (key === "when" && args[0]) args[1](proxy);
+        return proxy;
+      },
+    });
+    return proxy;
+  };
+  const elements = (root) => root && typeof root === "object" ? [root, ...root.nodes.flatMap(elements)] : [];
+  const texts = (root) => typeof root === "string" ? [root] : root?.nodes.flatMap(texts) ?? [];
+  const byId = (root, id) => elements(root).find((el) => el.attrs.id === id);
+  const source = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8")
+    .replace(/^import .*;\n/gm, "").replace("export default class Dispatch", "class Dispatch");
+  const calls = [];
+  let response, closed = 0;
+  const context = vm.createContext({
+    ...model, ...bgModule, ...statsModule, View: class {}, h_flex: node, v_flex: node, div: node, svg: node, image: node,
+    settings: () => ({}), agents: () => [], blockProps: () => ({ role: "abandon" }),
+    Textarea: { new: node },
+    TextareaState: { new: () => ({ text: "", value() { return this.text; }, on() {} }) },
+    topicCmd: async (_files, hd, args) => { calls.push({ hd, args: Array.from(args) }); return response; },
+  });
+  vm.runInContext(`${source}\nglobalThis.TaskView = Dispatch;`, context);
+  const colors = { ansi1: "red", accent: "blue", foreground: "white", background: "black" };
+  const pending = [], cx = { notify() {}, spawn(fn) { pending.push(fn(cx)); } };
+  const close = () => { closed++; };
+  const p = { topic: { id: "topic-a" }, task: { id: "k1", title: "卡住的 Task" }, repo: "/r", hd: "/hd.py" };
+  const dialog = () => {
+    const view = new context.TaskView();
+    view.init({}, cx);
+    return view;
+  };
+  const click = async (button) => {
+    assert.equal(typeof button?.attrs.on_click, "function");
+    button.attrs.on_click({}, cx);
+    await Promise.all(pending.splice(0));
+  };
+  const panel = new context.TaskView();
+  Object.assign(panel, {
+    fold: new Map(), bgMore: new Map(), programs: [], topics: [], states: {}, stats: { runs: {} },
+    controlButtons: () => [], mainAgentOf: () => null, renderControl: () => null,
+    renderTakeover: () => null, renderCall: node, itemsOf: () => [{ answer: null }],
+  });
+
+  await t.test("only expanded bound unfinished Tasks in editable explicit Topics offer abandon", () => {
+    for (const [taskData, topicData, folded, expected] of [
+      [{ run: "dev-missing" }, {}, false, true],
+      [{ run: "dev-missing" }, {}, true, false],
+      [{}, {}, false, false],
+      [{ run: "dev-missing", finished_at: 20 }, {}, false, false],
+      [{ run: "dev-missing", abandoned_at: 20 }, {}, false, false],
+      [{ run: "dev-missing" }, { archived: 20 }, false, false],
+      [{ run: "dev-missing" }, { deleting: true }, false, false],
+      [{ run: "dev-missing" }, { implicit: true }, false, false],
+    ]) {
+      const topic = buildTopics([], { a: topicRecord({ k1: taskData }, topicData) })[0];
+      if (topicData.implicit) topic.implicit = true;
+      panel.fold.set("topic-a|k1", folded);
+      const button = byId(panel.renderTask(colors, topic, topic.tasks[0]), "abandon-topic-a|k1");
+      assert.equal(Boolean(button), expected, JSON.stringify({ taskData, topicData, folded }));
+      if (button) {
+        let opened;
+        panel.openForm = (...args) => { opened = args; };
+        button.attrs.on_click();
+        assert.equal(opened[0], "abandon");
+        assert.equal(opened[1], topic);
+        assert.equal(opened[2].task.id, "k1");
+      }
+    }
+  });
+
+  await t.test("a run's background tasks render inside its Task, beside the helper rows", () => {
+    const { topic, task } = groupedTask();
+    panel.fold.set("topic-a|k1", false);
+    const bgTask = { id: "b1", session: "s1", kind: "shell", title: "npm test", status: "completed", started: 1000, ended: 5000, output: "/o" };
+    const rendered = panel.renderTask(colors, topic, task, { [task.run.dir]: [bgTask] });
+    assert.ok(byId(rendered, "bg-topic-a|k1|s1|b1"), "后台任务应显示在所属 Task 里");
+    assert.ok(texts(rendered).includes("npm test"));
+    assert.ok(!byId(panel.renderTask(colors, topic, task, {}), "bg-topic-a|k1|s1|b1"));
+  });
+
+  await t.test("abandoned status overrides stale pause controls and pending items do not block archive", () => {
+    const { topic, task } = groupedTask({
+      control: { state: "paused" }, task: { abandoned_at: 20, abandon_reason: "不再继续" },
+    });
+    panel.fold.set("topic-a|k1", false);
+    panel.controlButtons = () => assert.fail("已放弃的 Task 不应继续显示运行控制按钮");
+    panel.renderControl = () => assert.fail("已放弃的 Task 不应继续显示旧运行控制");
+    const rendered = panel.renderTask(colors, topic, task);
+    assert.equal(panel.taskStage(topic, task), "abandoned");
+    assert.equal(byId(rendered, "mark-topic-a|k1").attrs.tooltip, "已放弃");
+    assert.ok(texts(rendered).includes("放弃原因：不再继续"));
+    assert.equal(panel.topicActive(topic), false);
+    assert.equal(panel.topicControlButtons(colors, topic).length, 0);
+    assert.equal(panel.archiveButton(colors, topic)[0].attrs.id, "archive-topic-a");
+  });
+
+  await t.test("empty reasons disable confirmation, including after a conflict", () => {
+    const view = dialog();
+    for (const text of ["", " \n\t "]) {
+      view.reasonBox.text = text;
+      let rendered = view.renderAbandon(colors, p, close);
+      assert.equal(byId(rendered, "go").attrs.on_click, undefined);
+      view.failureCode = "HELPERS_AT_WORK";
+      rendered = view.renderAbandon(colors, p, close);
+      assert.equal(byId(rendered, "force").attrs.on_click, undefined);
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  await t.test("all rejection codes show explanations and only live conflicts offer force", async () => {
+    const codes = ["REASON_REQUIRED", "TASK_NOT_BOUND", "TASK_DONE", "TOPIC_DELETING", "HELPERS_AT_WORK", "MAIN_LIVE"];
+    for (const code of codes) {
+      const view = dialog();
+      view.reasonBox.text = "不再继续";
+      response = { ok: false, out: `FAILURE=${code}\n运行拒绝了这次操作` };
+      await click(byId(view.renderAbandon(colors, p, close), "go"));
+      const rendered = view.renderAbandon(colors, p, close);
+      assert.equal(view.failureCode, code);
+      assert.ok(view.failed.includes("运行拒绝了这次操作"));
+      assert.ok(view.failed.length > "运行拒绝了这次操作".length);
+      assert.ok(texts(rendered).includes(view.failed));
+      assert.equal(Boolean(byId(rendered, "force")), ["HELPERS_AT_WORK", "MAIN_LIVE"].includes(code));
+      assert.equal(calls.at(-1).args.includes("--force"), false);
+      assert.equal(view.reasonBox.value(), "不再继续");
+      assert.equal(view.sending, false);
+      assert.equal(closed, 0);
+    }
+  });
+
+  await t.test("force keeps the reason and closes only after confirmed success", async () => {
+    const view = dialog();
+    view.reasonBox.text = "  不再继续\n后续工作另开 Task  ";
+    response = { ok: false, out: "FAILURE=HELPERS_AT_WORK" };
+    await click(byId(view.renderAbandon(colors, p, close), "go"));
+    assert.ok(view.failed.includes("子 agent"));
+    assert.deepEqual(calls.at(-1), { hd: "/hd.py", args: [
+      "topic", "abandon", "--repo", "/r", "--topic", "topic-a", "--task", "k1", "--reason", "不再继续\n后续工作另开 Task",
+    ] });
+    response = { ok: true, out: "ABANDONED=k1" };
+    await click(byId(view.renderAbandon(colors, p, close), "force"));
+    assert.deepEqual(calls.at(-1).args, [
+      "topic", "abandon", "--repo", "/r", "--topic", "topic-a", "--task", "k1", "--reason", "不再继续\n后续工作另开 Task", "--force",
+    ]);
+    assert.equal(closed, 1);
+    const missingMarker = dialog();
+    missingMarker.reasonBox.text = "不再继续";
+    response = { ok: true, out: "没有成功标记" };
+    await click(byId(missingMarker.renderAbandon(colors, p, close), "go"));
+    assert.equal(closed, 1);
+    assert.equal(missingMarker.failed, "没有成功标记");
+  });
 });
 
 test("Task grouping ignores survey and review-check entries, and retired runs cannot stay live", () => {
@@ -383,7 +584,8 @@ test("callStage: the helper's own trouble first, then its card, then its report"
   assert.equal(runStage([]), "ended");
   assert.equal(stageSummary(stages), "进行中 1 · 验收中 1 · 已合并 2");
   assert.deepEqual(cardCounts({ status: { a: "merged", b: "pending", c: "merged", d: "accepting", e: "odd" } }),
-    [["merged", 2], ["accepting", 1], ["pending", 1], ["odd", 1]]);
+    [["done", 2], ["accepting", 1], ["pending", 1], ["odd", 1]]);
+  assert.deepEqual(cardCounts({ status: { a: "merged", b: "done" } }), [["done", 2]], "统计里已合并和已完成是同一个“已完成”");
   assert.deepEqual(cardCounts(null), []);
 });
 
@@ -797,4 +999,35 @@ test("a run without task cards counts its helper calls as cards; task cards win 
   const dev = { status: { T1: "merged" }, cards: { T1: { status: "merged" } }, checks: 0 };
   assert.equal(runCards(run, dev), dev);
   assert.equal(runCards({ calls: [] }, undefined), null);
+});
+
+import { topicTimeline } from "../cc-dispatch/mods/cc-dispatch/model.js";
+
+test("the Topic timeline lists Tasks oldest first with what each completed and leaves open, drafts last", () => {
+  const topic = buildTopics([], { a: topicRecord({
+    k1: { kind: "research", title: "调研", run: "research-old", started_at: 30, finished_at: 40, summary_line: "可行",
+      summary_done: "- 摸清现状\n- 给出方案\n", summary_open: "等你定 A 还是 B", artifact: "/r/plan.md" },
+    k2: { kind: "dev", title: "实现", created_at: 5 },
+    k3: { kind: "fix", title: "修复", started_at: 20, run: "gone", abandoned_at: 25, abandon_reason: "不需要了" },
+  }) })[0];
+  const nodes = topicTimeline(topic);
+  assert.deepEqual(nodes.map((n) => [n.id, n.status]), [["k3", "abandoned"], ["k1", "done"], ["k2", "queued"]]);
+  assert.deepEqual(nodes[1].done, ["摸清现状", "给出方案"]);
+  assert.deepEqual(nodes[1].open, ["等你定 A 还是 B"]);
+  assert.equal(nodes[1].line, "可行");
+  assert.equal(nodes[1].artifact, "/r/plan.md");
+  assert.equal(nodes[0].line, "已放弃：不需要了");
+  assert.equal(nodes[0].end, 25000);
+});
+
+test("an unfinished Task's timeline node lists the run's unanswered asks and cards not merged yet", () => {
+  const { topic } = groupedTask({
+    state: { tasks: { T1: { status: "merged", title: "已合入" }, T2: { status: "running", title: "进行中的卡" }, "T2-check-r1": { status: "running" } } },
+    asks: { q: { kind: "question", title: "要不要保留旧入口" } },
+  });
+  const [node] = topicTimeline(topic);
+  assert.equal(node.status, "you");
+  assert.ok(node.open.includes("要不要保留旧入口"), JSON.stringify(node.open));
+  assert.ok(node.open.includes("T2 进行中的卡"), JSON.stringify(node.open));
+  assert.ok(!node.open.some((x) => x.startsWith("T1") || x.includes("check")), JSON.stringify(node.open));
 });

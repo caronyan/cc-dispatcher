@@ -125,7 +125,7 @@ git -C "$WT_ROOT/write" add -A && git -C "$WT_ROOT/write" diff --cached $SNAP --
 
 ### 5. 清理
 
-`python3 $HD cleanup --run $RD` 结束各分片的子 agent，删除各分片 worktree（`git -C "$ROOT" worktree remove --force`），保留 `.cc-dispatch/test-$RUN/`。你启动的外部服务，调用方不再需要时停掉。运行 `python3 $HD topic finish --run "$RD" --line "<测试通过、失败或受阻的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
+`python3 $HD cleanup --run $RD` 结束各分片的子 agent，删除各分片 worktree（`git -C "$ROOT" worktree remove --force`），保留 `.cc-dispatch/test-$RUN/`。你启动的外部服务，调用方不再需要时停掉。运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<测试通过、失败或受阻的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
 
 ## Codex 不可用时
 

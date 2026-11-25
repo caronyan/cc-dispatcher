@@ -528,20 +528,6 @@ export function assignTasks(runs, found, sessions) {
   return out;
 }
 
-/** Merge assignTasks' run map for a Topic; task ids are unique only within their main session. */
-export function topicTasks(bg, topic) {
-  const seen = new Set(), out = [];
-  for (const run of topic?.runs ?? []) {
-    for (const task of bg?.[run.dir] ?? []) {
-      const key = JSON.stringify([task.session ?? null, task.id]);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(task);
-    }
-  }
-  return out;
-}
-
 /**
  * What a run shows of its tasks: the running ones (oldest first, always all of them), then the
  * ended ones newest first, filling up to BG_ENDED_KEPT rows in all, plus `more` earlier ones.

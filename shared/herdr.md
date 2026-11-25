@@ -81,7 +81,9 @@ python3 $HD topic refined --topic <id> --ack <rid> --drafts '<JSON 数组或文�
 
 `refined` 在锁内核对整批条目的请求仍有效，一次建好草稿、标记条目已细化并记下 task_ids；同一 rid 重复提交返回原 task_ids。遇到 `REQUEST_STALE` 就停下告诉用户，不修改条目或自动改用新请求。提交后只汇报 `TASKS=`，不自动派发；派发由用户在面板发起。
 
-**收尾时回写**：写好结论产物后、交还最终报告前，运行 `python3 $HD topic finish --run "$RD" --line "<一句结论>" --artifact "<产物路径>"`。它写入 Task 的 `summary_line`、`artifact`、`finished_at` 和运行的 `state.json.finished`，并追加 Topic 的 `summary.md`；同一结论重复调用不重复追加。`NO_TOPIC` 表示运行尚未绑定 Task，先按准备规则执行 `topic start` 再收尾。
+**收尾时回写**：写好结论产物后、交还最终报告前，运行 `python3 $HD topic finish --run "$RD" --line "<一句结论>" --done "<已完成>" --open "<遗留待决>" --artifact "<产物路径>"`。`--done` 用几行写清这次做成了什么（给用户看，不写过程）；`--open` 写还没做完、要用户定或留给后续的事，没有就不传。面板的 Topic 摘要按时间线展示每个 Task 的这三段。它写入 Task 的 `summary_line`、`summary_done`、`summary_open`、`artifact`、`finished_at` 和运行的 `state.json.finished`，并追加 Topic 的 `summary.md`；同一结论重复调用不重复追加。`NO_TOPIC` 表示运行尚未绑定 Task，先按准备规则执行 `topic start` 再收尾。
+
+**明确放弃卡住的 Task**：只有用户明确要求放弃已绑定的 Task 时，主 agent 才运行 `python3 $HD topic abandon --repo "$ROOT" --topic <id> --task <tid> --reason "<用户给出的原因>"`。运行目录丢了也能放弃；目录还在时按 `retire --keep` 收尾，保留目录和回报。Task 记下放弃时间、原因并算作结束，`summary.md` 追加“已放弃”，不再占用负责人或阻挡 Topic 的终止、归档、删除；重复调用不重复记录。遇到 `HELPERS_AT_WORK` 或 `MAIN_LIVE` 时告诉用户，只有用户明确同意越过该拒绝后才加 `--force`。
 
 需要提议下一步时，用 `python3 $HD topic task-add --topic <TOPIC 输出的 id> --title "<下一步>" --kind <kind> --detail "<范围和验收要求>"` 建草稿；有依赖时追加 `--depends k1,k2`，来自 backlog 时追加 `--from-backlog b1`。成功输出 `TASK=k<n>`。遇到 `TOPIC_NOT_FOUND`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就告诉用户，保留已完成的结论。只提议草稿，不自动请求派发；原有经用户确认或流程授权的跨 skill 调用仍按 `--parent` 规则执行。
 

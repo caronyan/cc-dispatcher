@@ -24,6 +24,7 @@ usage:
   hd_dispatch.py takeover --run DIR [--force]
   hd_dispatch.py runs     [--repo DIR] [--all] [--json]
   hd_dispatch.py retire   --run DIR [--keep] [--force]
+  hd_dispatch.py topic abandon --repo DIR --topic ID --task ID --reason TEXT [--force]
   hd_dispatch.py ask      --run DIR (--add FILE | --resolve ID --decision TEXT | --list)
 
 freeze stops a helper and keeps what another agent needs: a progress note it is asked to write (to
@@ -86,6 +87,10 @@ by another run): closes its helpers' open terminals (reports stay), restores con
 the handoff with a `retired` mark, writes "finished" in state.json and archives it (--keep: not). Dispatching
 to it again (run / send) undoes the mark and that finished. HELPERS_AT_WORK / MAIN_LIVE refuse; --force.
 Output RETIRED=<run> WAS=<control state> CLOSED=<calls|-> ARCHIVED=yes|no.
+
+topic abandon records why the user gave up a bound Task, even if its run folder is gone, and counts it as
+ended. An existing run is retired with --keep; --force overrides HELPERS_AT_WORK / MAIN_LIVE as for retire.
+Output ABANDONED=<task> RUN=<run name|-> CLOSED=<calls|->. Repeating it leaves the Task and summary unchanged.
 
 ask keeps what the main agent waits on the person for, in <run>/asks.json ({id: item}; the panel lists it
 under "Needs you"). An item: kind decision (pick one of 2-4 options: {key, label, detail}, maybe a recommend
@@ -2452,14 +2457,47 @@ def cmd_topic_finish(a):
         previous = summary.read_text() if summary.exists() else ""
         if entry not in previous:
             with summary.open("a") as stream:
-                stream.write(entry + (f"产物：{a.artifact}\n" if a.artifact else "") + "\n")
-        task.update(summary_line=a.line, artifact=a.artifact, finished_at=now)
+                stream.write(entry + (f"已完成：\n{a.done.strip()}\n" if a.done else "")
+                             + (f"遗留待决：\n{a.open.strip()}\n" if a.open else "")
+                             + (f"产物：{a.artifact}\n" if a.artifact else "") + "\n")
+        task.update(summary_line=a.line, summary_done=a.done or None, summary_open=a.open or None,
+                    artifact=a.artifact, finished_at=now)
         save_topic(repo, topic_id, data)
         state_path = run / "state.json"
         state = read_json(state_path, {})
         state.update(topic=topic_id, task=task_id, finished=now)
         write_json(state_path, state)
     out(finished=task_id)
+
+
+def cmd_topic_abandon(a):
+    reason = a.reason.strip()
+    if not reason:
+        fail("a reason is required to abandon a task", failure="REASON_REQUIRED", code=3)
+    repo = topic_repo(a)
+    with topic_lock(repo, a.topic):
+        data = load_topic(repo, a.topic)
+        if data.get("deleting") is not None:
+            fail(f"topic is being deleted: {a.topic}", failure="TOPIC_DELETING", code=3)
+        task = topic_task(data, a.task)
+        run = Path(repo) / ".cc-dispatch" / task["run"] if task.get("run") else None
+        if task.get("abandoned_at") is not None:
+            out(abandoned=a.task, run=run.name if run and run.is_dir() else "-", closed="-")
+            return
+        if run is None:
+            fail(f"task has no bound run: {a.task}", failure="TASK_NOT_BOUND", code=3)
+        if topic_task_done(task, run):
+            fail(f"task is already done: {a.task}", failure="TASK_DONE", code=3)
+        retired = retire_run(run, keep=True, force=a.force, failure_codes=True) if run.is_dir() else None
+        summary = topic_dir(repo, a.topic) / "summary.md"
+        entry = f"## {a.task} {task['title']}（{task['kind']}）\n已放弃：{reason}\n\n"
+        previous = summary.read_text() if summary.exists() else ""
+        if entry not in previous:
+            with summary.open("a") as stream:
+                stream.write(entry)
+        task.update(abandoned_at=time.time(), abandon_reason=reason)
+        save_topic(repo, a.topic, data)
+    out(abandoned=a.task, run=run.name if retired else "-", closed=retired["closed"] if retired else "-")
 
 
 def cmd_topic_refined(a):
@@ -2512,6 +2550,8 @@ def topic_runs(repo, data):
 
 
 def topic_task_done(task, run):
+    if task.get("abandoned_at") is not None:
+        return True
     c = control(run)
     return (task.get("finished_at") is not None
             or read_json(run / "state.json", {}).get("finished") is not None
@@ -2625,6 +2665,9 @@ def cmd_topic_archive(a):
                    if task.get("run") and not topic_task_done(
                        task, Path(repo) / ".cc-dispatch" / task["run"])]
         for run in runs:
+            if all(task.get("abandoned_at") is not None for task in data["tasks"].values()
+                   if task.get("run") == run.name):
+                continue
             answered = {answer["id"] for answer in open_answers(run)}
             pending = [key for key in open_items(run) if key not in answered]
             if pending:
@@ -2815,7 +2858,8 @@ def cmd_topic_deliver(a):
 
 def cmd_topic(a):
     handlers = {"init": cmd_topic_init, "request": cmd_topic_request, "start": cmd_topic_start,
-                "finish": cmd_topic_finish, "list": cmd_topic_list, "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
+                "finish": cmd_topic_finish, "abandon": cmd_topic_abandon, "list": cmd_topic_list,
+                "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
                 "pause": cmd_topic_pause, "resume": cmd_topic_resume, "stop": cmd_topic_stop,
                 "archive": cmd_topic_archive, "unarchive": cmd_topic_unarchive, "delete": cmd_topic_delete}
     handler = (cmd_topic_task if a.topic_cmd.startswith("task-") else
@@ -2829,7 +2873,7 @@ def register_topic_parser(sub):
     topic.add_argument("--repo")
     commands = topic.add_subparsers(dest="topic_cmd", required=True)
     for name in ("init", "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
-                 "request", "deliver", "start", "finish", "list", "refined", "pause", "resume", "stop",
+                 "request", "deliver", "start", "finish", "abandon", "list", "refined", "pause", "resume", "stop",
                  "archive", "unarchive", "delete"):
         c = commands.add_parser(name)
         c.set_defaults(topic_parser=c)
@@ -2873,7 +2917,13 @@ def register_topic_parser(sub):
         elif name == "finish":
             c.add_argument("--run", required=True)
             c.add_argument("--line", required=True)
+            c.add_argument("--done", help="what was completed, a few lines")
+            c.add_argument("--open", help="what is left or waits on a decision; leave out when nothing is")
             c.add_argument("--artifact")
+        elif name == "abandon":
+            c.add_argument("--task", required=True)
+            c.add_argument("--reason", required=True)
+            c.add_argument("--force", action="store_true")
         elif name == "refined":
             c.add_argument("--ack", required=True)
             c.add_argument("--drafts", required=True)
@@ -3199,6 +3249,11 @@ def cmd_retire(a):
     state.json, and archives it unless --keep. Refuses while a helper is at work or a live main agent other
     than the caller still has the run (not handing off), unless --force."""
     run = Path(a.run).resolve()
+    out(**retire_run(run, keep=a.keep, force=a.force))
+
+
+def retire_run(run: Path, keep=False, force=False, *, failure_codes=False):
+    """Retire a run and return its output fields; Topic abandonment uses the same cleanup with named failures."""
     if not run.is_dir() or run.parent.name != ".cc-dispatch" or not ((run / "agents").is_dir() or (run / "state.json").exists()):
         fail(f"NO_RUN: {run} is not a cc-dispatch run folder (<repo>/.cc-dispatch/<run>)", code=2)
     c = control(run)
@@ -3206,15 +3261,17 @@ def cmd_retire(a):
         fail(f"RUN_BUSY: {run.name} is stopping; retire it once that is done", code=2)
     metas = [load(run, k) for k in calls(run)]
     seen = {m["call"]: observe(m) for m in metas if m.get("open")}
-    if not a.force:
+    if not force:
         working = [k for k, o in seen.items() if o["state"] == "live" and o["status"] == "working"]
         if working:
-            fail(f"HELPERS_AT_WORK: {', '.join(working)} still working; wait, stop the run, or --force", code=3)
+            fail(f"HELPERS_AT_WORK: {', '.join(working)} still working; wait, stop the run, or --force",
+                 failure="HELPERS_AT_WORK" if failure_codes else "other", code=3)
         if c["state"] != "handoff":
             newest = max(metas, key=lambda m: m.get("started_at") or 0, default={})
             term = c.get("owner") or newest.get("parent")
             if term and term != os.environ.get("HC_TERMINAL_ID") and agent_on(hc_json("get", term)):
-                fail(f"MAIN_LIVE: its main agent ({term}) still has the run; ask it, or --force", code=3)
+                fail(f"MAIN_LIVE: its main agent ({term}) still has the run; ask it, or --force",
+                     failure="MAIN_LIVE" if failure_codes else "other", code=3)
     closed = []
     for m in metas:
         if m["call"] not in seen:
@@ -3232,16 +3289,16 @@ def cmd_retire(a):
     before = (c.get("prev") if c["state"] == "handoff" else None) or {"state": "running"}
     if before.get("state") not in ("running", "stopped"):
         before = {"state": "running"}  # nothing is held or stopping any more
-    keep = {k: c[k] for k in ("owner", "adopted") if k in c}
-    set_control(run, **{k: v for k, v in before.items() if k not in ("at",)}, **keep,
+    ownership = {k: c[k] for k in ("owner", "adopted") if k in c}
+    set_control(run, **{k: v for k, v in before.items() if k not in ("at",)}, **ownership,
                 retired={"at": now, "from": c["state"], "by": os.environ.get("HC_TERMINAL_ID") or "panel",
                          **({"package": c["package"]} if c.get("package") else {})})
     st = read_json(run / "state.json", {})
     st["finished"] = now
     write_json(run / "state.json", st)
-    if not a.keep:
+    if not keep:
         (run / "archived").write_text(f"{now}\n")
-    out(retired=run, was=c["state"], closed=",".join(closed) or "-", archived="no" if a.keep else "yes")
+    return dict(retired=run, was=c["state"], closed=",".join(closed) or "-", archived="no" if keep else "yes")
 
 
 # ---- run control commands --------------------------------------------------------------------------

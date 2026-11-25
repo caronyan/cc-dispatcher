@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from test_hd_dispatch import Env, HD, module
@@ -421,6 +422,28 @@ class Topics(unittest.TestCase):
         self.command("finish", "--run", self.w.run_dir, "--line", "更新结论")
         self.assertTrue(summary.read_text().endswith("更新结论\n\n"))
         self.assertEqual(summary.read_text().count("产物："), 1)
+
+    def test_finish_records_what_was_done_and_what_is_left_for_the_timeline(self):
+        result = self.start()
+        topic, task = result["TOPIC"], result["TASK"]
+        self.command("finish", "--run", self.w.run_dir, "--line", "做完了",
+                     "--done", "- 加了命令\n- 补了测试", "--open", "等你定默认值", "--artifact", "log.md")
+        saved = self.data(topic)["tasks"][task]
+        self.assertEqual((saved["summary_done"], saved["summary_open"]), ("- 加了命令\n- 补了测试", "等你定默认值"))
+        self.assertEqual((self.topic_path(topic) / "summary.md").read_text(),
+                         f"## {task} {self.w.run_dir.name}（dev）\n做完了\n已完成：\n- 加了命令\n- 补了测试\n"
+                         "遗留待决：\n等你定默认值\n产物：log.md\n\n")
+        self.command("finish", "--run", self.w.run_dir, "--line", "又做完了")
+        saved = self.data(topic)["tasks"][task]
+        self.assertEqual((saved["summary_done"], saved["summary_open"]), (None, None))
+
+    def test_every_skill_finish_line_asks_for_done_and_open(self):
+        root = Path(__file__).resolve().parents[2]
+        for skill in sorted((root / "skills").glob("cc-herdr-dispatch-*/SKILL.md")):
+            for line in skill.read_text().splitlines():
+                if '$HD topic finish --run "$RD" --line "<' in line or '$HD topic finish --run "$RD" --done' in line:
+                    self.assertIn("--done", line, f"{skill.parent.name}: topic finish 要带 --done（已完成）和 --open（遗留待决），面板时间线靠它们")
+                    self.assertIn("--open", line, skill.parent.name)
 
     def test_finish_unbound_run_refuses_without_writes(self):
         self.assertEqual(self.command("finish", "--run", self.w.run_dir, "--line", "Done",

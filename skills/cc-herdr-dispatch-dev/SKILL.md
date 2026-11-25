@@ -144,7 +144,7 @@ git -C "$REPO" worktree remove --force "$WT_ROOT/T<n>"
 
 ### 6. 清理与报告
 
-`python3 $HD cleanup --run $RD` 结束剩余的子 agent；删除剩余的 worktree（集成 worktree、搁置卡片的 worktree 先问用户是否保留）和已合并的 `cc/$RUN/*` 分支（卡片分支是 squash 合入的，用 `git branch -D` 删除；搁置卡片的分支随 worktree 一起问用户），保留 `.cc-dispatch/$RUN/` 作为记录。把最终结论写进 `log.md`，运行 `python3 $HD topic finish --run "$RD" --line "<实现、合并与测试的一句结论>" --artifact "$RD/log.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出：
+`python3 $HD cleanup --run $RD` 结束剩余的子 agent；删除剩余的 worktree（集成 worktree、搁置卡片的 worktree 先问用户是否保留）和已合并的 `cc/$RUN/*` 分支（卡片分支是 squash 合入的，用 `git branch -D` 删除；搁置卡片的分支随 worktree 一起问用户），保留 `.cc-dispatch/$RUN/` 作为记录。把最终结论写进 `log.md`，运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<实现、合并与测试的一句结论>" --artifact "$RD/log.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出：
 
 ```
 ## cc-herdr-dispatch-dev 完成：<方案标题>

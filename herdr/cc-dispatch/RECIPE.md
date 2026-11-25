@@ -11,15 +11,15 @@ Herdr 默认窗口的标签栏有 Dispatch 按钮，工作区旁有 cc-dispatch 
 - **Sidebar**：268px，保留 Spaces、Agents 和 footer，子 agent 嵌套在启动它的主 agent 下。
 - **Work column**：标签栏的 `tabs` 占剩余宽度，旁边是 136px 的 `cc-dispatch-toggle`。按钮用 14px 图标、Dispatch 与在线子 agent 计数，面板显示时用 `selected`。
 - **cc-dispatch panel**：411px，最小 300px、最大 720px。42px 标题栏显示 Dispatch、新建 Topic、刷新与关闭；刷新时显示转圈。中间只滚动 Topic 列表，底部显示 Topic、进行中 Task、在线子 agent 和待决项数量，读取错误用 `ansi3`。
-- **Topic 卡片**：标题、负责人、状态、汇总统计和折叠按钮；标题栏的文档图标打开 Topic 摘要。统计区显示 Tasks x/y、每个 Task 的卡片进度条，以及全 Topic 的卡片进度条与 x/y；没有任务卡的运行（审查、调研等）把子 agent 调用当卡片计（`runCards`：交了合格回报算已完成，终端关闭且没回报算已搁置，其余算进行中）。展开后列 Task 与 backlog；暂停、继续、终止、归档和删除作用于整个 Topic。归档的 Topic 放在列表底部，可显示并取消归档。历史运行包成只有一个 Task 的隐式 Topic，操作落到原运行。
-- **Task 行**：不分组，每个 Task 一行：kind、执行者 agent 图标、标题，标题后用图标表示状态。展开后显示说明、依赖、请求状态和结论；展开后可打开产物和运行明细。未绑定的草稿可编辑或删除，已绑定的 Task 保留运行记录。请求显示排队或已送达，可撤销、重发或改派；派发时选择目标主 agent 或新标签页。新建和编辑 Task 时，选中的 kind 下方显示它的作用、能做的事、限制和说明里该写什么。
+- **Topic 卡片**：标题、负责人、状态、汇总统计和折叠按钮；标题栏的文档图标打开 Topic 摘要：按时间线列出每个 Task 的职责、执行者、起止时间、一句结论、已完成和遗留待决（`topicTimeline`：finish 写的 `summary_done`/`summary_open`，加上运行里未答的待决项和未合入的卡），未开始的草稿排在最后，可切换看 summary.md 原文；隐式 Topic 仍直接显示总结文档。统计区显示 Tasks x/y、每个 Task 的卡片进度条，以及全 Topic 的卡片进度条与 x/y；统计里已合并的卡算作“已完成”，不单列；没有任务卡的运行（审查、调研等）把子 agent 调用当卡片计（`runCards`：交了合格回报算已完成，终端关闭且没回报算已搁置，其余算进行中）。展开后列 Task 与 backlog；暂停、继续、终止、归档和删除作用于整个 Topic。归档的 Topic 放在列表底部，可显示并取消归档。历史运行包成只有一个 Task 的隐式 Topic，操作落到原运行。
+- **Task 行**：不分组，每个 Task 一行：kind、执行者 agent 图标、标题，标题后用图标表示状态。展开后显示说明、依赖、请求状态和结论；展开后可打开产物和运行明细。未绑定的草稿可编辑或删除，已绑定的 Task 保留运行记录。已绑定且未结束的 Task 展开后可“放弃”，填写原因并确认后结束，遇到仍在工作的 agent 可选择“仍然放弃”；已放弃的 Task 计入已完成，状态提示“已放弃”并保留放弃原因。请求显示排队或已送达，可撤销、重发或改派；派发时选择目标主 agent 或新标签页。新建和编辑 Task 时，选中的 kind 下方显示它的作用、能做的事、限制和说明里该写什么。
 - **Backlog**：新增、编辑或删除待细化条目，逐条请求主 agent 细化。细化只建草稿，完成后由用户选择 Task 派发。条目显示未细化、细化中或已细化及关联 task_ids；排队中的细化在 Topic 没有负责人或负责人不在线时说明原因。
 - **Topic 控制**：操作前确认影响的 Task。暂停记下本次挂起的运行，阻止投递、启动与激活；继续只恢复这一批，保留之前单独暂停的运行；终止撤销未确认请求、保留草稿，并在后台逐个终止未结束的运行，运行明细可读各自的 `stop.md`。
 - **归档与删除**：归档要求所有已绑定 Task 完成或其运行已终止，且各运行没有未回答待决项，草稿不挡归档。归档撤销未确认请求并同步运行的 `archived` 标记。删除确认框列出全部下属运行、要删的记录与保留的 worktree、分支和 agent 会话日志；脚本整体预检通过才开始删除，失败显示原因，中途失败可重跑。
 
 Task 的运行明细保留以下信息和操作：
 
-- 主 agent 的额度、交接包、复制交接或接手提示、暂停或终止状态与 `stop.md`；后台任务显示 shell、monitor 或 agent 类型、耗时和输出摘要，可展开实时日志。Topic 合并下属运行的统计，耗时取时段并集，后台任务按 session 与 task.id 去重。
+- 主 agent 的额度、交接包、复制交接或接手提示、暂停或终止状态与 `stop.md`；后台任务列在所属 Task 里、和子 agent 调用同级，显示 shell、monitor 或 agent 类型、状态、耗时和输出摘要；点开详情显示状态、开始时间、用时、完整命令和输出，运行中的另有实时进程视图。Topic 合并下属运行的统计，耗时取时段并集。
 - 运行内的 dev 卡片进度，分开计数已合并、验收中、进行中、排队中与已搁置；没有子 agent 的卡片显示依赖或备注。子 agent 每行显示调用名、中文标题、模式、effort、轮次与失败信息，已结束终端仍保留历史。
 - 子 agent 状态文案用中文：等你、失败、等网络、重试中、已暂停、进行中、回报不合格、待收回报、待验收、验收中、回报合格、已合并、已完成、已搁置、已结束。断网恢复和服务端重试由脚本处理。
 - 行内按钮为“结果”“任务”“查看”“清理”“询问”或“请求验收”“移交…”。结果和子 agent 任务文件用有大纲的文档视图，支持“排版 / 原文”；查看跳到所属主 agent 的标签页并 peek 子 agent。清理与移交先确认，移交框显示目标 agent、工作目录、下一轮和隔离说明。
@@ -28,7 +28,7 @@ Task 的运行明细保留以下信息和操作：
 ## How it behaves
 
 - Topic 数据在 `<repo>/.cc-dispatch/topics/<id>/topic.json`、`backlog.json`、`summary.md`。`LIST_SCRIPT` 在原运行数据后增加独立分隔的 Topic（附 backlog）和运行 `state.json` 段；`parseTopics`、`parseStates` 跳过损坏的 JSON。`buildTopics` 只把 state.topic 指向存在的 Topic、且 Task.run 等于该运行的记录关联起来，其他运行转成 id 为 `run:<运行目录名>`、Task 为 `k1` 的隐式 Topic。
-- `taskGroup` 返回 `you`、`active`、`queued` 或 `done`，`groupTasks` 按该顺序省略空组；`requestState` 返回 null、`queued` 或 `delivered`。`topicTotals` 合并运行用量且不重复计数，elapsed 取时段并集；`topicTasks` 合并运行后台任务并按 session 与 task.id 去重。`loadSummary` 读取显式 Topic 的 summary.md；隐式 Topic 读取运行内存在的 research.md、result.md 或 log.md。
+- `taskGroup` 返回 `you`、`active`、`queued` 或 `done`，`groupTasks` 按该顺序省略空组；`requestState` 返回 null、`queued` 或 `delivered`。`topicTotals` 合并运行用量且不重复计数，elapsed 取时段并集；`assignTasks` 把每个后台任务只分给一个运行，Task 下直接取它运行的那份。`loadSummary` 读取显式 Topic 的 summary.md；隐式 Topic 读取运行内存在的 research.md、result.md 或 log.md。
 - `topicCmd(io, hd, args)` 通过 `TOPIC_SCRIPT` 执行 `hd_dispatch.py topic`，参数分别传 argv，先用 meta.hd，失效时从 `~/.claude/skills/cc-herdr-dispatch-*/shared/scripts/` 找脚本；Topic stop 用 nohup 在后台执行。`refresh()` 扫描后有未投递的 owner 请求时调 `topic deliver --repo <repo>`，`checking()` 时跳过。
 - 请求通过 `topic request --topic <id> (--task <tid> | --items b1,b2) --type dispatch|refine --target owner|new_tab` 创建。Claude Code 派发消息为 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 为 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。细化消息指明 backlog 条目与一次性 `topic refined --topic <id> --ack <rid> --drafts <json>` 提交，只建草稿。new_tab 把 MESSAGE 作为 `tab.new` 的 task，deliver 不处理它。
 - deliver 对仓库加非阻塞锁，跳过暂停、归档、删除中或 owner 离线的 Topic，只给状态 `idle` 或 `done` 的主 agent 投递；dispatch 还要求同一 owner 在仓库所有 Topic 下没有已绑定、未完成且未终止的 Task。按请求时间取最早的一条，每次每个 owner 最多一条。Claude Code 提示行有未发送文字时跳过；dispatch 逐字符键入斜杠命令再 enter，refine 和其他 agent 用 `hc send --if idle`。发送成功才记 delivered_at，已送达请求由用户重发或改派。
@@ -67,7 +67,7 @@ Task 的运行明细保留以下信息和操作：
   - `model.js`: parsing runs, Topic/backlog and state.json, `buildTopics`, `taskGroup`, `groupTasks`, `requestState`, merging terminal data, statuses, wording and shell scripts.
   - `loader.js`: the reads (repo, runs, Topic summary, report, task, earlier rounds, worktree changes, spend), `topicCmd` and `loadSummary`, with I/O passed in.
   - `stats.js`: the spend script, run totals, `topicTotals` and wording.
-  - `bg.js`: the background-task script with its adapter per main-agent program (Claude Code, Codex), assigning background tasks to runs and `topicTasks` for the Topic view.
+  - `bg.js`: the background-task script with its adapter per main-agent program (Claude Code, Codex), assigning each background task to one run, shown under that run's Task.
   - `mark.svg` and `icons/`: 24px stroke icons drawn with `svg()` in theme colors.
 - Herdr functions: `exec`, `readTextFile`, `hc`, `terminals`, `agents`, `panes`, `spaces`, `focused`, `layout`, `theme`, `settings`, `props`, `openOverlay`, `closeOverlay`, `run`.
 - Commands: `layout.toggle`, `layout.hide`, `pane.focus`, `terminal.peek`, `space.select`.

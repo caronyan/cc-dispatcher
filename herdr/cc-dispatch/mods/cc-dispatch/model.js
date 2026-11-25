@@ -462,6 +462,8 @@ export function buildTopics(runs, topics = {}, states = {}) {
         runDir: run?.dir ?? (t.run && dir ? `${parentOf(parentOf(dir))}/${t.run}` : t.run ?? null), agent: t.agent ?? null,
         request: requestView(t.request), summaryLine: t.summary_line ?? null, artifact: t.artifact ?? null,
         createdAt: epochMs(t.created_at) ?? 0, startedAt: epochMs(t.started_at), finishedAt: epochMs(t.finished_at),
+        abandonedAt: epochMs(t.abandoned_at), abandonReason: t.abandon_reason ?? null,
+        summaryDone: t.summary_done ?? null, summaryOpen: t.summary_open ?? null,
         group: "queued",
       };
       taskContexts.set(task, { state: run ? states[run.dir] ?? {} : {}, runs: allRuns });
@@ -485,7 +487,8 @@ export function buildTopics(runs, topics = {}, states = {}) {
       id: "k1", title: states[run.dir]?.title || run.id || baseName(run.dir), kind: run.kind, detail: "", dependsOn: [],
       parentTask: null, fromBacklog: null, run, runDir: run.dir, agent: run.mainAgent ?? null,
       request: null, summaryLine: null, artifact: null, createdAt: run.startedAt || 0,
-      startedAt: run.startedAt || null, finishedAt: null, group: "active",
+      startedAt: run.startedAt || null, finishedAt: null, abandonedAt: null, abandonReason: null,
+      summaryDone: null, summaryOpen: null, group: "active",
     };
     taskContexts.set(task, { state: states[run.dir] ?? {}, runs: allRuns });
     list.push({
@@ -497,15 +500,40 @@ export function buildTopics(runs, topics = {}, states = {}) {
   for (const topic of list) {
     for (const task of topic.tasks) task.group = taskGroup(task, topic);
     topic.updatedAt = Math.max(topic.createdAt, topic.archived || 0, topic.pausedAt || 0,
-      ...topic.tasks.flatMap((t) => [t.createdAt, t.startedAt || 0, t.finishedAt || 0, t.request?.at || 0, t.request?.deliveredAt || 0]),
+      ...topic.tasks.flatMap((t) => [t.createdAt, t.startedAt || 0, t.finishedAt || 0, t.abandonedAt || 0, t.request?.at || 0, t.request?.deliveredAt || 0]),
       ...topic.backlog.flatMap((b) => [b.updatedAt, b.request?.at || 0, b.request?.deliveredAt || 0]),
       ...topic.runs.map((r) => r.lastAt || r.startedAt || 0));
   }
   return list.sort((a, b) => (b.updatedAt - a.updatedAt) || b.id.localeCompare(a.id));
 }
 
+/**
+ * A Topic's Tasks as a timeline, oldest first: when each started (or was drafted), its role, the
+ * executor, where it stands, the one-line conclusion, what it completed and what it leaves open. Open
+ * items are what the Task wrote at finish plus what its run still waits on you for (unanswered asks,
+ * cards parked for you) and, for an unfinished Task, its cards not merged yet.
+ */
+export function topicTimeline(topic) {
+  const lines = (text) => String(text ?? "").split("\n").map((x) => x.replace(/^\s*[-*•]\s*/, "").trim()).filter(Boolean);
+  return [...(topic?.tasks ?? [])].map((task) => {
+    const state = taskContexts.get(task)?.state ?? {}, group = taskGroup(task, topic);
+    const cards = Object.entries(state.tasks ?? {}).filter(([id, c]) => objectJSON(c) && !c.check && id !== "survey" && !/-check-r\d+$/.test(id));
+    const waiting = task.run ? pendingItems(task.run, Object.fromEntries(cards), state.pending_decisions).filter((x) => !x.answer).map((x) => x.title) : [];
+    const unmerged = group === "done" ? [] : cards.filter(([, c]) => !["merged", "parked"].includes(c.status)).map(([id, c]) => `${id} ${c.title ?? ""}`.trim());
+    const status = task.abandonedAt != null ? "abandoned" : group === "done" ? "done" : group === "queued" ? "queued" : group === "you" ? "you" : "active";
+    return {
+      id: task.id, kind: task.kind, title: task.title, agent: task.agent ?? task.request?.agent ?? null, status,
+      at: task.startedAt || task.createdAt || 0, end: task.abandonedAt ?? task.finishedAt ?? null,
+      line: task.abandonedAt != null ? `已放弃：${task.abandonReason ?? "未写原因"}` : task.summaryLine ?? null,
+      done: lines(task.summaryDone), open: [...new Set([...lines(task.summaryOpen), ...waiting, ...unmerged])],
+      artifact: task.artifact ?? null,
+    };
+  }).sort((a, b) => (a.status === "queued") - (b.status === "queued") || a.at - b.at || a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
 /** A Task needs the person before it can be considered done, even after helpers have reported. */
 export function taskGroup(task, topic) {
+  if (task?.abandonedAt != null) return "done";
   const run = task?.run;
   if (!run && !task?.runDir) return "queued";
   if (!run) return task.finishedAt ? "done" : "active";
@@ -689,9 +717,10 @@ export function runCards(run, stats) {
   return { status, cards, checks: stats?.checks ?? 0 };
 }
 
+/** Card counts for the stats bars and key; a merged card is finished work, so it counts as done. */
 export function cardCounts(cards) {
   const n = {};
-  for (const s of Object.values(cards?.status ?? {})) n[s] = (n[s] ?? 0) + 1;
+  for (const raw of Object.values(cards?.status ?? {})) { const s = raw === "merged" ? "done" : raw; n[s] = (n[s] ?? 0) + 1; }
   const known = CARD_ORDER.filter((s) => n[s]).map((s) => [s, n[s]]);
   const other = Object.entries(n).filter(([s]) => !CARD_ORDER.includes(s));
   return [...known, ...other];

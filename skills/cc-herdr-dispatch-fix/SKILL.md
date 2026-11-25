@@ -104,7 +104,7 @@ git -C "$ROOT" worktree remove --force "$FIX_WT"
 
 apply 冲突说明用户在修复期间改过这些文件：停下来告诉用户冲突的文件，问怎么处理。
 
-写 `result.md`，运行 `python3 $HD topic finish --run "$RD" --line "<修复与回归的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制回到调用方）：
+写 `result.md`，运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<修复与回归的一句结论>" --artifact "$RD/result.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。然后输出给调用方（被其他 skill 调用时，这就是交还的内容；之后控制回到调用方）：
 
 ```
 ## cc-herdr-dispatch-fix：<问题来源>

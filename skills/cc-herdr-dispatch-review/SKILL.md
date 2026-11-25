@@ -131,7 +131,7 @@ schema 用 `$SKILL_DIR/references/counterexample.schema.json`，调用名 `stres
 
 1. **过度设计检查**（仅方案模式，`fix=on`）：回看各轮补强，有没有为 speculative 级风险加入的重型机制、只用一次的抽象、"以后可能用到"的配置项。把这类补强精简为与已证实风险相称的最小做法，并说明理由。
 2. `python3 $HD cleanup --run $RD` 结束剩余的子 agent，删除 review worktree，保留 `.cc-dispatch/review-$RUN/` 作为记录。
-3. 把最终结论补进 `cross.md`，运行 `python3 $HD topic finish --run "$RD" --line "<能否继续与残余风险的一句结论>" --artifact "$RD/cross.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
+3. 把最终结论补进 `cross.md`，运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<能否继续与残余风险的一句结论>" --artifact "$RD/cross.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
 4. 输出最终报告：
 
 ```

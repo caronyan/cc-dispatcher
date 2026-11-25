@@ -100,7 +100,7 @@ python3 $HD run --run $RD --call review --mode read --effort high \
    下次复盘的复盘员会读它，避免重复提已被拒绝的条目。
 2. `python3 $RETRO mark --root "$ROOT" --retro $RD --run <运行名> ...` 把这批运行记为已复盘（一条都没采纳也要记）。
 3. `python3 $HD cleanup --run $RD`。
-4. 运行 `python3 $HD topic finish --run "$RD" --line "<复盘数量与采纳改动的一句结论>" --artifact "$RD/proposals.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
+4. 运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<复盘数量与采纳改动的一句结论>" --artifact "$RD/proposals.md"`；有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议草稿，不自动派发。
 5. 输出报告：
 
 ```

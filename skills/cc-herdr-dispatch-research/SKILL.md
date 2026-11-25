@@ -144,7 +144,7 @@ python3 $HD run --run $RD --call <线程> --mode read --effort high \
 ### 5. 收尾
 
 1. `python3 $HD cleanup --run $RD` 结束剩余的子 agent，删除 spike worktree（如有），保留 `.cc-dispatch/research-$RUN/` 作为记录。
-2. 写好 `research.md`（方案模式同时写好 `plan.md`），运行 `python3 $HD topic finish --run "$RD" --line "<一句调研结论或推荐>" --artifact "$RD/research.md"`；方案模式把 `--artifact` 改为 `"$RD/plan.md"`。有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议 review 或 dev 草稿，不自动派发。
+2. 写好 `research.md`（方案模式同时写好 `plan.md`），运行 `python3 $HD topic finish --run "$RD" --done "<已完成的内容，几行>" --open "<遗留和待决的事，没有就不传>" --line "<一句调研结论或推荐>" --artifact "$RD/research.md"`；方案模式把 `--artifact` 改为 `"$RD/plan.md"`。有下一步建议时可按 shared/herdr.md 用 `topic task-add` 提议 review 或 dev 草稿，不自动派发。
 3. 输出最终报告：
 
 ```
