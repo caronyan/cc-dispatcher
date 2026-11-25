@@ -64,8 +64,9 @@ class TopicAbandon(unittest.TestCase):
         self.assertEqual((self.folder / "summary.md").read_text(),
                          f"## {self.task} Task\uff08dev\uff09\n\u5df2\u653e\u5f03\uff1aNo one will continue\n\n")
         self.assertTrue(self.hd.topic_task_done(task, self.w.run_dir))
-        self.assertFalse(self.hd.topic_owner_busy(self.w.repo, "t1"))
-        self.assertEqual(self.command("deliver")["DELIVERED"], f"{self.topic}:{request['REQUEST']}")
+        # Abandoning frees the owner, so the queued request is handed over right away.
+        self.assertIsNotNone(self.data()["tasks"][queued]["request"]["delivered_at"])
+        self.assertEqual(self.command("deliver")["DELIVERED"], "")
         self.assertEqual(self.command("stop", "--topic", self.topic)["STOPPED"], "")
         self.assertEqual(self.command("archive", "--topic", self.topic)["ARCHIVED"], self.topic)
         self.assertEqual(self.command("delete", "--topic", self.topic)["DELETED"], self.topic)
