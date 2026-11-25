@@ -566,22 +566,30 @@ export function dependsState(topics, srcTopic, ref) {
   const item = target?.tasks.find((t) => t.id === task);
   const result = { state: "missing", topic, task, title: item?.title ?? "", path: [] };
   if (!item) return result;
+  // Iterative depth-first walk, like the script: chains of any length fit, each task is expanded once.
   const visited = new Set();
-  const visit = (t, k, path) => {
-    const key = `${t.id}:${k.id}`, start = path.indexOf(key);
-    if (start >= 0) return [...path.slice(start), key];
-    if (visited.has(key)) return null;
-    visited.add(key);
-    for (const dep of k.dependsOn ?? []) {
-      const [id, tid] = parse(t.id, dep), next = find(id), child = next?.tasks.find((x) => x.id === tid);
-      if (child) {
-        const cycle = visit(next, child, [...path, key]);
-        if (cycle) return cycle;
+  const visit = (t, k) => {
+    const path = [], stack = [];
+    const enter = (topic, task) => {
+      const key = `${topic.id}:${task.id}`, start = path.indexOf(key);
+      if (start >= 0) return [...path.slice(start), key];
+      if (!visited.has(key)) {
+        visited.add(key);
+        path.push(key);
+        stack.push({ topic, deps: (task.dependsOn ?? [])[Symbol.iterator]() });
       }
+      return null;
+    };
+    let cycle = enter(t, k);
+    while (stack.length && !cycle) {
+      const top = stack.at(-1), step = top.deps.next();
+      if (step.done) { stack.pop(); path.pop(); continue; }
+      const [id, tid] = parse(top.topic.id, step.value), next = find(id), child = next?.tasks.find((x) => x.id === tid);
+      if (child) cycle = enter(next, child);
     }
-    return null;
+    return cycle;
   };
-  const cycle = visit(target, item, []);
+  const cycle = visit(target, item);
   if (cycle) return { ...result, state: "cycle", path: cycle };
   const state = taskContexts.get(item)?.state ?? item.run?.state ?? {};
   // Same order as the script's depends_state: retiring writes state.finished too, so it is checked first.

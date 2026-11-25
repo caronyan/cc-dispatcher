@@ -70,6 +70,16 @@ test("the real list script reads only summaries and keeps hostile message bodies
   assert.deepEqual(loaded.topics[0].messages, { ...empty, unacked: 2, openIn: 1 });
 });
 
+test("dependency chains longer than the call stack resolve, and a null entry does not hide later edges", () => {
+  const count = 20000, tasks = {};
+  for (let i = 1; i <= count; i += 1) tasks[`k${i}`] = { depends_on: i < count ? [`k${i + 1}`] : [] };
+  assert.equal(model.dependsState(model.buildTopics([], { A: record("A", tasks) }), "A", "k1").state, "pending");
+  tasks[`k${count}`].depends_on = ["k1"];
+  assert.equal(model.dependsState(model.buildTopics([], { A: record("A", tasks) }), "A", "k1").path.length, count + 1);
+  const holes = model.buildTopics([], { A: record("A", { k1: { depends_on: [null, "k2"] }, k2: { depends_on: ["k1"] } }) });
+  assert.equal(model.dependsState(holes, "A", "k1").state, "cycle");
+});
+
 test("dependency snapshots distinguish completion, pending, stopping, abandonment, deletion and cross-Topic cycles", () => {
   const states = { "/r/.cc-dispatch/dev-finished": { finished: 20 }, "/r/.cc-dispatch/dev-stopped": {}, "/r/.cc-dispatch/dev-retired": { finished: 30 } };
   const runs = model.buildRuns([], [], {

@@ -391,6 +391,30 @@ class Messages(unittest.TestCase):
         notices = [item for item in self.messages(self.a)["items"] if item["kind"] == "notice"]
         self.assertEqual(len(notices), 1)
 
+    def test_a_damaged_mailbox_is_never_rewritten(self):
+        self.send(kind="note")
+        before = self.path(self.b).read_text() + "trailing damage"
+        self.path(self.b).write_text(before)
+        self.assertEqual(self.command("msg", "--topic", self.a, "--to", self.b, "--kind", "note",
+                                      "--text=Later", code=3)["FAILURE"], "FILE_DAMAGED")
+        self.assertEqual(self.path(self.b).read_text(), before)
+
+    def test_archive_cleanup_stays_pending_while_a_recipient_mailbox_is_unreadable(self):
+        question = self.send()
+        path, read = self.path(self.b), self.hd.Path.read_text
+
+        def unreadable(current, *args, **kwargs):
+            if current == path:
+                raise OSError("mailbox unavailable")
+            return read(current, *args, **kwargs)
+
+        with mock.patch.object(self.hd.Path, "read_text", new=unreadable), self.assertRaises(SystemExit):
+            self.invoke("archive", "--topic", self.a)
+        self.assertTrue(self.hd.load_topic(self.w.repo, self.a)["messages_pending"])
+        self.command("deliver")
+        item = next(i for i in self.messages(self.b)["items"] if i["id"] == question)
+        self.assertEqual(self.hd.question_state(item), "withdrawn")
+
     def test_a_mailbox_that_cannot_be_read_is_never_rewritten(self):
         kept = self.send(kind="note")
         path, read = self.path(self.b), self.hd.Path.read_text

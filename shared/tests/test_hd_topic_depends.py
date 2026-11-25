@@ -171,6 +171,25 @@ class TopicDepends(unittest.TestCase):
         cycle = self.hd.dependency_cycle(self.w.repo, self.a, "k1", {self.a: data}, [])
         self.assertEqual((len(cycle), cycle[0], cycle[-1]), (count + 1, f"{self.a}:k1", f"{self.a}:k1"))
 
+    def test_null_historical_dependency_entries_do_not_hide_later_edges(self):
+        self.set_task(self.a, self.ka, depends_on=[None, f"{self.b}:{self.kb}"])
+        result = self.command("task-edit", "--topic", self.b, "--task", self.kb,
+                              "--depends", f"{self.a}:{self.ka}", code=3)
+        self.assertEqual(result["FAILURE"], "DEPENDS_CYCLE")
+
+    def test_an_unreadable_dependency_blocks_instead_of_reading_as_missing(self):
+        self.set_task(self.a, self.ka, depends_on=[f"{self.b}:{self.kb}"])
+        path, read = self.topic_path(self.b), self.hd.Path.read_text
+
+        def unreadable(current, *args, **kwargs):
+            if current == path:
+                raise OSError("topic unavailable")
+            return read(current, *args, **kwargs)
+
+        with mock.patch.object(self.hd.Path, "read_text", new=unreadable), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            self.hd.depends_blockers(self.w.repo, self.a, self.data(self.a)["tasks"][self.ka])
+
     def test_concurrent_dependency_edits_in_two_topics_cannot_commit_a_cycle(self):
         validate = self.hd.validate_task_depends
 

@@ -2223,8 +2223,11 @@ def parse_ref(src_topic, ref, strict=True):
 
 def dependency_snapshot(repo, topic, snapshots):
     if topic not in snapshots:
-        snapshots[topic] = read_json(topic_dir(repo, topic) / "topic.json", {})
+        snapshots[topic] = read_json_present(topic_dir(repo, topic) / "topic.json", {})
     return snapshots[topic]
+
+
+_END = object()
 
 
 def dependency_cycle(repo, topic, tid, snapshots, path):
@@ -2248,8 +2251,8 @@ def dependency_cycle(repo, topic, tid, snapshots, path):
     cycle = enter(topic, tid)
     while stack and not cycle:
         owner, deps = stack[-1]
-        dep = next(deps, None)
-        if dep is None:
+        dep = next(deps, _END)
+        if dep is _END:
             stack.pop()
             ref = path.pop()
             del active[ref]
@@ -2676,19 +2679,28 @@ def MSG_DIR(repo):
     return Path(repo) / ".cc-dispatch" / "messages"
 
 
-def read_json_for_rewrite(path: Path, default):
-    """A file about to be rewritten: a missing file is empty, but a failed read must not pass as empty."""
+def read_json_present(path: Path, default, damaged_ok=True):
+    """A missing file is empty; a file that exists but cannot be read never passes as empty."""
     if not path.exists():
         return default
     try:
         text = path.read_text()
     except OSError as e:
-        fail(f"cannot read {path.name}: {e}", failure="READ_FAILED", code=3)
+        fail(f"cannot read {path}: {e}", failure="READ_FAILED", code=3)
     try:
         v = json.loads(text)
     except ValueError:
-        return default
-    return v if isinstance(v, type(default)) else default
+        v = None
+    if isinstance(v, type(default)):
+        return v
+    if not damaged_ok:
+        fail(f"{path} is damaged; repair or move it aside before retrying", failure="FILE_DAMAGED", code=3)
+    return default
+
+
+def read_json_for_rewrite(path: Path, default):
+    """A file about to be rewritten: anything other than a missing file must parse, or it would be overwritten."""
+    return read_json_present(path, default, damaged_ok=False)
 
 
 def load_messages(repo, topic):
@@ -3269,7 +3281,7 @@ def close_topic_messages(repo, topic, data):
     for path in message_files(repo):
         if path.stem == topic:
             continue
-        items = read_json(path, {"items": []})["items"]
+        items = read_json_present(path, {"items": []})["items"]
         selected = [item["id"] for item in items if item["kind"] == "question"
                     and (item.get("from") or {}).get("topic") == topic
                     and question_state(item) == "open"]
