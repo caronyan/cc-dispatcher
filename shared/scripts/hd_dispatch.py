@@ -330,6 +330,7 @@ def activate_run(run: Path):
             fail("task belongs to another run", failure="TASK_TAKEN", code=3)
         data["archived"] = None
         task["finished_at"] = None
+        task["end_event"] = None
         unarchive(run)
         state.pop("finished", None)
         save_topic(repo, topic, data)
@@ -2188,6 +2189,96 @@ def topic_ids(value):
     return list(dict.fromkeys(x.strip() for x in value.split(",") if x.strip()))
 
 
+def parse_ref(src_topic, ref):
+    if not isinstance(ref, str) or not re.fullmatch(
+            r"(?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)?k[1-9][0-9]*", ref):
+        fail(f"invalid dependency: {ref}", failure="DEPENDS_INVALID", code=3)
+    return tuple(ref.split(":", 1)) if ":" in ref else (src_topic, ref)
+
+
+def dependency_snapshot(repo, topic, snapshots):
+    if topic not in snapshots:
+        snapshots[topic] = read_json(topic_dir(repo, topic) / "topic.json", {})
+    return snapshots[topic]
+
+
+def dependency_cycle(repo, topic, tid, snapshots, path):
+    ref = f"{topic}:{tid}"
+    if ref in path:
+        return path[path.index(ref):] + [ref]
+    task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
+    if task is None:
+        return []
+    for dep in task.get("depends_on", []):
+        target, task_id = parse_ref(topic, dep)
+        cycle = dependency_cycle(repo, target, task_id, snapshots, path + [ref])
+        if cycle:
+            return cycle
+    return []
+
+
+def depends_state(repo, src_topic, ref, _seen=None):
+    topic, tid = parse_ref(src_topic, ref)
+    snapshots = {}
+    task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
+    result = {"state": "missing", "topic": topic, "task": tid,
+              "title": task.get("title", "") if task is not None else "", "path": []}
+    if task is None:
+        return result
+    cycle = dependency_cycle(repo, topic, tid, snapshots, list(_seen or []))
+    if cycle:
+        result.update(state="cycle", path=cycle)
+        return result
+    run = Path(repo) / ".cc-dispatch" / task["run"] if task.get("run") else None
+    c = control(run) if run else {}
+    if task.get("abandoned_at") is not None:
+        state = "abandoned"
+    elif task.get("finished_at") is not None:
+        state = "done"
+    elif c.get("state") == "stopped" or c.get("retired"):
+        # Retiring writes state.finished too; that timestamp is not a successful completion.
+        state = "stopped"
+    elif run and read_json(run / "state.json", {}).get("finished") is not None:
+        state = "done"
+    else:
+        state = "pending"
+    result["state"] = state
+    return result
+
+
+def depends_blockers(repo, src_topic, task):
+    states = [depends_state(repo, src_topic, ref) for ref in task.get("depends_on", [])]
+    return [state for state in states if state["state"] in ("pending", "stopped", "cycle")]
+
+
+def validate_task_depends(repo, topic, tid, data):
+    snapshots = {topic: data}
+    for ref in data["tasks"][tid].get("depends_on", []):
+        target, task_id = parse_ref(topic, ref)
+        if (target, task_id) == (topic, tid):
+            fail(f"task cannot depend on itself: {topic}:{tid}", failure="DEPENDS_SELF", code=3)
+        if task_id not in dependency_snapshot(repo, target, snapshots).get("tasks", {}):
+            fail(f"dependency not found: {target}:{task_id}", failure="DEPENDS_MISSING", code=3)
+    cycle = dependency_cycle(repo, topic, tid, snapshots, [])
+    if cycle:
+        out(cycle="→".join(cycle))
+        fail("dependency cycle", failure="DEPENDS_CYCLE", code=3)
+
+
+def report_depends(blockers):
+    for item in blockers:
+        out(depends=f"{item['topic']}:{item['task']}\t{item['state']}\t{clean_line(item['title'])}")
+        if item["state"] == "cycle":
+            out(cycle="→".join(item["path"]))
+
+
+def require_task_depends(repo, topic, task):
+    blockers = depends_blockers(repo, topic, task)
+    if blockers:
+        report_depends(blockers)
+        fail("task dependencies are not ready", failure="DEPENDS_PENDING", code=3)
+
+
 def add_topic_task(data, title, kind, detail="", depends_on=None, from_backlog=None, parent_task=None):
     tid = f"k{data['next_task']}"
     data["next_task"] += 1
@@ -2195,7 +2286,7 @@ def add_topic_task(data, title, kind, detail="", depends_on=None, from_backlog=N
         "title": title, "kind": kind, "detail": detail, "depends_on": depends_on or [],
         "from_backlog": from_backlog, "parent_task": parent_task, "run": None, "agent": None,
         "request": None, "consumed_request": None, "summary_line": None, "artifact": None,
-        "created_at": time.time(), "started_at": None, "finished_at": None,
+        "created_at": time.time(), "started_at": None, "finished_at": None, "end_event": None,
     }
     return tid
 
@@ -2222,10 +2313,12 @@ def cmd_topic_task(a):
             if a.from_backlog:
                 topic_items(load_backlog(repo, a.topic), [a.from_backlog])
             tid = add_topic_task(data, a.title, a.kind, a.detail, topic_ids(a.depends), a.from_backlog)
+            validate_task_depends(repo, a.topic, tid, data)
         else:
             tid = a.task
             task = topic_task(data, tid, draft=True)
             if a.topic_cmd == "task-rm":
+                queue_task_notices(repo, a.topic, data, tid, "deleted")
                 del data["tasks"][tid]
             else:
                 for field in ("title", "kind", "detail", "depends"):
@@ -2237,7 +2330,11 @@ def cmd_topic_task(a):
                     if field in ("kind", "detail") and value != task.get(key):
                         task["request"] = None
                     task[key] = value
+                if a.depends is not None:
+                    validate_task_depends(repo, a.topic, tid, data)
         save_topic(repo, a.topic, data)
+    if a.topic_cmd == "task-rm":
+        flush_outbox(repo, only=a.topic)
     out(**{"removed" if a.topic_cmd == "task-rm" else "task": tid})
 
 
@@ -2291,6 +2388,8 @@ def cmd_topic_request(a):
         topic_writable(data, active=not a.cancel)
         backlog = load_backlog(repo, a.topic) if ids is not None else None
         objects = topic_items(backlog, ids) if backlog is not None else [topic_task(data, a.task, draft=True)]
+        if request_type == "dispatch" and not a.cancel:
+            require_task_depends(repo, a.topic, objects[0])
         old_ids = list(dict.fromkeys(obj["request"]["id"] for obj in objects if obj.get("request")))
         if a.cancel:
             for obj in objects:
@@ -2358,6 +2457,7 @@ def topic_binding(repo, run):
 def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
     topic_writable(data, active=True)
     task = topic_task(data, task_id)
+    require_task_depends(repo, topic_id, task)
     if task.get("run") and task["run"] != run.name:
         fail(f"task already taken: {task_id}", failure="TASK_TAKEN", code=3)
     if task["kind"] != run_kind(run) or (kind is not None and kind != task["kind"]):
@@ -2902,6 +3002,69 @@ def close_topic_messages(repo, topic, data):
         save_messages(repo, topic, mailbox)
 
 
+def queue_task_notices(repo, topic, data, tid, kind, reason=None):
+    """Only the source lock is held; recipients are discovered from unlocked snapshots."""
+    task = data["tasks"][tid]
+    owner = data.get("owner") or {}
+    sender = {"topic": topic, "title": clean_line(data.get("title")), "task": tid,
+              "run": task.get("run"), "terminal": owner.get("terminal"),
+              "agent": task.get("agent") or owner.get("agent")}
+    text = f"Topic「{sender['title']}」的 Task「{clean_line(task.get('title'))}」（{tid}）"
+    if kind == "finished":
+        text += f"已完成：{clean_line(task.get('summary_line'))}"
+    elif kind == "abandoned":
+        text += f"已放弃：{clean_line(reason or task.get('abandon_reason'))}。请决定是否继续依赖它的工作。"
+    elif kind == "stopped":
+        text += f"已终止：{clean_line(reason)}。依赖仍被阻挡，可恢复运行或编辑依赖。"
+    else:
+        text += "已删除，依赖已不存在，可以继续派发。"
+    if kind != "finished" and task.get("summary_line"):
+        text += f"\n结论：{clean_line(task['summary_line'])}"
+    refs = [task["artifact"]] if task.get("artifact") else []
+    if refs:
+        text += f"\n产物：{clean_line(task['artifact'])}"
+    events = []
+    for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
+        target = path.parent.name
+        if target == topic:
+            continue
+        other = read_json(path, {})
+        reasons = []
+        if any(f"{topic}:{tid}" in item.get("depends_on", [])
+               for item in other.get("tasks", {}).values()):
+            reasons.append("depends")
+        if kind != "deleted" and topic in other.get("follows", []):
+            reasons.append("follow")
+        if reasons:
+            events.append({"op": "notice", "to": target, "from": sender, "text": text,
+                           "refs": refs, "reason": "deleted" if kind == "deleted" else ",".join(reasons)})
+    outbox_add(repo, topic, events)
+
+
+def task_end_event(repo, topic, data, tid, kind, reason=None):
+    task = data["tasks"][tid]
+    if task.get("end_event") is not None:
+        return False
+    task["end_event"] = {"kind": kind, "at": time.time()}
+    queue_task_notices(repo, topic, data, tid, kind, reason)
+    return True
+
+
+def record_run_end(run, kind, reason):
+    repo = repo_of_run(run)
+    bound = topic_binding_snapshot(repo, run)
+    if not bound:
+        return
+    topic, tid = bound
+    with topic_lock(repo, topic):
+        data = read_json(topic_dir(repo, topic) / "topic.json", {})
+        task = data.get("tasks", {}).get(tid)
+        if task and task.get("run") == run.name and task_end_event(
+                repo, topic, data, tid, kind, reason):
+            save_topic(repo, topic, data)
+    flush_outbox(repo, only=topic)
+
+
 def cmd_topic_finish(a):
     run = Path(a.run).resolve()
     repo = repo_of_run(run)
@@ -2925,11 +3088,13 @@ def cmd_topic_finish(a):
                              + (f"产物：{a.artifact}\n" if a.artifact else "") + "\n")
         task.update(summary_line=a.line, summary_done=a.done or None, summary_open=a.open or None,
                     artifact=a.artifact, finished_at=now)
+        task_end_event(repo, topic_id, data, task_id, "finished")
         save_topic(repo, topic_id, data)
         state_path = run / "state.json"
         state = read_json(state_path, {})
         state.update(topic=topic_id, task=task_id, finished=now)
         write_json(state_path, state)
+    flush_outbox(repo, only=topic_id)
     out(finished=task_id)
 
 
@@ -2945,22 +3110,27 @@ def cmd_topic_abandon(a):
         task = topic_task(data, a.task)
         run = Path(repo) / ".cc-dispatch" / task["run"] if task.get("run") else None
         if task.get("abandoned_at") is not None:
-            out(abandoned=a.task, run=run.name if run and run.is_dir() else "-", closed="-")
-            return
-        if run is None:
-            fail(f"task has no bound run: {a.task}", failure="TASK_NOT_BOUND", code=3)
-        if topic_task_done(task, run):
-            fail(f"task is already done: {a.task}", failure="TASK_DONE", code=3)
-        retired = retire_run(run, keep=True, force=a.force, failure_codes=True) if run.is_dir() else None
-        summary = topic_dir(repo, a.topic) / "summary.md"
-        entry = f"## {a.task} {task['title']}（{task['kind']}）\n已放弃：{reason}\n\n"
-        previous = summary.read_text() if summary.exists() else ""
-        if entry not in previous:
-            with summary.open("a") as stream:
-                stream.write(entry)
-        task.update(abandoned_at=time.time(), abandon_reason=reason)
-        save_topic(repo, a.topic, data)
-    out(abandoned=a.task, run=run.name if retired else "-", closed=retired["closed"] if retired else "-")
+            result = dict(abandoned=a.task, run=run.name if run and run.is_dir() else "-", closed="-")
+        else:
+            if run is None:
+                fail(f"task has no bound run: {a.task}", failure="TASK_NOT_BOUND", code=3)
+            if topic_task_done(task, run):
+                fail(f"task is already done: {a.task}", failure="TASK_DONE", code=3)
+            retired = retire_run(run, keep=True, force=a.force, failure_codes=True,
+                                 notify_topic=False) if run.is_dir() else None
+            summary = topic_dir(repo, a.topic) / "summary.md"
+            entry = f"## {a.task} {task['title']}（{task['kind']}）\n已放弃：{reason}\n\n"
+            previous = summary.read_text() if summary.exists() else ""
+            if entry not in previous:
+                with summary.open("a") as stream:
+                    stream.write(entry)
+            task.update(abandoned_at=time.time(), abandon_reason=reason)
+            task_end_event(repo, a.topic, data, a.task, "abandoned", reason)
+            save_topic(repo, a.topic, data)
+            result = dict(abandoned=a.task, run=run.name if retired else "-",
+                          closed=retired["closed"] if retired else "-")
+    flush_outbox(repo, only=a.topic)
+    out(**result)
 
 
 def cmd_topic_refined(a):
@@ -2996,6 +3166,8 @@ def cmd_topic_refined(a):
             a.topic_parser.error("--drafts needs [{title, kind, detail?, depends_on?}]")
         task_ids = [add_topic_task(data, d["title"], d["kind"], d.get("detail", ""), d.get("depends_on"),
                                    from_backlog=ids[0]) for d in drafts]
+        for tid in task_ids:
+            validate_task_depends(repo, a.topic, tid, data)
         now = time.time()
         for item in items:
             item.update(status="refined", request=None, task_ids=list(task_ids), updated_at=now)
@@ -3192,6 +3364,8 @@ def cmd_topic_delete(a):
             data["deleting"] = time.time()
         save_topic(repo, a.topic, data)
         close_topic_messages(repo, a.topic, data)
+        for tid in data["tasks"]:
+            queue_task_notices(repo, a.topic, data, tid, "deleted")
         for run in runs:
             if run.exists():
                 cmd_delete(argparse.Namespace(run=str(run)))
@@ -3300,6 +3474,15 @@ def cmd_topic_deliver(a):
                 backlog = load_backlog(repo, tid)
                 pending = [entry for entry in topic_pending_requests(data, backlog)
                            if not busy or entry[0]["type"] != "dispatch"]
+                ready = []
+                for entry in pending:
+                    blockers = depends_blockers(repo, tid, data["tasks"][entry[1]]) if entry[1] else []
+                    if blockers:
+                        report_depends(blockers)
+                        out(failure="DEPENDS_PENDING")
+                    else:
+                        ready.append(entry)
+                pending = ready
                 if not pending:
                     continue
                 request, task_id, item_ids = pending[0]
@@ -3378,7 +3561,7 @@ def register_topic_parser(sub):
             targets = c.add_mutually_exclusive_group(required=True)
             targets.add_argument("--task")
             targets.add_argument("--items")
-            c.add_argument("--type", choices=("dispatch", "refine"))
+            c.add_argument("--type", "--kind", choices=("dispatch", "refine"))
             c.add_argument("--target", choices=("owner", "new_tab"), default="owner")
             c.add_argument("--agent")
             action = c.add_mutually_exclusive_group()
@@ -3740,7 +3923,7 @@ def cmd_retire(a):
     out(**retire_run(run, keep=a.keep, force=a.force))
 
 
-def retire_run(run: Path, keep=False, force=False, *, failure_codes=False):
+def retire_run(run: Path, keep=False, force=False, *, failure_codes=False, notify_topic=True):
     """Retire a run and return its output fields; Topic abandonment uses the same cleanup with named failures."""
     if not run.is_dir() or run.parent.name != ".cc-dispatch" or not ((run / "agents").is_dir() or (run / "state.json").exists()):
         fail(f"NO_RUN: {run} is not a cc-dispatch run folder (<repo>/.cc-dispatch/<run>)", code=2)
@@ -3786,6 +3969,8 @@ def retire_run(run: Path, keep=False, force=False, *, failure_codes=False):
     write_json(run / "state.json", st)
     if not keep:
         (run / "archived").write_text(f"{now}\n")
+    if notify_topic:
+        record_run_end(run, "stopped", "运行已退役")
     return dict(retired=run, was=c["state"], closed=",".join(closed) or "-", archived="no" if keep else "yes")
 
 
@@ -3869,7 +4054,11 @@ def cmd_stop(a):
     run = Path(a.run).resolve()
     c = control(run)
     # A stop whose process died leaves the run stopping; stopping again finishes it.
-    if c["state"] == "stopped" or (c["state"] == "stopping" and pid_alive(c.get("pid"))):
+    if c["state"] == "stopped":
+        record_run_end(run, "stopped", "用户终止了运行")
+        held_line(run)
+        return
+    if c["state"] == "stopping" and pid_alive(c.get("pid")):
         held_line(run)
         return
     set_control(run, state="stopping", held=c.get("held") or [], pid=os.getpid())
@@ -3939,6 +4128,7 @@ def cmd_stop(a):
         "回报是 JSON；`report_check` 为 ok 的可以直接读，bad 或 missing 的只能参考屏幕和 worktree。",
         "要在这个运行目录里接着派发，先由用户决定，再运行 `hd_dispatch.py resume --run <运行目录>`。", ""]))
     set_control(run, state="stopped", report=str(report))
+    record_run_end(run, "stopped", "用户终止了运行")
     notified = False
     if parent:
         g = hc_json("get", parent)

@@ -110,14 +110,15 @@ class Topics(unittest.TestCase):
         k1 = self.task(topic, detail="First", from_backlog=b1)
         k2 = self.task(topic, kind="review", depends=k1)
         self.command("task-edit", "--topic", topic, "--task", k2, "--title", "Second",
-                     "--kind", "test", "--detail", "Changed", "--depends", f"{k1},k3")
+                     "--kind", "test", "--detail", "Changed", "--depends", k1)
         tasks = self.data(topic)["tasks"]
         self.assertEqual(tasks[k1]["from_backlog"], b1)
         self.assertEqual((tasks[k2]["title"], tasks[k2]["kind"], tasks[k2]["detail"], tasks[k2]["depends_on"]),
-                         ("Second", "test", "Changed", [k1, "k3"]))
+                         ("Second", "test", "Changed", [k1]))
         self.assertEqual(set(tasks[k1]), {"title", "kind", "detail", "depends_on", "from_backlog",
                                          "parent_task", "run", "agent", "request", "consumed_request",
-                                         "summary_line", "artifact", "created_at", "started_at", "finished_at"})
+                                         "summary_line", "artifact", "created_at", "started_at", "finished_at",
+                                         "end_event"})
         self.assertEqual(self.command("task-rm", "--topic", topic, "--task", k2)["REMOVED"], k2)
         self.assertEqual(self.task(topic), "k3")
         self.command("backlog-edit", "--topic", topic, "--item", b1, "--text", "Changed")
