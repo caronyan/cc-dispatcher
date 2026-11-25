@@ -106,9 +106,9 @@ const MARKS = {
   done: ["check", "done"], merged: ["check", "ansi2"], ok: ["check", "done"],
   failed: ["close", "ansi1"], lost: ["close", "ansi1"], bad: ["close", "ansi3"], stopped: ["close", "muted"], abandoned: ["close", "muted"],
   blocked: ["question", "ansi3"], paused: ["pause", "ansi3"], parked: ["pause", "muted"], offline: ["wifi-off", "ansi3"],
-  retrying: ["refresh", "ansi3"], await: ["clock-dashed", "accent"], collect: ["eye", "accent"], review: ["eye", "accent"],
+  retrying: ["refresh", "ansi3"], await: ["clock-dashed", "accent"], collect: ["inbox", "accent"], review: ["clipboard-check", "accent"],
   handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["pencil", "muted"],
-  pending: ["hourglass", "muted"], accepting: ["eye", "accent"],
+  pending: ["hourglass", "muted"], accepting: ["clipboard-check", "accent"],
 };
 const MARK_WORDS = { ...STAGE_WORDS, ...CARD_WORDS, done: "已完成", stopped: "已终止", stopping: "终止中", handoff: "交接中",
   delivered: "已送达", queued: "已排队", draft: "草稿", abandoned: "已放弃" };

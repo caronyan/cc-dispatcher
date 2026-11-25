@@ -275,6 +275,17 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.ok(texts(rendered).includes("做完了"));
   });
 
+  await t.test("status marks use their own icons, which exist, and none borrows the eye that means view", async () => {
+    const { readFile, access } = await import("node:fs/promises");
+    const dir = new URL("../cc-dispatch/mods/cc-dispatch/", import.meta.url);
+    const src = await readFile(new URL("main.js", dir), "utf8");
+    const block = src.slice(src.indexOf("const MARKS = {"), src.indexOf("};", src.indexOf("const MARKS = {")));
+    const icons = [...block.matchAll(/\[\s*"([\w-]+)"\s*,/g)].map((m) => m[1]);
+    assert.ok(icons.length > 10);
+    assert.ok(!icons.includes("eye"), "眼睛图标表示“查看”，状态标记不用它");
+    for (const name of new Set(icons)) await access(new URL(`icons/${name}.svg`, dir));
+  });
+
   await t.test("text cut short in the panel carries its full text as a tooltip", async () => {
     const { readFile } = await import("node:fs/promises");
     const src = await readFile(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
