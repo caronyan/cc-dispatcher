@@ -655,7 +655,7 @@ export default class Dispatch extends View {
           cx.spawn(async () => {
             const text = await loadSummary(files, topic).catch(() => null);
             openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 820, height: 680,
-              props: { role: "timeline", title: `${topic.title} · 摘要`, nodes, text: text ?? "" } });
+              props: { role: "timeline", title: `${topic.title} · 摘要`, nodes, text: text ?? "", programs: this.programs } });
           });
         }).child(icon("file", 13, t.muted)))
       .children(this.topicControlButtons(t, topic))
@@ -708,7 +708,7 @@ export default class Dispatch extends View {
   renderExecutor(t, key) {
     if (!key) return null;
     key = key === "agy" ? "antigravity" : key;
-    const program = this.programs.find((p) => p.key === key) ?? (agents() ?? []).find((a) => a.program?.key === key)?.program;
+    const program = (this.programs ?? blockProps()?.programs ?? []).find((p) => p.key === key) ?? (agents() ?? []).find((a) => a.program?.key === key)?.program;
     const glyph = !program?.icon ? div().text_size(S().label).text_color(t.muted).child(key)
       : program.tint ? svg(program.icon).size(13).flex_none().text_color(t.muted) : image(program.icon).size(13).flex_none();
     return h_flex().flex_none().gap(4).items_center().tooltip(program?.name ?? key).child(glyph);

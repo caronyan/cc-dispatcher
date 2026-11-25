@@ -264,6 +264,17 @@ test("Task abandonment controls and confirmation follow the command contract", a
     panel.controlButtons = stub;
   });
 
+  await t.test("the summary timeline renders in its own dialog, where the panel's program list is absent", () => {
+    const view = new context.TaskView();
+    const topic = buildTopics([], { a: topicRecord({
+      k1: { kind: "dev", title: "实现", run: "dev-x", agent: "codex", started_at: 30, finished_at: 40, summary_done: "做完了" },
+      k2: { kind: "review", title: "审查", agent: "agy", created_at: 5 },
+    }) })[0];
+    const rendered = view.renderTimeline(colors, model.topicTimeline(topic));
+    assert.ok(texts(rendered).includes("k1 · 实现"));
+    assert.ok(texts(rendered).includes("做完了"));
+  });
+
   await t.test("a run's background tasks render inside its Task, beside the helper rows", () => {
     const { topic, task } = groupedTask();
     panel.fold.set("topic-a|k1", false);
