@@ -179,6 +179,92 @@ class TopicDelivery(unittest.TestCase):
         self.assertEqual(self.deliver()["MESSAGE_DELIVERED"], "")
         self.assertEqual(len(self.sent()), 1)
 
+    def test_delivery_in_an_unused_repository_creates_no_dispatch_files(self):
+        unused = self.w.root / "unused"
+        unused.mkdir()
+        output = self.invoke("topic", "deliver", "--repo", unused)
+        self.assertIn("DELIVERED=", output)
+        self.assertEqual(list(unused.iterdir()), [])
+
+    def test_delivery_reports_updates_when_only_a_summary_or_outbox_changed(self):
+        mid = self.send()
+        summary = self.hd.MSG_DIR(self.w.repo) / f"{self.b}.summary.json"
+        summary.unlink()
+        result = self.deliver()
+        self.assertEqual((result["DELIVERED"], result["MESSAGE_DELIVERED"]), ("", ""))
+        self.assertEqual(result.get("UPDATED"), "1")
+        self.assertEqual(json.loads(summary.read_text())["open_in"], 1)
+        self.assertNotIn("UPDATED", self.deliver())
+        with self.hd.topic_lock(self.w.repo, self.a):
+            self.hd.outbox_add(self.w.repo, self.a, [{
+                "op": "withdraw", "to": self.b, "from": {"topic": self.a},
+                "ids": [mid], "text": "", "refs": [], "reason": "archived"}])
+        result = self.deliver()
+        self.assertEqual((result["DELIVERED"], result["MESSAGE_DELIVERED"]), ("", ""))
+        self.assertEqual(result.get("UPDATED"), "1")
+        self.assertIsNotNone(self.item(mid)["withdrawn_at"])
+        self.assertNotIn("UPDATED", self.deliver())
+
+    def test_delivery_reports_a_mailbox_commit_even_when_outbox_cleanup_is_interrupted(self):
+        with self.hd.topic_lock(self.w.repo, self.a):
+            self.hd.outbox_add(self.w.repo, self.a, [{
+                "op": "notice", "to": self.b, "from": {"topic": self.a},
+                "text": "Committed notice", "refs": [], "reason": "follow"}])
+        write = self.hd.write_json
+        outbox = self.hd.MSG_DIR(self.w.repo) / f"{self.a}.outbox.json"
+
+        def interrupt_cleanup(path, data):
+            if path == outbox:
+                raise OSError("interrupted source cleanup")
+            write(path, data)
+
+        with mock.patch.object(self.hd, "write_json", side_effect=interrupt_cleanup):
+            output = self.invoke_delivery()
+        self.assertIn("UPDATED=1", output)
+        self.assertEqual(len(self.hd.load_messages(self.w.repo, self.b)["items"]), 1)
+        self.deliver()
+        self.assertEqual(len(self.hd.load_messages(self.w.repo, self.b)["items"]), 1)
+
+    def test_independent_adopted_run_does_not_block_topic_messages_or_requests(self):
+        run, _ = self.bind(terminal="t1")
+        self.dispatch(run, "t1")
+        result = self.w.hd("handoff", "--run", str(run), "--no-notes", HC_TERMINAL_ID="t1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = self.w.kv(result)["HANDOFF"]
+        result = self.w.hd("adopt", "--run", str(run), "--from", package, HC_TERMINAL_ID="t3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.hd.load_topic(self.w.repo, self.b)["owner"]["terminal"], "t2")
+        item = self.command("backlog-add", "--topic", self.b, "--text", "Plan")["ITEM"]
+        self.command("request", "--topic", self.b, "--items", item,
+                     HC_TERMINAL_ID="t2")
+        mid = self.send()
+        self.w.patch("other", status="idle")
+        self.assertTrue(self.deliver()["DELIVERED"])
+        self.assertEqual(self.deliver()["MESSAGE_DELIVERED"], self.b)
+        self.assertEqual(self.item(mid)["delivered"]["terminal"], "t2")
+
+    def test_independent_adoption_record_allows_delivery_without_call_metadata(self):
+        run, _ = self.bind(terminal="t1")
+        self.hd.write_json(run / "control.json", {
+            "state": "running", "owner": "t3", "adopted": {"from": "t1"}})
+        mid = self.send()
+        self.w.patch("other", status="idle")
+        self.assertEqual(self.deliver()["MESSAGE_DELIVERED"], self.b)
+        self.assertEqual(self.item(mid)["delivered"]["terminal"], "t2")
+
+    def test_collect_and_wait_suppress_message_hints_for_ineligible_run_callers(self):
+        run, _ = self.bind()
+        self.dispatch(run, "t2")
+        self.send()
+        for state, owner, terminal in (("paused", "t2", "t2"), ("handoff", "t2", "t2"),
+                                        ("running", "t3", "t2"), ("running", None, "t1")):
+            self.hd.write_json(run / "control.json", {"state": state, "owner": owner})
+            for command in ("collect", "wait"):
+                with self.subTest(state=state, owner=owner, terminal=terminal, command=command):
+                    result = self.run_command(command, HC_TERMINAL_ID=terminal)
+                    self.assertNotIn("MESSAGE_HINT", self.w.kv(result))
+                    self.assertNotIn("MESSAGES_UNACKED", self.w.kv(result))
+
     def test_sending_and_replying_nudge_idle_owners_before_return(self):
         self.w.patch("other", status="idle")
         mid = self.send()

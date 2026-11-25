@@ -263,6 +263,8 @@ class Messages(unittest.TestCase):
         self.assertRegex(notices[0]["event"], r"^e\d+-[0-9a-f]{4}$")
         self.command("archive", "--topic", self.b, HC_TERMINAL_ID="t2")
         self.assertEqual(len(self.messages(self.a)["items"]), 1)
+        self.assertEqual(self.reply(question, code=3)["FAILURE"], "TOPIC_ARCHIVED")
+        self.command("unarchive", "--topic", self.b, HC_TERMINAL_ID="t2")
         self.assertEqual(self.reply(question, code=3)["STATE"], "dropped")
 
     def test_archiving_a_sender_withdraws_only_its_open_outgoing_questions(self):
@@ -273,6 +275,146 @@ class Messages(unittest.TestCase):
         self.assertEqual((items[0]["id"], self.hd.question_state(items[0])), (first, "withdrawn"))
         self.assertEqual(self.hd.question_state(items[1]), "answered")
         self.assertEqual(self.inbox(self.a)["answers"][0]["id"], answered)
+
+    def test_delayed_archive_withdrawal_preserves_questions_sent_after_unarchive(self):
+        first = self.send()
+        with mock.patch.object(self.hd, "flush_outbox", return_value=0):
+            self.invoke("archive", "--topic", self.a)
+        events = self.hd.read_json(self.path(self.a, ".outbox.json"), {})["events"]
+        self.command("unarchive", "--topic", self.a)
+        with mock.patch.object(self.hd, "nudge"):
+            output = self.invoke("msg", "--topic", self.a, "--to", self.b,
+                                 "--kind", "question", "--text=New question")
+        second = output.strip().split("=", 1)[1]
+        self.hd.flush_outbox(self.w.repo)
+        self.assertEqual([self.hd.question_state(item) for item in self.messages(self.b)["items"]],
+                         ["withdrawn", "open"])
+        self.assertEqual([item["id"] for item in self.messages(self.b)["items"]], [first, second])
+        self.hd.write_json(self.path(self.a, ".outbox.json"), {"events": events})
+        self.hd.flush_outbox(self.w.repo)
+        self.assertEqual(self.hd.question_state(self.messages(self.b)["items"][1]), "open")
+
+    def test_inactive_senders_cannot_create_or_answer_messages(self):
+        question = self.send(source=self.b, target=self.a, HC_TERMINAL_ID="t2")
+        for changes, failure in (({"archived": 1}, "TOPIC_ARCHIVED"),
+                                 ({"archived": None, "deleting": 1}, "TOPIC_DELETING")):
+            self.alter(self.a, **changes)
+            for args in (("--to", self.b, "--kind", "question", "--text=Late"),
+                         ("--reply-to", question, "--text=Late answer")):
+                with self.subTest(changes=changes, args=args):
+                    result = self.command("msg", "--topic", self.a, *args, code=3)
+                    self.assertEqual(result["FAILURE"], failure)
+        self.assertFalse(self.path(self.b).exists())
+        self.assertIsNone(self.messages(self.a)["items"][0]["answer"])
+
+    def test_sender_lifecycle_change_before_recipient_commit_withdraws_inflight_question(self):
+        save = self.hd.save_messages
+        for lifecycle in ("archived", "deleting", "deleted"):
+            with self.subTest(lifecycle=lifecycle):
+                self.alter(self.a, archived=None, deleting=None)
+                changed = False
+
+                def change_sender(repo, topic, mailbox):
+                    nonlocal changed
+                    if topic == self.b and not changed:
+                        changed = True
+                        source = self.hd.read_json(self.topic_path(self.a), {})
+                        if lifecycle == "deleted":
+                            self.topic_path(self.a).unlink()
+                        else:
+                            source[lifecycle] = 1
+                            self.hd.write_json(self.topic_path(self.a), source)
+                    save(repo, topic, mailbox)
+
+                source = self.hd.read_json(self.topic_path(self.a), {})
+                with mock.patch.object(self.hd, "save_messages", side_effect=change_sender), \
+                        mock.patch.object(self.hd, "nudge"):
+                    self.invoke("msg", "--topic", self.a, "--to", self.b,
+                                "--kind", "question", "--text=In flight")
+                self.assertEqual(self.hd.question_state(self.messages(self.b)["items"][-1]),
+                                 "withdrawn")
+                if lifecycle == "deleted":
+                    self.hd.write_json(self.topic_path(self.a), source)
+
+    def test_users_acknowledge_answers_to_questions_in_their_own_topic(self):
+        mid = self.command("msg", "--as-user", "--topic", self.a, "--kind", "question",
+                           "--text=User question", HC_TERMINAL_ID="")["MESSAGE"]
+        self.command("msg", "--topic", self.a, "--reply-to", mid, "--text=Answer")
+        self.command("msg-ack", "--topic", self.a, "--ids", mid)
+        item = self.messages(self.a)["items"][0]
+        self.assertIsNotNone(item["acked_at"])
+        self.assertIsNone(item["answer"]["acked_at"])
+        self.command("msg-ack", "--as-user", "--topic", self.a, "--ids", mid, HC_TERMINAL_ID="")
+        self.assertIsNotNone(self.messages(self.a)["items"][0]["answer"]["acked_at"])
+        version = self.messages(self.a)["version"]
+        self.command("msg-ack", "--as-user", "--topic", self.a, "--ids", mid, HC_TERMINAL_ID="")
+        self.assertEqual(self.messages(self.a)["version"], version)
+
+    def test_peers_prioritize_task_completion_over_retirement_and_run_completion(self):
+        task = self.bind(self.b, self.w.run_dir, "t2")
+        self.hd.write_json(self.w.run_dir / "state.json", {"finished": 1})
+        for changes, expected in (({}, "stopped"), ({"finished_at": 1}, "done"),
+                                  ({"abandoned_at": 1}, "abandoned")):
+            with self.subTest(expected=expected):
+                data = self.hd.load_topic(self.w.repo, self.b)
+                data["tasks"][task].update(changes)
+                self.hd.save_topic(self.w.repo, self.b, data)
+                self.hd.write_json(self.w.run_dir / "control.json",
+                                   {"state": "running", "retired": {"at": 1}})
+                self.assertIn(f"  {task}\tdev\t{expected}\t", self.raw("peers").stdout)
+                self.assertEqual(self.hd.depends_state(self.w.repo, self.a,
+                                                      f"{self.b}:{task}")["state"], expected)
+
+    def test_archive_cleanup_recovers_after_the_archive_commit(self):
+        outgoing = self.send()
+        incoming = self.send(source=self.b, target=self.a, HC_TERMINAL_ID="t2")
+        with mock.patch.object(self.hd, "close_topic_messages", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("archive", "--topic", self.a)
+        self.assertIsNotNone(self.hd.load_topic(self.w.repo, self.a)["archived"])
+        self.command("deliver")
+        self.assertEqual(self.hd.question_state(self.messages(self.b)["items"][0]), "withdrawn")
+        self.assertEqual(self.messages(self.b)["items"][0]["id"], outgoing)
+        own = next(item for item in self.messages(self.a)["items"] if item["id"] == incoming)
+        self.assertEqual(self.hd.question_state(own), "dropped")
+        self.command("deliver")
+        self.assertEqual(len(self.messages(self.b)["items"]), 2)
+
+    def test_reopening_a_run_finishes_archive_cleanup_before_new_questions_are_sent(self):
+        self.bind(self.a, self.w.run_dir, "t1")
+        self.command("finish", "--run", self.w.run_dir, "--line", "Done")
+        first = self.send()
+        with mock.patch.object(self.hd, "close_topic_messages", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("archive", "--topic", self.a)
+        self.hd.activate_run(self.w.run_dir)
+        with mock.patch.object(self.hd, "nudge"):
+            self.invoke("msg", "--topic", self.a, "--to", self.b,
+                        "--kind", "question", "--text=After reopening")
+        self.command("deliver")
+        self.assertEqual(self.messages(self.b)["items"][0]["id"], first)
+        self.assertEqual([self.hd.question_state(item) for item in self.messages(self.b)["items"]],
+                         ["withdrawn", "open"])
+
+    def test_run_identity_cannot_borrow_another_runs_adopted_owner(self):
+        self.bind(self.b, self.w.run_dir, "t2")
+        self.hd.write_json(self.w.run_dir / "control.json", {"state": "running", "owner": "t1"})
+        other = self.w.run_dir.parent / "dev-unowned"
+        other.mkdir()
+        self.bind(self.b, other, "t2")
+        self.hd.write_json(other / "control.json", {"state": "running", "owner": "t2"})
+        self.assertEqual(self.command("inbox", "--run", other, code=3)["FAILURE"], "NOT_OWNER")
+        self.assertEqual(self.command("msg", "--run", other, "--to", self.a, "--text=Forged",
+                                      code=3)["FAILURE"], "NOT_OWNER")
+
+    def test_dispatched_run_terminal_can_message_without_an_explicit_control_owner(self):
+        task = self.bind(self.b, self.w.run_dir, "t2")
+        self.w.dispatch()
+        result = self.command("msg", "--run", self.w.run_dir, "--to", self.a, "--text=From run")
+        item = next(item for item in self.messages(self.a)["items"] if item["id"] == result["MESSAGE"])
+        self.assertEqual((item["from"]["run"], item["from"]["task"]), (self.w.run_dir.name, task))
+        self.hd.write_json(self.w.run_dir / "control.json", {"state": "running", "owner": "t2"})
+        self.assertEqual(self.command("inbox", "--run", self.w.run_dir, code=3)["FAILURE"], "NOT_OWNER")
 
     def test_deleted_topics_keep_history_and_answers_can_still_be_acknowledged(self):
         mid = self.send()
@@ -313,6 +455,18 @@ class Messages(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["event"], event["id"])
         self.assertEqual(json.loads(self.path(self.a, ".outbox.json").read_text()), {"events": []})
+
+    def test_outbox_notice_text_explains_its_follow_and_dependency_reasons(self):
+        reasons = (("follow", "\u5173\u6ce8"), ("depends", "\u4f9d\u8d56"),
+                   ("depends,follow", "\u5173\u6ce8 + \u4f9d\u8d56"))
+        with self.hd.topic_lock(self.w.repo, self.a):
+            self.hd.outbox_add(self.w.repo, self.a, [
+                {"op": "notice", "to": self.b, "from": {"topic": self.a},
+                 "text": "Historical notice", "refs": [], "reason": reason}
+                for reason, _ in reasons])
+        self.hd.flush_outbox(self.w.repo)
+        for item, (_, label) in zip(self.messages(self.b)["items"], reasons):
+            self.assertIn("\u901a\u77e5\u539f\u56e0\uff1a" + label, item["text"])
 
     def test_outbox_retries_after_destination_commit_but_before_source_cleanup(self):
         with self.hd.topic_lock(self.w.repo, self.a):

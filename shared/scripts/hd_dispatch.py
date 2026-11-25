@@ -328,6 +328,9 @@ def activate_run(run: Path):
         task = data.get("tasks", {}).get(state.get("task")) or {}
         if state.get("topic") != topic or task.get("run") != run.name:
             fail("task belongs to another run", failure="TASK_TAKEN", code=3)
+        if data.get("messages_pending"):
+            close_topic_messages(repo, topic, data)
+            data.pop("messages_pending", None)
         data["archived"] = None
         task["finished_at"] = None
         task["end_event"] = None
@@ -2199,10 +2202,12 @@ def topic_ids(value):
     return list(dict.fromkeys(x.strip() for x in value.split(",") if x.strip()))
 
 
-def parse_ref(src_topic, ref):
+def parse_ref(src_topic, ref, strict=True):
     if not isinstance(ref, str) or not re.fullmatch(
             r"(?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)?k[1-9][0-9]*", ref):
-        fail(f"invalid dependency: {ref}", failure="DEPENDS_INVALID", code=3)
+        if strict:
+            fail(f"invalid dependency: {ref}", failure="DEPENDS_INVALID", code=3)
+        return None
     return tuple(ref.split(":", 1)) if ":" in ref else (src_topic, ref)
 
 
@@ -2213,22 +2218,37 @@ def dependency_snapshot(repo, topic, snapshots):
 
 
 def dependency_cycle(repo, topic, tid, snapshots, path):
-    ref = f"{topic}:{tid}"
-    if ref in path:
-        return path[path.index(ref):] + [ref]
-    task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
-    if task is None:
+    path = list(path)
+    active = {ref: i for i, ref in enumerate(path)}
+    complete = set()
+
+    def visit(topic, tid):
+        ref = f"{topic}:{tid}"
+        if ref in active:
+            return path[active[ref]:] + [ref]
+        if ref in complete:
+            return []
+        task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
+        active[ref] = len(path)
+        path.append(ref)
+        for dep in (task or {}).get("depends_on", []):
+            target = parse_ref(topic, dep, strict=False)
+            cycle = visit(*target) if target else []
+            if cycle:
+                return cycle
+        path.pop()
+        del active[ref]
+        complete.add(ref)
         return []
-    for dep in task.get("depends_on", []):
-        target, task_id = parse_ref(topic, dep)
-        cycle = dependency_cycle(repo, target, task_id, snapshots, path + [ref])
-        if cycle:
-            return cycle
-    return []
+
+    return visit(topic, tid)
 
 
 def depends_state(repo, src_topic, ref, _seen=None):
-    topic, tid = parse_ref(src_topic, ref)
+    target = parse_ref(src_topic, ref, strict=False)
+    if target is None:
+        return {"state": "missing", "topic": src_topic, "task": ref, "title": "", "path": []}
+    topic, tid = target
     snapshots = {}
     task = dependency_snapshot(repo, topic, snapshots).get("tasks", {}).get(tid)
     result = {"state": "missing", "topic": topic, "task": tid,
@@ -2585,6 +2605,16 @@ def topic_binding_snapshot(repo, run):
     return None
 
 
+def run_message_controller(run, c=None):
+    c = c if c is not None else control(run)
+    if c.get("owner"):
+        return c["owner"]
+    metas = [load(run, name) for name in calls(run)]
+    newest = max(metas, key=lambda m: max((m.get("adopted") or {}).get("at") or 0,
+                                        m.get("started_at") or 0), default={})
+    return newest.get("parent")
+
+
 def caller(args, repo):
     run = getattr(args, "run", None)
     task = None
@@ -2607,11 +2637,13 @@ def caller(args, repo):
         fail(f"topic not found: {topic}", failure="TOPIC_NOT_FOUND", code=3)
     if terminal and terminal != (data.get("owner") or {}).get("terminal"):
         owned = False
-        for item in data.get("tasks", {}).values():
+        candidates = ([data.get("tasks", {}).get(task, {})] if run
+                      else data.get("tasks", {}).values())
+        for item in candidates:
             if not item.get("run"):
                 continue
             folder = Path(repo) / ".cc-dispatch" / item["run"]
-            if not topic_task_done(item, folder) and control(folder).get("owner") == terminal:
+            if not topic_task_done(item, folder) and run_message_controller(folder) == terminal:
                 owned = True
                 break
         if not owned:
@@ -2668,10 +2700,12 @@ def recompute_summary(repo, topic):
     return summary
 
 
-def ensure_message_summary(repo, topic):
+def ensure_message_summary(repo, topic, updates=None):
     summary = read_json(MSG_DIR(repo) / f"{topic}.summary.json", {})
     if summary.get("version") != load_messages(repo, topic)["version"]:
-        return recompute_summary(repo, topic)
+        summary = recompute_summary(repo, topic)
+        if updates is not None:
+            updates.add(topic)
     return summary
 
 
@@ -2715,11 +2749,13 @@ def outbox_add(repo, S, events):
         event = dict(event)
         event.setdefault("id", message_id("e"))
         event.setdefault("at", time.time())
-        data["events"].append(event)
+        if not any((queued["id"], queued["to"]) == (event["id"], event["to"])
+                   for queued in data["events"]):
+            data["events"].append(event)
     write_json(path, data)
 
 
-def flush_outbox(repo, only=None):
+def flush_outbox(repo, only=None, updates=None):
     """Copy one event at a time without holding the source and destination locks together."""
     paths = ([MSG_DIR(repo) / f"{only}.outbox.json"] if only is not None
              else sorted(MSG_DIR(repo).glob("*.outbox.json")))
@@ -2738,26 +2774,38 @@ def flush_outbox(repo, only=None):
                     data = load_messages(repo, target)
                     topic = read_json(topic_dir(repo, target) / "topic.json", {})
                     if event["op"] == "withdraw":
+                        selected = set(event.get("ids", []))
                         for item in data["items"]:
                             if (item["kind"] == "question" and
                                     (item.get("from") or {}).get("topic") == source
+                                    and (item["id"] in selected if "ids" in event
+                                         else item["at"] <= event["at"])
                                     and question_state(item) == "open"):
                                 item["withdrawn_at"] = event["at"]
                                 changed = True
                     elif (topic and topic.get("archived") is None and topic.get("deleting") is None
                           and not any(item.get("event") == event["id"] for item in data["items"])):
+                        reasons = set(event.get("reason", "").split(","))
+                        label = " + ".join(label for key, label in (("follow", "关注"), ("depends", "依赖"))
+                                           if key in reasons)
+                        text = event["text"] + (f"\n通知原因：{label}" if label else "")
                         data["items"].append(new_message(
-                            target, event["from"], "notice", event["text"], event.get("refs", []),
+                            target, event["from"], "notice", text, event.get("refs", []),
                             event=event["id"], at=event["at"]))
                         changed = True
                     if changed:
                         save_messages(repo, target, data)
+                        if updates is not None:
+                            updates.add(target)
                     else:
-                        ensure_message_summary(repo, target)
+                        ensure_message_summary(repo, target, updates)
                 with topic_lock(repo, source):
                     queued = read_json(path, {"events": []})
-                    queued["events"] = [e for e in queued["events"] if e["id"] != event["id"]]
+                    queued["events"] = [e for e in queued["events"]
+                                        if (e["id"], e["to"]) != (event["id"], event["to"])]
                     write_json(path, queued)
+                    if updates is not None:
+                        updates.add(source)
                 delivered += int(changed)
             except OSError:
                 # Leave the stable event id queued so the next flush can complete it safely.
@@ -2788,13 +2836,17 @@ def cmd_topic_peers(a):
               f"{'online' if online else 'offline'}\t{state}\t{followed}")
         for tid, task in data.get("tasks", {}).items():
             run = Path(repo) / ".cc-dispatch" / task["run"] if task.get("run") else None
+            c = control(run) if run else {}
             if task.get("abandoned_at") is not None:
                 status = "abandoned"
-            elif task.get("finished_at") is not None or (
-                    run and read_json(run / "state.json", {}).get("finished") is not None):
+            elif task.get("finished_at") is not None:
+                status = "done"
+            elif c.get("state") == "stopped" or c.get("retired"):
+                status = "stopped"
+            elif run and read_json(run / "state.json", {}).get("finished") is not None:
                 status = "done"
             elif run:
-                status = "stopped" if control(run).get("retired") else control(run)["state"]
+                status = c["state"]
             else:
                 status = "draft"
             fields = (tid, task.get("kind"), status, task.get("title"),
@@ -2843,6 +2895,11 @@ def require_open_question(item):
 def cmd_topic_msg(a):
     repo = topic_repo(a)
     identity = caller(a, repo)
+    with topic_lock(repo, identity["topic"]):
+        source = load_topic(repo, identity["topic"])
+        for field, failure in (("deleting", "TOPIC_DELETING"), ("archived", "TOPIC_ARCHIVED")):
+            if source.get(field) is not None:
+                fail(f"topic {identity['topic']}: {field}", failure=failure, code=3)
     message_text(a.text)
     sender = message_sender(repo, identity)
     if a.reply_to:
@@ -2880,6 +2937,14 @@ def cmd_topic_msg(a):
         item = new_message(target, sender, a.kind, a.text, a.ref)
         data["items"].append(item)
         save_messages(repo, target, data)
+    if not identity["user"] and item["kind"] == "question":
+        with topic_lock(repo, identity["topic"]):
+            source = read_json(topic_dir(repo, identity["topic"]) / "topic.json", {})
+            if not source or any(source.get(key) is not None for key in ("archived", "deleting")):
+                outbox_add(repo, identity["topic"], [{
+                    "op": "withdraw", "to": target, "from": sender, "ids": [item["id"]],
+                    "text": "", "refs": [], "reason": "archived"}])
+        flush_outbox(repo, only=identity["topic"])
     out(message=item["id"])
     nudge(repo)
 
@@ -2912,7 +2977,18 @@ def topic_deliverable(repo, T):
         run = Path(repo) / ".cc-dispatch" / task["run"]
         if not topic_task_done(task, run):
             c = control(run)
-            if c["state"] == "handoff" or (c.get("owner") and c["owner"] != terminal):
+            if c["state"] == "handoff":
+                return False, terminal
+            if not c.get("owner") or c["owner"] == terminal:
+                continue
+            run_calls = calls(run)
+            related = {(c.get("adopted") or {}).get("from")}
+            for name in run_calls:
+                meta = load(run, name)
+                related.update((meta.get("parent"), (meta.get("adopted") or {}).get("from")))
+                related.update(main.get("terminal") for main in meta.get("mains") or [])
+            related.discard(None)
+            if terminal in related or not related:
                 return False, terminal
     return bool(terminal), terminal
 
@@ -3009,9 +3085,16 @@ def wait_messages(run):
 
 
 def messages_check(run):
+    c = control(run)
+    if c["state"] != "running" or not_mine(c):
+        return
     repo = repo_of_run(run)
     bound = topic_binding_snapshot(repo, run)
     if not bound:
+        return
+    owner = (read_json(topic_dir(repo, bound[0]) / "topic.json", {}).get("owner") or {}).get("terminal")
+    terminal = os.environ.get("HC_TERMINAL_ID")
+    if not terminal or terminal != (run_message_controller(run, c) or owner):
         return
     ids = []
     for _, item, slot in topic_message_entries(repo, bound[0]):
@@ -3113,10 +3196,10 @@ def cmd_topic_msg_ack(a):
         with topic_lock(repo, topic):
             data = load_messages(repo, topic)
             item = next(item for item in data["items"] if item["id"] == mid)
-            if topic == identity["topic"]:
-                record = item
-            elif sent_by(item, identity) and item.get("answer") is not None:
+            if sent_by(item, identity) and item.get("answer") is not None:
                 record = item["answer"]
+            elif topic == identity["topic"]:
+                record = item
             else:
                 fail("cannot acknowledge another topic's message", failure="NOT_OWNER", code=3)
             if record.get("acked_at") is None:
@@ -3150,10 +3233,12 @@ def close_topic_messages(repo, topic, data):
         if path.stem == topic:
             continue
         items = read_json(path, {"items": []})["items"]
-        if any(item["kind"] == "question" and (item.get("from") or {}).get("topic") == topic
-               and question_state(item) == "open" for item in items):
+        selected = [item["id"] for item in items if item["kind"] == "question"
+                    and (item.get("from") or {}).get("topic") == topic
+                    and question_state(item) == "open"]
+        if selected:
             events.append({"op": "withdraw", "to": path.stem, "from": sender,
-                           "text": "", "refs": [], "reason": "archived"})
+                           "ids": selected, "text": "", "refs": [], "reason": "archived"})
     outbox_add(repo, topic, events)
     if changed:
         save_messages(repo, topic, mailbox)
@@ -3193,18 +3278,29 @@ def queue_task_notices(repo, topic, data, tid, kind, reason=None):
         if kind != "deleted" and topic in other.get("follows", []):
             reasons.append("follow")
         if reasons:
-            events.append({"op": "notice", "to": target, "from": sender, "text": text,
-                           "refs": refs, "reason": "deleted" if kind == "deleted" else ",".join(reasons)})
+            event = {"op": "notice", "to": target, "from": sender, "text": text, "refs": refs,
+                     "reason": "deleted" if kind == "deleted" else ",".join(reasons)}
+            marker = task.get("end_event") or {}
+            if kind != "deleted" and marker.get("id"):
+                event.update(id=marker["id"], at=marker["at"])
+            events.append(event)
     outbox_add(repo, topic, events)
 
 
 def task_end_event(repo, topic, data, tid, kind, reason=None):
     task = data["tasks"][tid]
-    if task.get("end_event") is not None:
-        return False
-    task["end_event"] = {"kind": kind, "at": time.time()}
-    queue_task_notices(repo, topic, data, tid, kind, reason)
-    return True
+    created = task.get("end_event") is None
+    if created:
+        task["end_event"] = {"id": message_id("e"), "kind": kind, "at": time.time(),
+                             "reason": reason, "pending": True}
+    marker = task["end_event"]
+    if marker.get("pending"):
+        # Commit the Task and stable event id before publishing cross-Topic effects.
+        save_topic(repo, topic, data)
+        queue_task_notices(repo, topic, data, tid, marker["kind"], marker.get("reason"))
+        marker.pop("pending")
+        save_topic(repo, topic, data)
+    return created
 
 
 def record_run_end(run, kind, reason):
@@ -3469,12 +3565,15 @@ def cmd_topic_archive(a):
         backlog = load_backlog(repo, a.topic)
         clear_topic_requests(data, backlog)
         data["archived"] = time.time()
+        data["messages_pending"] = True
         for run in runs:
             if run.is_dir():
                 (run / "archived").write_text(f"{data['archived']}\n")
         save_topic(repo, a.topic, data)
         save_backlog(repo, a.topic, backlog)
         close_topic_messages(repo, a.topic, data)
+        data.pop("messages_pending", None)
+        save_topic(repo, a.topic, data)
     flush_outbox(repo, only=a.topic)
     out(archived=a.topic)
 
@@ -3483,6 +3582,9 @@ def cmd_topic_unarchive(a):
     repo = topic_repo(a)
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
+        if data.get("messages_pending"):
+            close_topic_messages(repo, a.topic, data)
+            data.pop("messages_pending", None)
         data["archived"] = None
         for run in topic_runs(repo, data):
             (run / "archived").unlink(missing_ok=True)
@@ -3647,19 +3749,36 @@ def deliver_topic_messages(repo, topic, owners):
     return (info.get("address") or terminal) if sent else None
 
 
-def deliver_topics(repo, waiting=None, report=True):
+def deliver_topics(repo, waiting=None, report=True, updates=None):
     root = Path(repo) / ".cc-dispatch" / "topics"
-    root.mkdir(parents=True, exist_ok=True)
     delivered, message_delivered, messages, owners = [], [], [], set()
+    if not root.is_dir():
+        return delivered, message_delivered, messages
     with (root / ".deliver.lock").open("a") as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return delivered, message_delivered, messages
-        flush_outbox(repo)
+        for path in sorted(root.glob("*/topic.json")):
+            tid = path.parent.name
+            with topic_lock(repo, tid):
+                data = read_json(path, {})
+                if data.get("messages_pending"):
+                    close_topic_messages(repo, tid, data)
+                    data.pop("messages_pending", None)
+                    save_topic(repo, tid, data)
+                    if updates is not None:
+                        updates.add(tid)
+                for task_id, task in data.get("tasks", {}).items():
+                    marker = task.get("end_event") or {}
+                    if marker.get("pending"):
+                        task_end_event(repo, tid, data, task_id, marker["kind"], marker.get("reason"))
+                        if updates is not None:
+                            updates.add(tid)
+        flush_outbox(repo, updates=updates)
         for path in message_files(repo):
             with topic_lock(repo, path.stem):
-                ensure_message_summary(repo, path.stem)
+                ensure_message_summary(repo, path.stem, updates)
         if waiting is not None:
             messages = wait_messages(waiting)
             if messages:
@@ -3725,8 +3844,11 @@ def deliver_topics(repo, waiting=None, report=True):
 
 
 def cmd_topic_deliver(a):
-    delivered, messages, _ = deliver_topics(topic_repo(a))
+    updates = set()
+    delivered, messages, _ = deliver_topics(topic_repo(a), updates=updates)
     out(delivered=",".join(delivered), message_delivered=",".join(messages))
+    if updates and not delivered and not messages:
+        out(updated=1)
 
 
 def cmd_topic(a):

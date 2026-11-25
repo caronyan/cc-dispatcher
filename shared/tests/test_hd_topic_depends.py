@@ -134,6 +134,131 @@ class TopicDepends(unittest.TestCase):
                          [f"{self.b}:{self.kb}", f"{self.a}:{self.ka}", f"{self.b}:{self.kb}"])
         self.assertEqual(self.data(self.b)["tasks"][self.kb]["depends_on"], [])
 
+    def test_shared_ancestor_graph_is_visited_linearly(self):
+        count = 200
+        data = self.data(self.a)
+        data["tasks"] = {
+            f"k{i}": {"depends_on": [f"k{j}" for j in range(max(1, i - 2), i)]}
+            for i in range(1, count + 1)}
+        snapshot = self.hd.dependency_snapshot
+        visits = 0
+
+        def bounded_snapshot(*args):
+            nonlocal visits
+            visits += 1
+            self.assertLessEqual(visits, count * 3, "shared ancestors were traversed repeatedly")
+            return snapshot(*args)
+
+        with mock.patch.object(self.hd, "dependency_snapshot", side_effect=bounded_snapshot):
+            self.assertEqual(self.hd.dependency_cycle(
+                self.w.repo, self.a, f"k{count}", {self.a: data}, []), [])
+        self.assertLessEqual(visits, count * 3)
+        data["tasks"]["k1"]["depends_on"] = [f"k{count}"]
+        cycle = self.hd.dependency_cycle(self.w.repo, self.a, f"k{count}", {self.a: data}, [])
+        self.assertEqual(cycle[0], cycle[-1])
+        self.assertIn(f"{self.a}:k1", cycle)
+
+    def test_readonly_dependency_checks_treat_invalid_historical_references_as_missing(self):
+        self.request()
+        self.set_task(self.a, self.ka, depends_on=["broken:k0", None, 12])
+        for ref in ("broken:k0", None, 12):
+            with self.subTest(ref=ref), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.hd.depends_state(self.w.repo, self.a, ref)["state"], "missing")
+                self.assertEqual(output.getvalue(), "")
+        self.assertEqual(self.hd.dependency_cycle(self.w.repo, self.a, self.ka, {}, []), [])
+        self.w.patch("parent", status="idle", screen="\u276f ")
+        self.assertTrue(self.command("deliver")["DELIVERED"])
+        self.assertEqual(self.depend(refs="broken:k0", code=3)["FAILURE"], "DEPENDS_INVALID")
+
+    def test_task_state_is_committed_before_any_end_notice_is_queued(self):
+        self.depend()
+        self.start()
+        save = self.hd.save_topic
+
+        def interrupt_commit(repo, topic, data):
+            if topic == self.b:
+                raise KeyboardInterrupt
+            save(repo, topic, data)
+
+        with mock.patch.object(self.hd, "save_topic", side_effect=interrupt_commit):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("topic", "finish", "--run", self.w.run_dir, "--line", "Durable")
+        self.assertIsNone(self.data(self.b)["tasks"][self.kb]["finished_at"])
+        self.assertEqual(self.events(), [])
+        self.hd.flush_outbox(self.w.repo)
+        self.assertEqual(self.messages(), [])
+        self.finish()
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_pending_end_notices_recover_from_the_committed_task_with_the_same_event_id(self):
+        self.depend()
+        self.start()
+        with mock.patch.object(self.hd, "queue_task_notices", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("topic", "finish", "--run", self.w.run_dir, "--line", "Committed")
+        task = self.data(self.b)["tasks"][self.kb]
+        self.assertIsNotNone(task["finished_at"])
+        marker = task["end_event"]
+        self.assertRegex(marker["id"], r"^e\d+-[0-9a-f]{4}$")
+        self.command("deliver")
+        self.assertEqual([item["event"] for item in self.messages()], [marker["id"]])
+        self.finish()
+        self.assertEqual([item["event"] for item in self.messages()], [marker["id"]])
+
+    def test_end_notice_retry_after_queue_commit_deduplicates_all_recipients(self):
+        self.depend()
+        follower = self.command("init", "--title", "Follower", HC_TERMINAL_ID="")["TOPIC"]
+        self.command("follow", "--topic", follower, "--target", self.b, HC_TERMINAL_ID="")
+        self.start()
+        queued = self.hd.queue_task_notices
+
+        def interrupt_after_queue(*args, **kwargs):
+            queued(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(self.hd, "queue_task_notices", side_effect=interrupt_after_queue):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("topic", "finish", "--run", self.w.run_dir, "--line", "Committed")
+        self.hd.flush_outbox(self.w.repo)
+        ids = {target: self.messages(target)[0]["event"] for target in (self.a, follower)}
+        self.finish()
+        for target in (self.a, follower):
+            self.assertEqual([item["event"] for item in self.messages(target)], [ids[target]])
+
+    def test_abandon_and_stop_persist_their_end_state_before_queueing_notices(self):
+        self.depend()
+        self.start()
+        with mock.patch.object(self.hd, "queue_task_notices", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke("topic", "abandon", "--repo", self.w.repo, "--topic", self.b,
+                            "--task", self.kb, "--reason", "Removed", HC_TERMINAL_ID="t2")
+        task = self.data(self.b)["tasks"][self.kb]
+        self.assertIsNotNone(task.get("abandoned_at"))
+        self.assertEqual(task["end_event"]["kind"], "abandoned")
+        self.command("deliver")
+        self.assertEqual(len(self.messages()), 1)
+        run = self.new_run("dev-stopped")
+        tid = self.task(self.b, "Stop producer")
+        self.depend(refs=f"{self.b}:{tid}")
+        self.start(self.b, tid, run)
+        with mock.patch.object(self.hd, "queue_task_notices", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.hd.record_run_end(run, "stopped", "Stopped")
+        self.assertEqual(self.data(self.b)["tasks"][tid]["end_event"]["kind"], "stopped")
+        self.command("deliver")
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_notice_text_explains_follow_and_dependency_reasons(self):
+        self.depend()
+        self.command("follow", "--topic", self.a, "--target", self.b)
+        follower = self.command("init", "--title", "Follower", HC_TERMINAL_ID="")["TOPIC"]
+        self.command("follow", "--topic", follower, "--target", self.b, HC_TERMINAL_ID="")
+        self.start()
+        self.finish()
+        self.assertIn("\u5173\u6ce8 + \u4f9d\u8d56", self.messages()[0]["text"])
+        self.assertIn("\u5173\u6ce8", self.messages(follower)[0]["text"])
+        self.assertNotIn("\u4f9d\u8d56", self.messages(follower)[0]["text"])
+
     def test_refinement_validates_all_drafts_together_without_partial_writes(self):
         item = self.command("backlog-add", "--topic", self.a, "--text", "Plan")["ITEM"]
         rid = self.command("request", "--topic", self.a, "--items", item)["REQUEST"]
