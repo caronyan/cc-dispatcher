@@ -1,6 +1,6 @@
 # Herdr + cc-dispatch
 
-Herdr 默认窗口的标签栏有“派发”按钮，工作区旁有 cc-dispatch 面板。Herdr 原生 Agents 栏显示子 agent 的存活、状态和父子关系；面板按 **Topic → Task → 运行明细** 展示目标、草稿、派发请求、结论，以及运行内的子 agent、轮次、回报和历史。Topic 对应一个问题或目标，Task 对应一次 skill 工作；dev 的 T1、T2 等内部任务卡在该 Task 的运行明细中展示。
+Herdr 默认窗口的标签栏有 Dispatch 按钮，工作区旁有 cc-dispatch 面板。Herdr 原生 Agents 栏显示子 agent 的存活、状态和父子关系；面板按 **Topic → Task → 运行明细** 展示目标、草稿、派发请求、结论，以及运行内的子 agent、轮次、回报和历史。Topic 对应一个问题或目标，Task 对应一次 skill 工作；dev 的 T1、T2 等内部任务卡在该 Task 的运行明细中展示。
 
 ![Herdr + cc-dispatch](preview.png)
 
@@ -9,18 +9,18 @@ Herdr 默认窗口的标签栏有“派发”按钮，工作区旁有 cc-dispatc
 沿用 Herdr 的 `main` layout，增加标签栏按钮与右侧面板：
 
 - **Sidebar**：268px，保留 Spaces、Agents 和 footer，子 agent 嵌套在启动它的主 agent 下。
-- **Work column**：标签栏的 `tabs` 占剩余宽度，旁边是 136px 的 `cc-dispatch-toggle`。按钮用 14px 图标、“派发”与在线子 agent 计数，面板显示时用 `selected`。
-- **cc-dispatch panel**：411px，最小 300px、最大 720px。42px 标题栏显示“派发”、新建 Topic、刷新与关闭；刷新时显示转圈。中间只滚动 Topic 列表，底部显示 Topic、进行中 Task、在线子 agent 和待决项数量，读取错误用 `ansi3`。
-- **Topic 卡片**：标题、负责人、状态、汇总统计和折叠按钮。打开后先显示结论摘要，再列 Task 与 backlog；暂停、继续、终止、归档和删除作用于整个 Topic。归档的 Topic 放在列表底部，可显示并取消归档。历史运行包成只有一个 Task 的隐式 Topic，操作落到原运行。
-- **Task 分组**：固定顺序“等你 / 进行中 / 待分发 / 已完成”，空组省略。每个 Task 显示标题、kind、说明、依赖、请求状态和结论；展开后可打开产物和运行明细。未绑定的草稿可编辑或删除，已绑定的 Task 保留运行记录。请求显示排队或已送达，可撤销、重发或改派，提交前显示目标主 agent 或新标签页与首条消息。
-- **Backlog**：新增、编辑或删除待细化条目，选择一批请求主 agent 细化。细化只建草稿，完成后由用户选择 Task 派发。条目显示未细化、细化中或已细化及关联 task_ids。
+- **Work column**：标签栏的 `tabs` 占剩余宽度，旁边是 136px 的 `cc-dispatch-toggle`。按钮用 14px 图标、Dispatch 与在线子 agent 计数，面板显示时用 `selected`。
+- **cc-dispatch panel**：411px，最小 300px、最大 720px。42px 标题栏显示 Dispatch、新建 Topic、刷新与关闭；刷新时显示转圈。中间只滚动 Topic 列表，底部显示 Topic、进行中 Task、在线子 agent 和待决项数量，读取错误用 `ansi3`。
+- **Topic 卡片**：标题、负责人、状态、汇总统计和折叠按钮；标题栏的文档图标打开 Topic 摘要。统计区显示 Tasks x/y、每个 Task 的卡片进度条，以及全 Topic 的卡片进度条与 x/y。展开后列 Task 与 backlog；暂停、继续、终止、归档和删除作用于整个 Topic。归档的 Topic 放在列表底部，可显示并取消归档。历史运行包成只有一个 Task 的隐式 Topic，操作落到原运行。
+- **Task 行**：不分组，每个 Task 一行：kind、执行者 agent 图标、标题，标题后用图标表示状态。展开后显示说明、依赖、请求状态和结论；展开后可打开产物和运行明细。未绑定的草稿可编辑或删除，已绑定的 Task 保留运行记录。请求显示排队或已送达，可撤销、重发或改派；派发时选择目标主 agent 或新标签页。新建和编辑 Task 时，选中的 kind 下方显示它的作用、能做的事、限制和说明里该写什么。
+- **Backlog**：新增、编辑或删除待细化条目，逐条请求主 agent 细化。细化只建草稿，完成后由用户选择 Task 派发。条目显示未细化、细化中或已细化及关联 task_ids。
 - **Topic 控制**：操作前确认影响的 Task。暂停记下本次挂起的运行，阻止投递、启动与激活；继续只恢复这一批，保留之前单独暂停的运行；终止撤销未确认请求、保留草稿，并在后台逐个终止未结束的运行，运行明细可读各自的 `stop.md`。
 - **归档与删除**：归档要求所有已绑定 Task 完成或其运行已终止，且各运行没有未回答待决项，草稿不挡归档。归档撤销未确认请求并同步运行的 `archived` 标记。删除确认框列出全部下属运行、要删的记录与保留的 worktree、分支和 agent 会话日志；脚本整体预检通过才开始删除，失败显示原因，中途失败可重跑。
 
 Task 的运行明细保留以下信息和操作：
 
 - 主 agent 的额度、交接包、复制交接或接手提示、暂停或终止状态与 `stop.md`；后台任务显示 shell、monitor 或 agent 类型、耗时和输出摘要，可展开实时日志。Topic 合并下属运行的统计，耗时取时段并集，后台任务按 session 与 task.id 去重。
-- 运行内的 dev 卡片进度，分开计数已合并、验收中、进行中、排队中与已搁置；没有子 agent 的卡片显示依赖或备注。子 agent 按状态分组，每行显示调用名、中文标题、模式、effort、轮次与失败信息，已结束终端仍保留历史。
+- 运行内的 dev 卡片进度，分开计数已合并、验收中、进行中、排队中与已搁置；没有子 agent 的卡片显示依赖或备注。子 agent 每行显示调用名、中文标题、模式、effort、轮次与失败信息，已结束终端仍保留历史。
 - 子 agent 状态文案用中文：等你、失败、等网络、重试中、已暂停、进行中、回报不合格、待收回报、待验收、验收中、回报合格、已合并、已完成、已搁置、已结束。断网恢复和服务端重试由脚本处理。
 - 行内按钮为“结果”“任务”“查看”“清理”“询问”或“请求验收”“移交…”。结果和子 agent 任务文件用有大纲的文档视图，支持“排版 / 原文”；查看跳到所属主 agent 的标签页并 peek 子 agent。清理与移交先确认，移交框显示目标 agent、工作目录、下一轮和隔离说明。
 - **待决项**：未回答的优先，decision 在 question 前，同类按提问时间排序。点击显示背景、open_questions、影响的卡片、选项、推荐与理由、补充输入和消息预览。发送写入所属运行的 `answers.jsonl` 并通知主 agent；主 agent 不在时按钮为“保存回答”。主 agent 用 `ask --resolve` 关闭条目；搁置卡片没有显式待决项时补“继续做 / 不做了”。
@@ -89,7 +89,7 @@ Task 的运行明细保留以下信息和操作：
 - `node --test herdr/tests/*.test.mjs` passes.
 - `herdr-app check ~/.config/herdr-app/mods/cc-dispatch` passes.
 - `layout.switch {name: "herdr-cc-dispatch"}` shows the layout with no `.error` and empty `errors` in `herdr-app status`.
-- The tab bar shows Files、Changes 和“派发”；“派发”显示或隐藏面板，切换空间后保持状态。
+- The tab bar shows Files、Changes 和 Dispatch；Dispatch 显示或隐藏面板，切换空间后保持状态。
 - 新建 Topic 并添加 Task，分别验证主 agent 派发、新标签页派发与 backlog 细化；Task 启动后归入同一 Topic，显示结论与产物，原有确认点保留。
 - Task 的运行明细列出每个调用、轮次与回报结论，子 agent 终端关闭后保留历史；历史运行显示为隐式 Topic。
 - 暂停时请求不投递、迟到请求不启动；继续只恢复本次挂起的运行。验证 Topic 归档、取消归档、整体删除预检，以及草稿编辑后旧请求失效。

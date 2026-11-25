@@ -643,6 +643,16 @@ class Lost(unittest.TestCase):
         r = w.hd("collect", "--run", str(w.run_dir))
         self.assertNotIn("FAILURE=lost", r.stdout)
 
+    def test_a_cleaned_up_call_does_not_wake_wait_while_others_work(self):
+        w = Env()
+        w.dispatch("a")
+        w.dispatch("b")
+        w.hd("cleanup", "--run", str(w.run_dir), "--call", "a")
+        r = w.hd("collect", "--run", str(w.run_dir))
+        self.assertNotIn("CALL=a ", r.stdout)  # dealt with: not news, not an exit
+        self.assertNotIn("FAILURE=", r.stdout)
+        self.assertIn("WORKING=b", r.stdout)
+
 
 class Recover(unittest.TestCase):
     def lose(self, w, call):

@@ -124,3 +124,10 @@ test("Topic stats: Tasks x/y, a progress bar per Task, the card bar above its ke
   assert.match(main, /bar\(cardCounts\(\{ status \}\)/, "每个 Task 一条进度条");
   assert.match(main, /v\.total\)\)\)\s*\.child\(div\(\)\.w\(30\)[^\n]*\$\{v\.merged\}\/\$\{v\.goal\}/, "总卡片进度条右侧和 Task 行一样写全 Topic 的 x/y");
 });
+
+test("free text typed in panel dialogs reaches hd_dispatch as --opt=value, so text starting with a dash is not read as an option", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
+  assert.doesNotMatch(main, /"--(title|text|detail|line|decision|note)",\s*[a-z]/, "用户输入的自由文本用 `--title=${title}` 这样的单参数传给 hd_dispatch：分开传时以 - 开头的内容会被当成参数报错");
+  assert.match(main, /`--text=\$\{text\}`/);
+});

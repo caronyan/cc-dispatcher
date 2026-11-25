@@ -65,11 +65,11 @@ Topic 是一个问题或目标，Task 是其中一次 skill 工作（`research`�
 - 带 `--topic <id> --task <tid> [--request <rid>]`：核对请求、Task 的 kind 与运行目录类型，再绑定。成功输出 `TOPIC=`、`TASK=`、`DETAIL=`；`DETAIL` 是 JSON 编码的 Task 说明，按 JSON 解码后作为本次需求，照常保留对应 skill 的范围核对和用户确认点（含 dev 派卡前的确认）。
 - 只有 `--parent <父运行目录>`：读取父运行的 topic/task，在同一 Topic 建新 Task 并绑定；子运行继承 Topic。
 - 没有 `--task`、`--parent`：自动新建 Topic 和 Task，标题用 `--title`，kind 默认取运行目录类型。只想先建 Topic、不启动运行时，才用 `python3 $HD topic init --title "<目标>" [--owner <终端地址>]`，记下 `TOPIC=`。
-- 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数；成功后更新 `state.json` 时保留脚本写入的 `topic`、`task`。
+- 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TOPIC_STOPPING`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数；成功后更新 `state.json` 时保留脚本写入的 `topic`、`task`。
 
 **面板派发**：Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 收到 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。照常进入对应 skill 的准备步骤。research、review、retro 的这类命令是用户从面板发起的调用；主 agent 不自行调用这些高层或独立 skill。
 
-面板只向在线、状态为 `idle` 或 `done` 的主 agent 投递；派发还要求该主 agent 在仓库所有 Topic 中都没有已绑定、未完成且未终止的 Task，细化只要求空闲。Topic 暂停、归档或删除中时不投递；Claude Code 提示行已有未发送文字时也不投递。`target=new_tab` 的请求由面板在新标签页启动，首条消息相同。主 agent 不用自己排队，也不为接请求改动 `wait`。已送达未确认的请求由用户在面板重发或改派。
+面板只向在线、状态为 `idle` 或 `done` 且当前识别出的 agent 与 Topic owner 一致的主 agent 投递；`idle` 的文本发送带 `--if idle`，`done` 因 hc 不支持相应条件而在检查后直接发送。派发还要求该主 agent 在仓库所有 Topic 中都没有已绑定、未完成且未终止的 Task，也没有已送达、未绑定且未撤销的派发请求；细化只要求空闲，可跳过被挡住的派发。Topic 暂停、终止中、归档或删除中时不投递；终止期间也拒绝启动和激活运行，到期的自动重试、`recover` 和移交也不再启动或唤醒子 agent；终止进程中途退出时，再终止一次即可收尾。终止后清除暂停记录，继续只恢复仍为暂停的运行。暂停时仍可撤销请求。Claude Code 提示行已有未发送文字时也不投递，细化消息中的标题换行与控制字符会替换为空格。`target=new_tab` 的请求由面板在新标签页启动，首条消息相同。主 agent 不用自己排队，也不为接请求改动 `wait`。已送达未确认的请求由用户在面板重发或改派。
 
 **面板细化**：收到 `[cc-dispatch 面板] 请细化 Topic …` 时，读取消息指定的 `backlog.json` 条目，把它们拆成草稿。每个草稿包含 `title`、`kind`，说明写在 `detail`，依赖可写 `depends_on`。将整批草稿组成 JSON 数组，用一次命令提交：
 
@@ -271,6 +271,7 @@ python3 $HD ask --run $RD --add <文件>
 
 **中断后恢复**：`python3 $HD recover --run $RD [--call <调用名>] [--fresh]`
 - 对每个 `lost` 的调用：能找到它原来的会话（Codex 线程 / Claude Code 会话）就在新终端里续上那个会话；找不到或加了 `--fresh` 时，开一个新会话，让它读原任务卡和已有的工作目录、回报目前进度。输出 `RECOVERED=`（续上原会话的）、`FRESH=`（新会话的）、`FAILED=`。
+- 所属 Topic 暂停、终止中或删除中时，`recover` 以对应的 `FAILURE=` 拒绝（`takeover` 把中断的调用记为 `FAILED=`），先由用户继续 Topic。
 - 恢复后运行处于暂停状态，恢复的调用都被挂起，不会自己开工。先 `collect` 看各调用现状，向用户说明，经用户同意后 `python3 $HD resume --run $RD` 让它们接着做，再照常 `wait`。
 - 你自己（派发方的终端）也没了时，新会话按上面"接手运行"运行 `takeover` 就行，不用先 `recover`。直接运行 `recover` 时，它输出 `MAIN=gone`：脚本照"主 agent 交接"写好交接包（`--why recover`），给出 `RESUME_MAIN=`（续上原主 agent 会话的命令）和给下一个主 agent 的提示词。把它们交给用户；接手的 agent `adopt` 后运行仍是暂停的，照上一条先 `collect`、确认后 `resume`。
 

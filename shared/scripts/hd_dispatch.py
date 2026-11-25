@@ -164,6 +164,7 @@ wait reports nothing and retries nothing: it waits while paused or stopping and 
 RUN_CONTROL=paused (at its timeout) or RUN_CONTROL=stopped STOP_REPORT=<path>.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -315,6 +316,8 @@ def activate_run(run: Path):
         state = read_json(run / "state.json", {})
         if data.get("deleting") is not None:
             fail(f"topic is being deleted: {topic}", failure="TOPIC_DELETING", code=3)
+        if data.get("stopping_at") is not None:
+            fail(f"topic is being stopped: {topic}", failure="TOPIC_STOPPING", code=3)
         if data.get("paused_at") is not None:
             fail(f"topic is paused: {topic}", failure="TOPIC_PAUSED", code=3)
         task = data.get("tasks", {}).get(state.get("task")) or {}
@@ -449,6 +452,8 @@ def refuse_unless_running(run: Path):
             state = read_json(run / "state.json", {})
             if data.get("deleting") is not None:
                 fail(f"topic is being deleted: {topic}", failure="TOPIC_DELETING", code=3)
+            if data.get("stopping_at") is not None:
+                fail(f"topic is being stopped: {topic}", failure="TOPIC_STOPPING", code=3)
             if data.get("paused_at") is not None:
                 fail(f"topic is paused: {topic}", failure="TOPIC_PAUSED", code=3)
             task = data.get("tasks", {}).get(state.get("task")) or {}
@@ -998,6 +1003,44 @@ def agy_ready(model: str) -> str | None:
     return None
 
 
+@contextlib.contextmanager
+def run_topic_guard(run: Path):
+    """Hold the Topic lock of `run`'s Topic (none for a run outside a Topic). Topic pause and stop take the
+    same lock, so whatever starts or wakes a helper under it lands wholly before or after them."""
+    topic = read_json(run / "state.json", {}).get("topic")
+    if not topic:
+        yield
+        return
+    with topic_lock(repo_of_run(run), topic):
+        yield
+
+
+def topic_hold(run: Path):
+    """The failure that keeps `run`'s helpers from being started or woken by its Topic (being deleted,
+    being stopped or paused), or None. Read under run_topic_guard to act on it."""
+    topic = read_json(run / "state.json", {}).get("topic")
+    if not topic:
+        return None
+    data = read_json(topic_dir(repo_of_run(run), topic) / "topic.json", {})
+    for key, failure in (("deleting", "TOPIC_DELETING"), ("stopping_at", "TOPIC_STOPPING"),
+                         ("paused_at", "TOPIC_PAUSED")):
+        if data.get(key) is not None:
+            return failure
+    return None
+
+
+def run_topic_held(fn):
+    """Run a command that may start or wake helpers under run_topic_guard, from its checks to the launch."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(a):
+        with run_topic_guard(Path(a.run).resolve()):
+            return fn(a)
+    return wrapped
+
+
+@run_topic_held
 def cmd_run(a):
     run = Path(a.run).resolve()
     refuse_unless_running(run)
@@ -1061,6 +1104,7 @@ def cmd_run(a):
     out(failure="none" if sent else "other")
 
 
+@run_topic_held
 def cmd_send(a):
     run = Path(a.run).resolve()
     refuse_unless_running(run)
@@ -1240,7 +1284,12 @@ def retry_step(run: Path, meta: dict, o: dict, key: str) -> bool:
             save(run, meta)
             return True
         task = Path(meta["agent_dir"]) / f"task-{meta['round']}.md"
-        res = hc_json("send", meta["name"], RETRY_MSG.format(why=RETRY_WHY[r["kind"]], task=task))
+        with run_topic_guard(run):
+            # A pause or stop of the run or its Topic since this meta was read: send nothing.
+            if (control(run)["state"] != "running" or topic_hold(run)
+                    or ((load(run, meta["call"]).get("retry") or {}).get("key")) != key):
+                return True
+            res = hc_json("send", meta["name"], RETRY_MSG.format(why=RETRY_WHY[r["kind"]], task=task))
         event(meta, "send", why="retry", kind=r["kind"], n=r["n"], task=str(task), sent=bool(res and res.get("started")))
         if res and res.get("started"):
             r["key"], r["sent_at"] = None, now
@@ -1305,6 +1354,8 @@ def pending(run: Path):
     for c in calls(run):
         meta = load(run, c)
         o = observe(meta)
+        if o["state"] == "gone" and meta.get("open") is False:
+            continue  # closed on purpose (cleanup, stop, freeze): nothing left to report
         key = news_key(o)
         if key and key != meta.get("acked"):
             if retry_step(run, meta, o, key):
@@ -1569,7 +1620,26 @@ def cmd_handover(a):
     old = meta.get("agent") or "codex"
     if observe(meta)["state"] == "live":  # the panel shows it as being handed over while freeze runs
         relabel(meta, handover=a.to)
-    pkg = freeze(run, meta, a.ask, a.why)
+    pkg = freeze(run, meta, a.ask, a.why)  # slow (asks for a progress note): outside the Topic lock
+    with run_topic_guard(run):  # a Topic pause or stop since then: the helper stays frozen, nothing starts
+        refuse_unless_running(run)
+        activate_run(run)
+        meta, sent = handover_launch(run, a, pkg, old)
+    notified = "no"
+    if a.notify and meta.get("parent"):
+        g = hc_json("get", meta["parent"])
+        if g and "error" not in g and g.get("state") == "live":
+            ok = hc("send", meta["parent"], HANDOVER_NOTE.format(
+                call=a.call, old=AGENTS.get(old, {}).get("label", old), new=AGENTS[a.to]["label"],
+                round=meta["round"], name=meta["name"], pkg=pkg)).returncode == 0
+            notified = "yes" if ok else "no"
+    out(call=a.call, round=meta["round"], agent=a.to, isolation=AGENTS[a.to]["isolation"], name=meta["name"],
+        address=meta["address"], handoff=pkg, first_message="sent" if sent else "failed", notified=notified,
+        failure="none" if sent else "other")
+
+
+def handover_launch(run: Path, a, pkg: Path, old: str):
+    """The frozen call's next round on `a.to`. → (meta, first message sent)."""
     meta = load(run, a.call)
     try:
         data = handoff_lib().read(pkg)
@@ -1594,17 +1664,7 @@ def cmd_handover(a):
     sent = launch(run, meta, a.to, task)
     event(meta, "handover", frm=old, to=a.to, why=a.why, package=str(pkg), name=meta["name"],
           task=str(task), sent=sent, isolation=AGENTS[a.to]["isolation"])
-    notified = "no"
-    if a.notify and meta.get("parent"):
-        g = hc_json("get", meta["parent"])
-        if g and "error" not in g and g.get("state") == "live":
-            ok = hc("send", meta["parent"], HANDOVER_NOTE.format(
-                call=a.call, old=AGENTS.get(old, {}).get("label", old), new=AGENTS[a.to]["label"],
-                round=meta["round"], name=meta["name"], pkg=pkg)).returncode == 0
-            notified = "yes" if ok else "no"
-    out(call=a.call, round=meta["round"], agent=a.to, isolation=AGENTS[a.to]["isolation"], name=meta["name"],
-        address=meta["address"], handoff=pkg, first_message="sent" if sent else "failed", notified=notified,
-        failure="none" if sent else "other")
+    return meta, sent
 
 
 # ---- handoff: the dispatcher (main agent) hands the run to another one --------------------------------
@@ -1670,7 +1730,17 @@ RECOVER_FRESH_MSG = ("你接手的是一个被意外中断的子 agent 任务（
 
 def reopen_lost(run: Path, only=None, fresh=False):
     """Reopen the lost calls (or `only`), idle, in their own sessions when found (else a new one on the same
-    task and folder); the run is paused with them held. → (reopened, fresh, failed) call names."""
+    task and folder); the run is paused with them held. → (reopened, fresh, failed) call names.
+    Nothing is reopened while the run's Topic is paused, stopping or being deleted: all count as failed."""
+    with run_topic_guard(run):
+        hold = topic_hold(run)
+        if hold:
+            print(f"HELD_BY_TOPIC={hold}: resume the Topic first")
+            return [], [], [only] if only else lost_calls(run)
+        return reopen_lost_held(run, only, fresh)
+
+
+def reopen_lost_held(run: Path, only, fresh):
     c = control(run)
     held = list(c.get("held") or []) if c["state"] == "paused" else []
     if c["state"] != "paused":
@@ -1786,6 +1856,9 @@ def cmd_recover(a):
         print(f"RUN_{c['state'].upper()}: recover only a running or paused run")
         sys.exit(3)
     ensure_home()
+    hold = topic_hold(run)
+    if hold:
+        fail(f"the run's Topic holds its helpers ({hold}): resume the Topic first", failure=hold, code=3)
     back, fresh, failed = reopen_lost(run, a.call, a.fresh)
     out(recovered=",".join(back) or "none", fresh=",".join(fresh) or "none", failed=",".join(failed) or "none",
         run_control="paused")
@@ -2077,7 +2150,8 @@ def new_topic_id():
 
 
 def topic_writable(data, active=False):
-    for field, failure in (("deleting", "TOPIC_DELETING"), ("archived", "TOPIC_ARCHIVED"),
+    for field, failure in (("deleting", "TOPIC_DELETING"), ("stopping_at", "TOPIC_STOPPING"),
+                           ("archived", "TOPIC_ARCHIVED"),
                            ("paused_at", "TOPIC_PAUSED")):
         if (field != "paused_at" or active) and data.get(field) is not None:
             fail(f"topic {data['id']}: {field}", failure=failure, code=3)
@@ -2184,10 +2258,11 @@ def topic_message(repo, data, request, task_id=None, item_ids=None):
     if request["type"] == "dispatch":
         task = data["tasks"][task_id]
         params = f"--topic {data['id']} --task {task_id} --request {request['id']}"
-        if (request.get("agent") or data["owner"].get("agent")) == "claude":
+        if main_key(request.get("agent") or data["owner"].get("agent")) == "claude":
             return f"/cc-herdr-dispatch-{task['kind']} {params}"
         return f"按 cc-herdr-dispatch-{task['kind']} skill 执行，参数：{params}"
-    return (f"[cc-dispatch 面板] 请细化 Topic {data['id']}「{data['title']}」的 backlog 条目 {','.join(item_ids)}："
+    title = "".join(ch if ch.isprintable() else " " for ch in data["title"])
+    return (f"[cc-dispatch 面板] 请细化 Topic {data['id']}「{title}」的 backlog 条目 {','.join(item_ids)}："
             f"读 {topic_dir(repo, data['id'])}/backlog.json 里这些条目，拆成草稿 Task（每个有 title、kind、detail），"
             f"用 python3 {Path(__file__).resolve()} topic refined --topic {data['id']} --ack {request['id']} "
             "--drafts '<json>' 一次提交。只建草稿，不要派发。")
@@ -2203,7 +2278,7 @@ def cmd_topic_request(a):
     repo = topic_repo(a)
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
-        topic_writable(data, active=True)
+        topic_writable(data, active=not a.cancel)
         backlog = load_backlog(repo, a.topic) if ids is not None else None
         objects = topic_items(backlog, ids) if backlog is not None else [topic_task(data, a.task, draft=True)]
         old_ids = list(dict.fromkeys(obj["request"]["id"] for obj in objects if obj.get("request")))
@@ -2422,6 +2497,8 @@ def cmd_topic_pause(a):
     repo = topic_repo(a)
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
+        if data.get("stopping_at") is not None:
+            fail(f"topic is being stopped: {a.topic}", failure="TOPIC_STOPPING", code=3)
         if data.get("paused_at") is None:
             data["paused_at"] = time.time()
         save_topic(repo, a.topic, data)
@@ -2431,9 +2508,13 @@ def cmd_topic_pause(a):
                     task.get("run") == run.name and not topic_task_done(task, run)
                     for task in data["tasks"].values()):
                 continue
-            cmd_pause(argparse.Namespace(run=str(run)))
-            if control(run)["state"] == "paused" and run.name not in paused:
+            # Recorded before pausing: a failure after cmd_pause must still leave the run for resume to find.
+            if run.name not in paused:
                 paused.append(run.name)
+                save_topic(repo, a.topic, data)
+            cmd_pause(argparse.Namespace(run=str(run)))
+            if control(run)["state"] != "paused":
+                paused.remove(run.name)
                 save_topic(repo, a.topic, data)
     out(paused=",".join(paused))
 
@@ -2443,12 +2524,14 @@ def cmd_topic_resume(a):
     resumed = []
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
+        if data.get("stopping_at") is not None:
+            fail(f"topic is being stopped: {a.topic}", failure="TOPIC_STOPPING", code=3)
         data["paused_at"] = None
         save_topic(repo, a.topic, data)
         bound = {run.name: run for run in topic_runs(repo, data)}
         for name in list(data.get("paused_runs") or []):
             run = bound.get(name)
-            if run and run.is_dir():
+            if run and run.is_dir() and control(run)["state"] == "paused":
                 cmd_resume(argparse.Namespace(run=str(run)))
                 resumed.append(name)
             # activate_run updates this same Topic, so never save the pre-resume snapshot.
@@ -2458,21 +2541,45 @@ def cmd_topic_resume(a):
     out(resumed=",".join(resumed))
 
 
+def pid_alive(pid) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def cmd_topic_stop(a):
     repo = topic_repo(a)
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
+        # A stop whose process died leaves stopping_at behind; stopping again finishes and clears it.
+        if data.get("stopping_at") is not None and pid_alive(data.get("stopping_pid")):
+            fail(f"topic is being stopped: {a.topic}", failure="TOPIC_STOPPING", code=3)
         backlog = load_backlog(repo, a.topic)
         clear_topic_requests(data, backlog)
-        save_topic(repo, a.topic, data)
-        save_backlog(repo, a.topic, backlog)
         runs = [run for run in topic_runs(repo, data) if run.is_dir() and any(
             task.get("run") == run.name and not topic_task_done(task, run)
             for task in data["tasks"].values())]
+        data.update(paused_at=None, paused_runs=[], stopping_at=time.time(), stopping_pid=os.getpid())
+        save_backlog(repo, a.topic, backlog)
+        save_topic(repo, a.topic, data)
     stopped = []
-    for run in runs:
-        cmd_stop(argparse.Namespace(run=str(run), wait=getattr(a, "wait", 180)))
-        stopped.append(run.name)
+    try:
+        for run in runs:
+            cmd_stop(argparse.Namespace(run=str(run), wait=getattr(a, "wait", 180)))
+            if control(run)["state"] == "stopped":  # not one another live stop is still finishing
+                stopped.append(run.name)
+    finally:
+        with topic_lock(repo, a.topic):
+            data = load_topic(repo, a.topic)
+            data.pop("stopping_at", None)
+            data.pop("stopping_pid", None)
+            save_topic(repo, a.topic, data)
     out(stopped=",".join(stopped))
 
 
@@ -2577,6 +2684,10 @@ def topic_owner_busy(repo, terminal):
             for task in data.get("tasks", {}).values():
                 if task.get("run") and not topic_task_done(task, Path(repo) / ".cc-dispatch" / task["run"]):
                     return True
+                request = task.get("request") or {}
+                if (not task.get("run") and request.get("type") == "dispatch"
+                        and request.get("target") == "owner" and request.get("delivered_at") is not None):
+                    return True
     return False
 
 
@@ -2586,20 +2697,26 @@ def deliver_topic_request(repo, data, request, task_id, item_ids):
     if not terminal:
         return None
     info = hc_json("get", terminal)
+    status = (info.get("status") or {}).get("state") if info else None
     if (not info or info.get("state") != "live"
-            or (info.get("status") or {}).get("state") not in ("idle", "done")):
+            or status not in ("idle", "done")):
         return None
-    if owner.get("agent") == "claude":
+    agent = main_key(agent_on(info))
+    if not agent or agent != main_key(owner.get("agent")):
+        return None
+    if agent == "claude":
         screen = hc("read", terminal)
         prompts = re.findall(r"❯ ([^\r\n]*)", screen.stdout)
         if screen.returncode or (prompts and prompts[-1].strip()):
             return None
     # Delivery always uses the actual owner; --agent also serves requests for a new tab.
-    message = topic_message(repo, data, {**request, "agent": owner.get("agent")}, task_id, item_ids)
-    if owner.get("agent") == "claude" and request["type"] == "dispatch":
+    message = topic_message(repo, data, {**request, "agent": agent}, task_id, item_ids)
+    if agent == "claude" and request["type"] == "dispatch":
         result = hc("keys", terminal, *("space" if ch == " " else ch for ch in message), "enter")
     else:
-        result = hc("send", terminal, message, "--if", "idle", "--json")
+        # hc only accepts idle/working conditions; done was checked immediately above.
+        condition = ("--if", "idle") if status == "idle" else ()
+        result = hc("send", terminal, message, *condition, "--json")
     if result.returncode:
         return None
     try:
@@ -2631,18 +2748,18 @@ def cmd_topic_deliver(a):
             busy = bool(terminal) and topic_owner_busy(repo, terminal)
             with topic_lock(repo, tid):
                 data = read_json(path, {})
-                if not data or any(data.get(k) is not None for k in ("archived", "paused_at", "deleting")):
+                if not data or any(data.get(k) is not None
+                                   for k in ("archived", "paused_at", "deleting", "stopping_at")):
                     continue
                 owner = data.get("owner") or {}
                 if owner.get("terminal") != terminal or terminal in owners:
                     continue
                 backlog = load_backlog(repo, tid)
-                pending = topic_pending_requests(data, backlog)
+                pending = [entry for entry in topic_pending_requests(data, backlog)
+                           if not busy or entry[0]["type"] != "dispatch"]
                 if not pending:
                     continue
                 request, task_id, item_ids = pending[0]
-                if request["type"] == "dispatch" and busy:
-                    continue
                 info = hc_json("get", terminal) if terminal else None
                 if (info or {}).get("address") in owners:
                     continue
@@ -3127,6 +3244,7 @@ def cmd_pause(a):
     out(paused=",".join(held) or "none", interrupt_failed=",".join(failed) or "none")
 
 
+@run_topic_held
 def cmd_resume(a):
     run = Path(a.run).resolve()
     activate_run(run)
@@ -3172,10 +3290,11 @@ def cmd_resume(a):
 def cmd_stop(a):
     run = Path(a.run).resolve()
     c = control(run)
-    if c["state"] in ("stopping", "stopped"):
+    # A stop whose process died leaves the run stopping; stopping again finishes it.
+    if c["state"] == "stopped" or (c["state"] == "stopping" and pid_alive(c.get("pid"))):
         held_line(run)
         return
-    set_control(run, state="stopping", held=c.get("held") or [])
+    set_control(run, state="stopping", held=c.get("held") or [], pid=os.getpid())
     print(f"stopping {run} at {datetime.now():%Y-%m-%d %H:%M:%S}")
     asked, parent = {}, None
     for call in calls(run):

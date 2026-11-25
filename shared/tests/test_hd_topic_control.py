@@ -106,6 +106,16 @@ class TopicControl(unittest.TestCase):
             self.assertEqual(self.owner_sent(), expected)
         self.assertEqual(self.w.hc_state()["calls"][-1], ["keys", "t1", "enter"])
 
+    def test_fake_conditional_send_rejects_unsupported_statuses(self):
+        before = self.w.hc_state()
+        for status in ("done", "blocked", "invalid"):
+            with self.subTest(status=status):
+                result = subprocess.run(["hc", "send", "t1", "blocked", "--if", status, "--json"],
+                                        capture_output=True, text=True, env=self.w.env())
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid value", result.stderr)
+                self.assertEqual(self.w.hc_state(), before)
+
     def test_claude_dispatch_keys_and_resend_do_not_duplicate_delivery(self):
         task = self.task()
         request = self.request(task=task)
@@ -181,6 +191,66 @@ class TopicControl(unittest.TestCase):
         self.assertFalse(any(call[0] in ("keys", "read") for call in self.w.hc_state()["calls"]))
         self.assertEqual(self.w.hc_state()["calls"][-1][-3:], ["--if", "idle", "--json"])
 
+    def test_done_owner_receives_dispatch_and_refinement_without_a_condition(self):
+        for agent, request_type in (("codex", "dispatch"), ("agy", "dispatch"),
+                                    ("codex", "refine"), ("agy", "refine"), ("claude", "refine")):
+            with self.subTest(agent=agent, request_type=request_type):
+                self.alter(owner=dict(self.data()["owner"], agent=agent))
+                self.w.patch("parent", app=agent, argv=[agent], status="done")
+                task = self.task() if request_type == "dispatch" else None
+                item = self.item() if request_type == "refine" else None
+                request = self.request(task=task, items=[item] if item else None)
+                try:
+                    self.assertEqual(self.delivery(), f"{self.topic}:{request['REQUEST']}")
+                    call = self.w.hc_state()["calls"][-1]
+                    self.assertEqual(call, ["send", "t1", json.loads(request["MESSAGE"]), "--json"])
+                    saved = (self.data()["tasks"][task] if task else self.backlog()["items"][-1])
+                    self.assertIsNotNone(saved["request"]["delivered_at"])
+                finally:
+                    self.request(task=task, items=[item] if item else None, *("--cancel",))
+
+    def test_delivery_requires_the_current_recognized_owner_agent(self):
+        task = self.task()
+        item = self.item()
+        for request_type in ("dispatch", "refine"):
+            for app, argv in ((None, ["/bin/zsh"]), ("vim", ["/usr/bin/vim"]),
+                              ("codex", ["/usr/local/bin/codex"])):
+                with self.subTest(request_type=request_type, app=app):
+                    self.w.patch("parent", app=app, argv=argv)
+                    self.request(task=task if request_type == "dispatch" else None,
+                                 items=[item] if request_type == "refine" else None)
+                    before = self.owner_sent()
+                    self.assertEqual(self.delivery(), "")
+                    self.assertEqual(self.owner_sent(), before)
+                    saved = (self.data()["tasks"][task] if request_type == "dispatch"
+                             else self.backlog()["items"][0])
+                    self.assertIsNone(saved["request"]["delivered_at"])
+            self.request(task=task if request_type == "dispatch" else None,
+                         items=[item] if request_type == "refine" else None, *("--cancel",))
+
+    def test_delivery_normalizes_owner_agent_names_before_selecting_claude_keys(self):
+        self.alter(owner=dict(self.data()["owner"], agent="claude-code"))
+        self.w.patch("parent", app="claude-code", argv=["/usr/local/bin/claude"])
+        task = self.task()
+        request = self.request(task=task)
+        self.assertEqual(self.delivery(), f"{self.topic}:{request['REQUEST']}")
+        self.assertTrue(self.owner_sent()[0].startswith("/cc-herdr-dispatch-dev "))
+        self.assertEqual(self.w.hc_state()["calls"][-1][0], "keys")
+
+    def test_refinement_title_replaces_line_breaks_and_controls_with_spaces(self):
+        title = "First\nSecond\r\t\x1b\x7f\x85\u2028\u2029\u200bLast"
+        self.alter(title=title)
+        item = self.item()
+        request = self.request(items=[item])
+        message = self.hd.topic_message(self.w.repo, self.data(), self.backlog()["items"][0]["request"],
+                                        item_ids=[item])
+        self.assertTrue(all(ch.isprintable() for ch in message), repr(message))
+        self.assertEqual(json.loads(request["MESSAGE"]), message)
+        self.assertIn("First Second" + " " * 8 + "Last", message)
+        self.assertEqual(self.delivery(), f"{self.topic}:{request['REQUEST']}")
+        self.assertEqual(self.owner_sent(), [message])
+        self.assertEqual(self.data()["title"], title)
+
     def test_failed_send_keys_or_read_leave_request_undelivered(self):
         task = self.task()
         self.request(task=task)
@@ -188,9 +258,11 @@ class TopicControl(unittest.TestCase):
         self.assertEqual(self.delivery(), "")
         self.assertIsNone(self.data()["tasks"][task]["request"]["delivered_at"])
         self.alter(owner=dict(self.data()["owner"], agent="codex"))
+        self.w.patch("parent", app="codex", argv=["codex"])
         self.assertEqual(self.delivery(), "")
         self.assertIsNone(self.data()["tasks"][task]["request"]["delivered_at"])
         self.alter(owner=dict(self.data()["owner"], agent="claude"))
+        self.w.patch("parent", app="claude-code", argv=["claude"])
         real_hc = self.hd.hc
 
         def failed_read(*args, **kwargs):
@@ -205,6 +277,7 @@ class TopicControl(unittest.TestCase):
 
     def test_conditional_send_closes_the_status_change_race(self):
         self.alter(owner=dict(self.data()["owner"], agent="codex"))
+        self.w.patch("parent", app="codex", argv=["codex"])
         task = self.task()
         self.request(task=task)
         real_hc = self.hd.hc
@@ -250,6 +323,40 @@ class TopicControl(unittest.TestCase):
         local = self.task()
         self.start(local, run=run)
         self.assertEqual(self.delivery(), "")
+
+    def test_delivered_unbound_dispatch_keeps_owner_busy_across_topics_until_cancelled(self):
+        first_task = self.task()
+        first_request = self.request(task=first_task)["REQUEST"]
+        self.assertEqual(self.delivery(), f"{self.topic}:{first_request}")
+        other = self.init()
+        second_task = self.task(other)
+        second_request = self.request(task=second_task, topic=other)["REQUEST"]
+        self.assertEqual(self.delivery(), "")
+        self.assertIsNone(self.data(other)["tasks"][second_task]["request"]["delivered_at"])
+        self.assertEqual(len(self.owner_sent()), 1)
+        self.request(task=first_task, *("--cancel",))
+        self.assertEqual(self.delivery(), f"{other}:{second_request}")
+        self.assertEqual(len(self.owner_sent()), 2)
+
+    def test_refinement_bypasses_a_dispatch_blocked_by_an_active_task(self):
+        self.start(self.task())
+        queued = self.task()
+        self.request(task=queued)
+        refined = self.request(items=[self.item()])
+        self.assertEqual(self.delivery(), f"{self.topic}:{refined['REQUEST']}")
+        self.assertIsNone(self.data()["tasks"][queued]["request"]["delivered_at"])
+        self.assertEqual(self.owner_sent(), [json.loads(refined["MESSAGE"])])
+
+    def test_refinement_bypasses_a_dispatch_blocked_by_a_delivered_request(self):
+        delivered = self.task()
+        self.request(task=delivered)
+        self.assertTrue(self.delivery())
+        queued = self.task()
+        self.request(task=queued)
+        refined = self.request(items=[self.item()])
+        self.assertEqual(self.delivery(), f"{self.topic}:{refined['REQUEST']}")
+        self.assertIsNone(self.data()["tasks"][queued]["request"]["delivered_at"])
+        self.assertEqual(self.owner_sent()[-1], json.loads(refined["MESSAGE"]))
 
     def test_delivery_picks_oldest_and_limits_each_owner_across_topics(self):
         old = self.item()
@@ -323,6 +430,111 @@ class TopicControl(unittest.TestCase):
                                       "--task", task, code=3)["FAILURE"], "TOPIC_PAUSED")
         self.command("resume", "--topic", self.topic)
         self.assertEqual(self.delivery(), f"{self.topic}:{request}")
+
+    def test_paused_topic_allows_cancelling_dispatch_and_refinement_requests(self):
+        task = self.task()
+        item = self.item()
+        dispatch = self.request(task=task)["REQUEST"]
+        refine = self.request(items=[item])["REQUEST"]
+        self.command("pause", "--topic", self.topic)
+        self.assertEqual(self.request(task=task, *("--cancel",)), {"CANCELLED": dispatch})
+        self.assertEqual(self.request(items=[item], *("--cancel",)), {"CANCELLED": refine})
+        self.assertIsNone(self.data()["tasks"][task]["request"])
+        self.assertEqual((self.backlog()["items"][0]["status"],
+                          self.backlog()["items"][0]["request"]), ("open", None))
+        self.assertEqual(self.command("request", "--topic", self.topic, "--task", task,
+                                      "--resend", code=3)["FAILURE"], "TOPIC_PAUSED")
+        self.command("resume", "--topic", self.topic)
+        self.assertEqual(self.delivery(), "")
+
+    def test_cancellation_still_refuses_archived_or_deleting_topics(self):
+        task = self.task()
+        item = self.item()
+        self.request(task=task)
+        self.request(items=[item])
+        for field, failure in (("archived", "TOPIC_ARCHIVED"), ("deleting", "TOPIC_DELETING")):
+            with self.subTest(field=field):
+                self.alter(**{field: 0})
+                for flag, value in (("--task", task), ("--items", item)):
+                    result = self.command("request", "--topic", self.topic, flag, value, "--cancel", code=3)
+                    self.assertEqual(result["FAILURE"], failure)
+                self.assertIsNotNone(self.data()["tasks"][task]["request"])
+                self.assertIsNotNone(self.backlog()["items"][0]["request"])
+                self.alter(**{field: None})
+
+    def test_stop_clears_topic_pause_without_allowing_resume_to_restart_stopped_runs(self):
+        run = self.start(self.task())
+        self.command("pause", "--topic", self.topic)
+        self.assertEqual(self.data()["paused_runs"], [run.name])
+        self.direct("stop", wait=0)
+        self.assertIsNone(self.data()["paused_at"])
+        self.assertEqual(self.data()["paused_runs"], [])
+        self.assertEqual(self.command("resume", "--topic", self.topic)["RESUMED"], "")
+        self.assertEqual(self.hd.control(run)["state"], "stopped")
+
+    def test_topic_resume_only_restores_runs_that_remain_paused(self):
+        runs = [self.start(self.task(), run=self.w.run_dir.parent / ("dev-" + state))
+                for state in ("stopped", "running", "handoff", "stopping", "paused")]
+        self.command("pause", "--topic", self.topic)
+        for state, run in zip(("stopped", "running", "handoff", "stopping", "paused"), runs):
+            self.hd.set_control(run, state=state)
+        self.assertEqual(self.command("resume", "--topic", self.topic)["RESUMED"], runs[-1].name)
+        self.assertEqual([self.hd.control(run)["state"] for run in runs],
+                         ["stopped", "running", "handoff", "stopping", "running"])
+        self.assertEqual(self.data()["paused_runs"], [])
+
+    def test_stopping_topic_blocks_requests_and_delivery(self):
+        task = self.task()
+        item = self.item()
+        self.request(task=task)
+        self.request(items=[item])
+        self.alter(stopping_at=0)
+        self.assertEqual(self.delivery(), "")
+        for flag, value in (("--task", task), ("--items", item)):
+            self.assertEqual(self.command("request", "--topic", self.topic, flag, value,
+                                          code=3)["FAILURE"], "TOPIC_STOPPING")
+        self.assertFalse(self.owner_sent())
+
+    def test_stop_blocks_starts_and_resume_until_all_bound_runs_finish(self):
+        run = self.start(self.task())
+        another = self.start(self.task(), run=run.parent / "dev-another")
+        draft = self.task()
+        child = run.parent / "dev-child"
+        child.mkdir()
+        original_stop = self.hd.cmd_stop
+
+        def stop_while_starting(args):
+            result = self.command("start", "--run", child, "--parent", run, code=3)
+            self.assertEqual(result["FAILURE"], "TOPIC_STOPPING")
+            result = self.command("start", "--run", child, "--topic", self.topic, "--task", draft, code=3)
+            self.assertEqual(result["FAILURE"], "TOPIC_STOPPING")
+            self.assertIsNotNone(self.data().get("stopping_at"))
+            for action in ("pause", "resume", "stop"):
+                self.assertEqual(self.command(action, "--topic", self.topic, code=3)["FAILURE"],
+                                 "TOPIC_STOPPING")
+            original_stop(args)
+
+        with mock.patch.object(self.hd, "cmd_stop", side_effect=stop_while_starting):
+            stopped = self.direct("stop", wait=0)["STOPPED"]
+        self.assertEqual(set(stopped.split(",")), {run.name, another.name})
+        self.assertIsNone(self.data().get("stopping_at"))
+        self.assertEqual([self.hd.control(bound)["state"] for bound in (run, another)],
+                         ["stopped", "stopped"])
+        self.assertIsNone(self.data()["tasks"][draft]["run"])
+        self.assertEqual(self.command("start", "--run", child, "--parent", run)["TOPIC"], self.topic)
+
+    def test_stop_clears_its_marker_when_a_run_cannot_be_stopped(self):
+        self.start(self.task())
+
+        def interrupted(args):
+            self.assertIsNotNone(self.data().get("stopping_at"))
+            raise OSError("stop interrupted")
+
+        with mock.patch.object(self.hd, "cmd_stop", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "stop interrupted"):
+                self.direct("stop", wait=0)
+        self.assertIsNone(self.data().get("stopping_at"))
+        self.assertEqual(self.command("resume", "--topic", self.topic)["RESUMED"], "")
 
     def test_resume_preserves_activation_changes_in_topic_and_state(self):
         task = self.task()

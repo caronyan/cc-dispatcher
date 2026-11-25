@@ -73,18 +73,18 @@ class TopicActivation(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.w.hc_state(), hc_before)
 
-    def test_all_entries_reject_paused_deleting_or_taken_topics_without_side_effects(self):
+    def test_all_entries_reject_paused_stopping_deleting_or_taken_topics_without_side_effects(self):
         meta = self.w.dispatch()
         self.command("pause", "--run", self.w.run_dir)
         self.finish_and_archive()
         report = self.w.root / "partial.json"
         report.write_text('{"status": "partial"}')
         shutil.copyfile(report, meta["report"])
-        for blocked, failure in (("paused_at", "TOPIC_PAUSED"), ("deleting", "TOPIC_DELETING"),
-                                 ("run", "TASK_TAKEN")):
+        for blocked, failure in (("paused_at", "TOPIC_PAUSED"), ("stopping_at", "TOPIC_STOPPING"),
+                                 ("deleting", "TOPIC_DELETING"), ("run", "TASK_TAKEN")):
             with self.hd.topic_lock(self.w.repo, self.topic):
                 data = self.topic_data()
-                data.update(paused_at=None, deleting=None)
+                data.update(paused_at=None, stopping_at=None, deleting=None)
                 data["tasks"][self.task]["run"] = self.w.run_dir.name
                 if blocked == "run":
                     data["tasks"][self.task]["run"] = "dev-other"

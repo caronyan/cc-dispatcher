@@ -3,7 +3,8 @@
 
 State is $FAKE_HC (a JSON file): {"terminals": {name: {address, state, status, turn, screen, labels,
 foreground, cwd, argv}}, "calls": [[arg, ...], ...]}. Calls are appended to "calls" except a `send`
-whose `--if` condition fails (exit 10, status_mismatch). `keys` submits text when it reaches `enter`;
+whose `--if` condition fails (exit 10, status_mismatch). Only idle/working conditions are accepted;
+other values fail with exit 2 before recording the call. `keys` submits text when it reaches `enter`;
 `read` returns the terminal's configured "screen". `send` to a
 live terminal answers {"started": true} unless the terminal has "refuse": true; `run --bg` adds a
 live terminal. A terminal's "on_send" ({"status": ..., "turn": +1, "write": [path, text]}) is applied
@@ -68,6 +69,10 @@ def main(argv):
         if "--if" in rest:
             index = rest.index("--if")
             condition = rest[index + 1]
+            if condition not in ("idle", "working"):
+                print(f"error: invalid value '{condition}' for '--if <STATUS>' "
+                      "[possible values: idle, working]", file=sys.stderr)
+                return 2
             rest = rest[:index] + rest[index + 2:]
         _, t = find(st, rest[0])
         ok = bool(t) and t.get("state", "live") == "live" and not t.get("refuse")

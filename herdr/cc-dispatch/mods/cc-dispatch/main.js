@@ -791,7 +791,9 @@ export default class Dispatch extends View {
     if (topic.archived || topic.deleting) return [];
     const unfinished = topic.tasks.some((task) => task.runDir && taskGroup(task, topic) !== "done"
       && !["stopped", "stopping"].includes(task.run?.control?.state) && !task.run?.control?.retired);
-    const ops = topic.pausedAt ? ["resume", "stop"] : unfinished ? ["pause", "stop"] : [];
+    // Queued requests count too: pausing holds their delivery, stopping withdraws them.
+    const queued = topic.tasks.some((task) => !task.runDir && task.request) || topic.backlog.some((item) => item.request);
+    const ops = topic.pausedAt ? ["resume", "stop"] : unfinished || queued ? ["pause", "stop"] : [];
     return ops.map((op) => {
       const color = op === "stop" ? t.ansi1 : op === "resume" ? t.accent : t.foreground;
       return h_flex().id(`${op}-${topic.id}`).size(22).flex_none().justify_center().items_center().rounded(6).bg(color)
@@ -1418,13 +1420,13 @@ export default class Dispatch extends View {
             return res.out;
           };
           if (role === "newtopic") {
-            await invoke("init", ["--title", title, ...(p.owner ? ["--owner", p.owner] : [])]);
+            await invoke("init", [`--title=${title}`, ...(p.owner ? ["--owner", p.owner] : [])]);
           } else if (role === "backlog") {
-            await invoke(p.item ? "backlog-edit" : "backlog-add", [...(p.item ? ["--item", p.item.id] : []), "--text", text]);
+            await invoke(p.item ? "backlog-edit" : "backlog-add", [...(p.item ? ["--item", p.item.id] : []), `--text=${text}`]);
           } else if (role === "task") {
-            await invoke(task ? "task-edit" : "task-add", [...(task ? ["--task", task.id] : []), "--title", title, "--kind", this.kind, "--detail", detail]);
+            await invoke(task ? "task-edit" : "task-add", [...(task ? ["--task", task.id] : []), `--title=${title}`, "--kind", this.kind, `--detail=${detail}`]);
           } else {
-            if (this.kind !== task.kind || detail !== task.detail) await invoke("task-edit", ["--task", task.id, "--kind", this.kind, "--detail", detail]);
+            if (this.kind !== task.kind || detail !== task.detail) await invoke("task-edit", ["--task", task.id, "--kind", this.kind, `--detail=${detail}`]);
             const agent = picked === "owner" ? owner?.program?.key ?? topic.owner?.agent : program.key;
             const out = await invoke("request", ["--task", task.id, "--type", "dispatch", "--target", picked === "owner" ? "owner" : "new_tab",
               ...(agent ? ["--agent", agent] : [])]);
