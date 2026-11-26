@@ -24,6 +24,10 @@ class Messages(unittest.TestCase):
         self.b = self.command("init", "--title", "Second", HC_TERMINAL_ID="t2")["TOPIC"]
 
     def raw(self, command, *args, code=0, **env):
+        if command in self.hd.TOPIC_WRITER_COMMANDS and "--topic" in args:
+            topic = args[args.index("--topic") + 1]
+            data = self.hd.read_json(self.topic_path(topic), {})
+            env.setdefault("HC_TERMINAL_ID", (data.get("owner") or {}).get("terminal") or "")
         result = self.w.hd("topic", command, "--repo", str(self.w.repo), *map(str, args), **env)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         return result
@@ -508,6 +512,7 @@ class Messages(unittest.TestCase):
 
     def test_dispatched_run_terminal_can_message_without_an_explicit_control_owner(self):
         task = self.bind(self.b, self.w.run_dir, "t2")
+        self.hd.write_json(self.w.run_dir / "control.json", {"state": "running"})
         self.w.dispatch()
         result = self.command("msg", "--run", self.w.run_dir, "--to", self.a, "--text=From run")
         item = next(item for item in self.messages(self.a)["items"] if item["id"] == result["MESSAGE"])

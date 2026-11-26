@@ -60,37 +60,45 @@ Codex 不可用时由你接管，是这条分工的例外，按各 skill 的降�
 
 Topic 是一个问题或目标，Task 是其中一次 skill 工作（`research`、`review`、`dev`、`fix`、`test`、`retro`）。Task 先是草稿，启动后绑定一个运行目录；dev 在运行内拆出的 `T1`、`T2` 等任务卡仍记在该运行的 `state.json.tasks`。Topic 的记录在 `$ROOT/.cc-dispatch/topics/<id>/`：`topic.json` 记 Task 和请求，`backlog.json` 记待细化条目，`summary.md` 记各 Task 的结论。
 
-**准备时绑定**：建好 `$RD` 后、摸底或派出子 agent 前，调用一次 `python3 $HD topic start --run "$RD"`。把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加，未收到的参数不传；三者都没收到时先按下面「归到哪个 Topic」选；没有 `--task` 时加 `--title "<本次问题>"`。
+**准备时绑定**：建好 `$RD` 后、摸底或派出子 agent 前，调用一次 `python3 $HD topic start --run "$RD"`。运行目录的实际路径必须是 `$ROOT/.cc-dispatch/<运行目录名>`，识别已有绑定时也核对这个路径。把收到的 `--topic`、`--task`、`--request`、`--parent` 及其值原样追加，未收到的参数不传；三者都没收到时先按下面「归到哪个 Topic」选；没有 `--task` 时加 `--title "<本次问题>"`。
 
 绑定成功后，先运行一次 `python3 $HD topic peers --run "$RD"`，发现同仓库未归档、未删除的 Topic 及其负责人、Task、结论与产物；`topic list` 仍只用于从本终端名下选择 Topic。涉及其他 Topic 时按下面「跨 Topic 协同」处理。
 
 - 带 `--topic <id> --task <tid> [--request <rid>]`：核对请求、Task 的 kind 与运行目录类型，再绑定。成功输出 `TOPIC=`、`TASK=`、`DETAIL=`；`DETAIL` 是 JSON 编码的 Task 说明，按 JSON 解码后作为本次需求，照常保留对应 skill 的范围核对和用户确认点（含 dev 派卡前的确认）。
-- 只有 `--parent <父运行目录>`：读取父运行的 topic/task，在同一 Topic 建新 Task 并绑定；子运行继承 Topic。
-- 只有 `--topic <id>`：在这个 Topic 建新 Task 并绑定（不挂父 Task）。Topic 还没有负责人时（在 herdr 外建的），第一个在 herdr 里启动工作的主 agent 成为负责人，之后细化请求投给它。
+- 只有 `--parent <父运行目录>` 时，父运行的控制终端、Topic 负责人或用户可在同一 Topic 启动子运行。新 Task 的 `parent_task` 指向父 Task。
+- 只有 `--topic <id>` 时，由 Topic 负责人或用户在该 Topic 建新 Task 并绑定。用户在 herdr 外创建 Topic 时可用 `--owner` 指定负责人。Topic 尚无负责人时，首个在 herdr 中成功启动工作的终端成为负责人。
 - **归到哪个 Topic**：`--topic`、`--task`、`--parent` 都没收到（用户直接手动启动 skill）时，先运行 `python3 $HD topic list`，列出本终端名下未归档的 Topic 及其 Task（`TOPIC <id>\t<标题>`，下面每行 `<task>\t<kind>\t<运行目录>\t<标题>\t<结论>`）。本次对象来自其中某个 Topic 时（例如要审查的提交、要修的问题、要测的改动出自该 Topic 某个 Task 的运行），带 `--topic <id>` 启动；拿不准就看那几个运行目录里的产物再定。都对不上才新建。开场跟用户说一句归到了哪个 Topic（或新建了 Topic）。
 - 没有 `--topic`、`--task`、`--parent`：自动新建 Topic 和 Task，标题用 `--title`，kind 默认取运行目录类型。只想先建 Topic、不启动运行时，才用 `python3 $HD topic init --title "<目标>" [--owner <终端地址>]`，记下 `TOPIC=`。
-- 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TOPIC_STOPPING`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数。
-- Topic 命令遇到 `NOT_OWNER` 时，停止操作并核对本运行的 Topic 绑定和当前负责人；需要接手时走交接或接手流程，不改用对方的 `--topic`、`--run`，也不用 `--as-user` 冒充用户。消息回答或撤销遇到 `QUESTION_CLOSED` 时，按输出的 `STATE=` 和 `topic inbox --run "$RD" --all` 核对问题已回答、已撤销还是已作废，不重复回答或撤销；批量撤销中已列在 `WITHDRAWN=` 的项仍算成功。
+- 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TOPIC_STOPPING`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数。若运行已绑定，其控制终端也可只带 `--run "$RD"` 重试，恢复 `state.json` 中的绑定。
+- Topic 命令遇到 `NOT_OWNER` 时，核对本运行的 Topic 绑定和当前负责人；需要修改别人的 Topic 时，用下面的 `topic approval-request` 提交修改申请，等待用户在对方 Topic 的面板决定，结果以 notice 送回申请方。需要接手时走交接或接手流程，不改用对方的 `--run`，也不用 `--as-user` 冒充用户。消息回答或撤销遇到 `QUESTION_CLOSED` 时，按输出的 `STATE=` 和 `topic inbox --run "$RD" --all` 核对问题已回答、已撤销还是已作废，不重复回答或撤销；批量撤销中已列在 `WITHDRAWN=` 的项仍算成功。
 
 **面板派发**：Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 收到 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。照常进入对应 skill 的准备步骤。research、review、retro 的这类命令是用户从面板发起的调用；主 agent 不自行调用这些高层或独立 skill。
 
 面板只向在线、状态为 `idle` 或 `done` 且当前识别出的 agent 与 Topic owner 一致的主 agent 投递；`idle` 的文本发送带 `--if idle`，`done` 因 hc 不支持相应条件而在检查后直接发送。派发还要求该主 agent 在仓库所有 Topic 中都没有已绑定、未完成且未终止的 Task，也没有已送达、未绑定且未撤销的派发请求；细化只要求空闲，可跳过被挡住的派发。Topic 暂停、终止中、归档或删除中时不投递；终止期间也拒绝启动和激活运行，到期的自动重试、`recover` 和移交也不再启动或唤醒子 agent；终止进程中途退出时，再终止一次即可收尾。终止后清除暂停记录，继续只恢复仍为暂停的运行。暂停时仍可撤销请求。Claude Code 提示行已有未发送文字时也不投递，细化消息中的标题换行与控制字符会替换为空格。`target=new_tab` 的请求由面板在新标签页启动，首条消息相同。主 agent 不用自己排队，也不为接请求改动 `wait`。已送达未确认的请求由用户在面板重发或改派。
 
-**面板细化**：收到 `[cc-dispatch 面板] 请细化 Topic …` 时，读取消息指定的 `backlog.json` 条目，把它们拆成草稿。每个草稿包含 `title`、`kind`，说明写在 `detail`，依赖可写 `depends_on`。将整批草稿组成 JSON 数组，用一次命令提交：
+**面板细化**：收到 `[cc-dispatch 面板] 请细化 Topic …` 时，读取消息指定的 `backlog.json` 条目，把它们拆成草稿。结合已有 Task、`topic peers` 的结论与产物，主动识别每个草稿要等谁、哪些 Task 要等它，并标记相应依赖和阻挡。每个草稿包含 `title`、`kind`，说明写在 `detail`；依赖写在 `depends_on` 数组，等待此草稿的 Task 写在 `blocks` 数组。将整批草稿组成 JSON 数组，用一次命令提交：
 
 ```bash
 python3 $HD topic refined --topic <id> --ack <rid> --drafts '<JSON 数组或文件路径>'
 ```
 
-`refined` 在锁内核对整批条目的请求仍有效，一次建好草稿、标记条目已细化并记下 task_ids；同一 rid 重复提交返回原 task_ids。遇到 `REQUEST_STALE` 就停下告诉用户，不修改条目或自动改用新请求。提交后只汇报 `TASKS=`，不自动派发；派发由用户在面板发起。
+`refined` 在锁内核对整批条目的请求仍有效，一次建好草稿、校验整批依赖与阻挡、标记条目已细化并记下 task_ids；同一 rid 重复提交返回原 task_ids 和修改申请引用。遇到 `REQUEST_STALE` 就停下告诉用户，不修改条目或自动改用新请求。提交后汇报 `TASKS=`，存在跨 Topic 阻挡申请时另有 `APPROVAL=`；不自动派发，派发由用户在面板发起。
 
-**收尾时回写**：写好结论产物后、交还最终报告前，运行 `python3 $HD topic finish --run "$RD" --line "<一句结论>" --done "<已完成>" --open "<遗留待决>" --artifact "<产物路径>"`。`--done` 用几行写清这次做成了什么（给用户看，不写过程）；`--open` 写还没做完、要用户定或留给后续的事，没有就不传。面板的 Topic 摘要按时间线展示每个 Task 的这三段。它写入 Task 的 `summary_line`、`summary_done`、`summary_open`、`artifact`、`finished_at` 和运行的 `state.json.finished`，并追加 Topic 的 `summary.md`；同一结论重复调用不重复追加。`NO_TOPIC` 表示运行尚未绑定 Task，先按准备规则执行 `topic start` 再收尾。
+首次提交和重试 `target=owner` 的细化请求都须由当前 Topic 负责人终端或用户完成。其他终端提交会收到 `NOT_OWNER`。细化回执保留原请求的 `target`；旧回执缺少该字段时按 `owner` 校验，用户仍可重试。`target=new_tab` 的细化请求可由新标签页提交，成功后的重试保持原行为。
+
+**收尾时回写**：写好结论产物后、交还最终报告前，由运行的控制终端或用户执行 `python3 $HD topic finish --run "$RD" --line "<一句结论>" --done "<已完成>" --open "<遗留待决>" --artifact "<产物路径>"`。`--done` 用几行写清这次做成了什么（给用户看，不写过程）；`--open` 写还没做完、要用户定或留给后续的事，没有就不传。面板的 Topic 摘要按时间线展示每个 Task 的这三段。它写入 Task 的 `summary_line`、`summary_done`、`summary_open`、`artifact`、`finished_at` 和运行的 `state.json.finished`，并追加 Topic 的 `summary.md`；同一结论重复调用不重复追加。`NO_TOPIC` 表示运行尚未绑定 Task，先按准备规则执行 `topic start` 再收尾。
 
 **明确放弃卡住的 Task**：只有用户明确要求放弃已绑定的 Task 时，主 agent 才运行 `python3 $HD topic abandon --repo "$ROOT" --topic <id> --task <tid> --reason "<用户给出的原因>"`。运行目录丢了也能放弃；目录还在时按 `retire --keep` 收尾，保留目录和回报。Task 记下放弃时间、原因并算作结束，`summary.md` 追加“已放弃”，不再占用负责人或阻挡 Topic 的终止、归档、删除；重复调用不重复记录。遇到 `HELPERS_AT_WORK` 或 `MAIN_LIVE` 时告诉用户，只有用户明确同意越过该拒绝后才加 `--force`。
 
-需要提议下一步时，用 `python3 $HD topic task-add --topic <TOPIC 输出的 id> --title "<下一步>" --kind <kind> --detail "<范围和验收要求>"` 建草稿；有依赖时追加 `--depends k1,k2`，来自 backlog 时追加 `--from-backlog b1`。成功输出 `TASK=k<n>`。遇到 `TOPIC_NOT_FOUND`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就告诉用户，保留已完成的结论。只提议草稿，不自动请求派发；原有经用户确认或流程授权的跨 skill 调用仍按 `--parent` 规则执行。
+需要提议下一步时，用 `python3 $HD topic task-add --topic <TOPIC 输出的 id> --title "<下一步>" --kind <kind> --detail "<范围和验收要求>"` 建草稿；主动核对相关 Task，识别并标记它的依赖和阻挡：要等谁追加 `--depends k1,k2`，谁要等它追加 `--blocks "k3,<topic>:k2"`，来自 backlog 时追加 `--from-backlog b1`。成功输出 `TASK=k<n>`，跨 Topic 阻挡申请另输出 `APPROVAL=`。遇到 `TOPIC_NOT_FOUND`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就告诉用户，保留已完成的结论。只提议草稿，不自动请求派发；原有经用户确认或流程授权的跨 skill 调用仍按 `--parent` 规则执行。
 
-**Task 依赖**：本 Topic 内写 `k2`，跨 Topic 写 `<topic>:k2`，其中 `<topic>` 是对方的 Topic id。`task-add`、`task-edit --depends` 接受逗号分隔的引用（如 `--depends "k1,<topic>:k2"`）；`refined --drafts` 的 `depends_on` 用同样的引用组成 JSON 数组。写入时统一校验目标存在、不自依赖、没有环：
+**Task 依赖与阻挡**：本 Topic 内写 `k2`，跨 Topic 写 `<topic>:k2`，其中 `<topic>` 是对方的 Topic id。`task-add` 和 `task-edit` 的 `--depends` 列出本 Task 要等的 Task，`--blocks` 列出要等本 Task 的 Task；两者接受逗号分隔的引用（如 `--depends "k1,<topic>:k2"`）。`refined --drafts` 的 `depends_on`、`blocks` 用同样的引用组成 JSON 数组。阻挡直接体现在等待方的 `depends_on` 中，Task 不另存 `blocks` 字段。
+
+建草稿、细化 backlog 或编辑 Task 时，都要根据工作顺序、接口和产物主动核对这两个方向，补上识别出的依赖与阻挡。编辑使用 `python3 $HD topic task-edit --topic <id> --task <tid> --depends "<依赖全集>" --blocks "<阻挡全集>"`；两项都是全集，省略其中一项表示保留，传空串表示清空。同一次调用在依赖锁内统一校验并提交本次直接修改，遇到非法引用、已绑定的等待方或成环时整次不写入。全集中已存在且未变化的阻挡边是无操作：等待方即使已绑定、所在 Topic 已归档或删除中，也可原样保留；实际新增或移除才检查等待方必须未绑定且 Topic 可写。
+
+终端设置跨 Topic 阻挡时，脚本为每条变化的边提交独立申请，输出 `APPROVAL=<topic>:<id>`，多个引用用逗号分隔。批准时，`task-edit --add-depends <ref>` 或 `--remove-depends <ref>` 在等待方当时的依赖上增删这条边，并重新校验环和引用。两个增量选项和 `--depends` 三选一。来源 Task 重新设置或清空 `--blocks` 时，仍需要的未决自动申请保留，被取代的申请撤回。决定和执行结果通过 notice 送回。用户和面板不带 `HC_TERMINAL_ID` 时直接修改两个方向。`refined` 的 `blocks` 遵循相同规则。面板依赖弹窗只提交勾选有变化的方向。
+
+弹窗会勾选本 Task 已申请新增的阻挡，并标为「待批准」。保留勾选会让原申请继续等待批准，取消勾选并保存才撤回。终端替换阻挡前会先查询创建新申请所需的终端资料，查询出错时可原样重试，旧申请仍有效。
 
 | FAILURE | 处理 |
 |---|---|
@@ -98,9 +106,10 @@ python3 $HD topic refined --topic <id> --ack <rid> --drafts '<JSON 数组或文�
 | `DEPENDS_MISSING` | 用 `topic peers` 核对 Topic 和 Task，修正不存在的引用后再提交。 |
 | `DEPENDS_SELF` | 移除对本 Task 自身的依赖。 |
 | `DEPENDS_CYCLE` | 查看 `CYCLE=` 的环路径，调整依赖后再提交。 |
+| `TASK_BOUND` | 本 Task 或实际增删阻挡边的等待方已绑定，保留原关系并向用户说明。 |
 | `DEPENDS_PENDING` | 读取每行 `DEPENDS=<topic>:<task>\t<state>\t<标题>`，先处理阻挡项，再按原参数重试派发。 |
 
-`topic request --kind dispatch`（包括重发）、请求投递和 `topic start --task` 的运行绑定都会检查依赖：`pending`、`stopped`、`cycle` 阻挡派发；投递时被挡住的请求保留在队列里。`done` 放行；`abandoned`、`missing` 也放行，但分别表示依赖已放弃、已删除，继续前要核对结论与产物是否仍满足本次需求。遇到 `pending` 就等待结束通知或做不依赖它的工作；`stopped` 先向对方了解是否恢复；`cycle` 按环路径编辑依赖。需要用户决定是否继续或改变依赖时写「待决项」，不擅自删依赖或另建 Topic 绕过阻挡；用户决定改变依赖时编辑草稿的 `--depends`，再按原流程派发。依赖 Task 首次完成、放弃或终止，以及依赖 Task 或 Topic 被删除时会收到 notice；读完后重新核对依赖状态，通知本身不代表已经放行。
+`topic request --kind dispatch`（包括重发）、请求投递和 `topic start --task` 的运行绑定都会检查依赖：`pending`、`stopped`、`cycle` 阻挡派发；投递时被挡住的请求保留在队列里。`done` 放行；`abandoned`、`missing` 也放行，但分别表示依赖已放弃、已删除，继续前要核对结论与产物是否仍满足本次需求。遇到 `pending` 就等待结束通知或做不依赖它的工作；`stopped` 先向对方了解是否恢复；`cycle` 按环路径编辑依赖。需要用户决定是否继续或改变依赖时写「待决项」，不擅自删依赖或另建 Topic 绕过阻挡；用户决定改变依赖时编辑草稿的 `--depends` 或 `--blocks`，再按原流程派发。依赖 Task 首次完成、放弃或终止，以及依赖 Task 或 Topic 被删除时会收到 notice；读完后重新核对依赖状态，通知本身不代表已经放行。
 
 ## 跨 Topic 协同
 
@@ -116,6 +125,20 @@ python3 $HD topic refined --topic <id> --ack <rid> --drafts '<JSON 数组或文�
 | 撤销本 Topic 发出的问题 | `python3 $HD topic msg-withdraw --run "$RD" --ids m1,m2` |
 | 读取消息和答案 | `python3 $HD topic inbox --run "$RD" [--all]` |
 | 确认已处理的消息或答案 | `python3 $HD topic msg-ack --run "$RD" --ids m1,m2` |
+| 申请修改其他 Topic | `python3 $HD topic approval-request --topic <目标> --run "$RD" --op task-edit --args '{"task":"k1","add_depends":"<本Topic>:k2"}' --reason "<修改理由>"` |
+| 撤回未决修改申请 | `python3 $HD topic approval-withdraw --topic <目标> --id a1 --run "$RD"` |
+
+修改申请也可用 `--from-topic <自己的Topic>` 代替 `--run`，支持 `task-add`、`task-edit`、`task-rm`、`backlog-add`、`backlog-edit`、`backlog-rm`、`request`、`abandon`、`pause`、`resume`；`--args` 只填对应子命令自己的参数，不包含 `repo`、`topic`。提交输出 `APPROVAL=<目标>:<id>`，相同的未决申请返回原引用。用户在面板批准并执行、驳回或回复后，结果以 notice 送回申请方；agent 等待决定，不自行调用仅用户可用的 `approval-decide`。需要修改别人的 Topic 时走此流程，`task-add`、`task-edit` 和 `refined` 的跨 Topic 阻挡会自动提交申请。
+
+没有 Topic 的终端不需要为发申请创建临时 Topic：带 `HC_TERMINAL_ID` 时，省略 `--run` 和 `--from-topic` 即以当前终端身份申请，例如 `python3 $HD topic approval-request --topic <目标> --op resume --args '{}' --reason "<恢复理由>"`。此时 `from.topic`、`from.task`、`from.run` 为 `null`，面板显示“来自终端 <terminal>（<agent>）”；未决申请按终端判重，同一终端撤回时也省略这两个来源参数。结果和撤回通知持久保留在 outbox，由面板刷新调用的 `topic deliver` 在该终端在线、agent 匹配且 `idle` 或 `done` 时直接发送，发送失败留待重试，不写入 Topic 邮箱；Claude Code 有未发送草稿时等待。最后一个 Topic 删除后，面板仍会尝试送出已排队的终端结果。无 `HC_TERMINAL_ID` 的用户调用仍须指定 `--run` 或 `--from-topic`。
+
+进入申请方 Topic 邮箱的批准、执行失败、驳回、回复和撤回通知带 `user_seen: true`：面板视为用户已知，显示“已读”，不计入用户未读数，也不再显示确认按钮。这个字段不代表 agent 已处理；终端投递、`MESSAGES_UNACKED`、`topic inbox` 和 `msg-ack` 仍按原规则运行，agent 处理后照常确认。
+
+修改申请的参数须是有效文本，含 NUL 或无法编码的字符返回 `APPROVAL_INVALID`。结果通知超过 8000 字时截断，完整结果在目标 Topic 的修改申请里查看。一条通知发送失败或一个 outbox 文件损坏，只挡住它自己，其他通知照常投递。
+
+修改申请中的 `task-add` 和 `task-edit` 禁用 `blocks`。需要变更阻挡时，向等待方所在 Topic 申请增删依赖。`request` 申请仅支持 `--target owner`。其他回复（`answer`）需要非空附言。
+
+申请时即校验 `task` 的本地编号及 `depends`、`add_depends`、`remove_depends` 的引用格式，格式错误返回 `APPROVAL_INVALID`。执行时再核对目标是否存在、是否已绑定以及依赖是否成环。同一来源 Topic、Task、运行和终端重试相同操作与参数，即使 agent 显示名变化也会复用未决申请。面板以决定输出中的最后一条 `STATE=` 和最后一条 `FAILURE=` 判读执行结果。
 
 发送成功输出 `MESSAGE=`，回答输出 `ANSWERED=`，撤销输出 `WITHDRAWN=`，确认输出 `ACKED=`。正文限 4000 字符，长内容放产物并用 `--ref` 引用；`TEXT_TOO_LONG` 时缩短正文，`TEXT_EMPTY` 时补充说明。接收方不存在、已归档或删除中时分别拒绝为 `TOPIC_NOT_FOUND`、`TOPIC_ARCHIVED`、`TOPIC_DELETING`；核对接收方状态后再决定后续，不改投无关 Topic。主 agent 不能给本 Topic 发消息（`SELF_MESSAGE`）；面板可由用户向本 Topic 留言。主 agent 用本运行 `--run` 或自己负责的 `--topic` 操作，不带仅供用户身份使用的 `--as-user`。
 

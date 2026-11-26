@@ -29,6 +29,13 @@ class TopicDepends(unittest.TestCase):
         self.kb = self.task(self.b, "Producer")
 
     def raw(self, name, *args, code=0, **env):
+        if (name in self.hd.TOPIC_WRITER_COMMANDS or name == "start") and "--topic" in args:
+            topic = args[args.index("--topic") + 1]
+            owner = self.data(topic).get("owner") or {}
+            env.setdefault("HC_TERMINAL_ID", owner.get("terminal") or "")
+        if name == "finish":
+            run = self.hd.Path(args[args.index("--run") + 1])
+            env.setdefault("HC_TERMINAL_ID", self.hd.run_message_controller(run))
         result = self.w.hd("topic", name, "--repo", str(self.w.repo), *map(str, args), **env)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         return result
@@ -38,6 +45,13 @@ class TopicDepends(unittest.TestCase):
 
     def invoke(self, *args, **env):
         output = io.StringIO()
+        if args[0] == "topic" and args[1] in self.hd.TOPIC_WRITER_COMMANDS and "--topic" in args:
+            topic = args[args.index("--topic") + 1]
+            owner = self.data(topic).get("owner") or {}
+            env.setdefault("HC_TERMINAL_ID", owner.get("terminal") or "")
+        if args[:2] == ("topic", "finish"):
+            run = self.hd.Path(args[args.index("--run") + 1])
+            env.setdefault("HC_TERMINAL_ID", self.hd.run_message_controller(run))
         with mock.patch.dict(os.environ, self.w.env(**env)), mock.patch.object(
                 sys, "argv", [str(HD), *map(str, args)]), contextlib.redirect_stdout(output):
             self.hd.main()

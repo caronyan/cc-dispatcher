@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, messageGroups } from "./model.js";
+import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, dependencyChoices, taskRefs, taskBlockRefs, messageGroups, APPROVAL_WORDS, approvalOperation } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -26,6 +26,25 @@ const KIND_GUIDE = {
 };
 const outputValue = (out, key) => (out ?? "").split("\n").find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
 const commandError = (out) => (out || "hd_dispatch.py 运行失败").split("\n").filter((line) => line && !line.startsWith("FAILURE=")).slice(-2).join(" ");
+const dependencyError = (out) => {
+  const code = outputValue(out, "FAILURE"), cycle = outputValue(out, "CYCLE");
+  const message = {
+    DEPENDS_INVALID: "依赖编号格式不正确，请取消无效项后重试。",
+    DEPENDS_SELF: "Task 不能依赖自己，请调整勾选。",
+    DEPENDS_MISSING: "选择的 Task 已删除，请重新打开编辑依赖后重试。",
+    DEPENDS_CYCLE: "依赖成环，请调整勾选后重试。",
+    TASK_BOUND: "Task 已绑定运行，阻挡只能修改未绑定的草稿。",
+    TASK_NOT_FOUND: "Task 已删除，请关闭弹窗并刷新。",
+    TOPIC_ARCHIVED: "Topic 已归档，请取消归档后重试。",
+    TOPIC_DELETING: "Topic 正在删除，无法保存依赖。",
+    TOPIC_STOPPING: "Topic 正在终止，无法保存依赖。",
+    NOT_OWNER: "没有修改这个 Topic 的权限。",
+  }[code] ?? `保存依赖失败：${commandError(out)}`;
+  return cycle ? `${message}\n环路径：${cycle}` : message;
+};
+// A saved dependency edit invalidates panel snapshots on their next render.
+let dependencyVersion = 0;
+let approvalVersion = 0;
 
 const io = (on) => ({
   sh: (script, args = []) => exec("sh", ["-c", script, "cc-dispatch-panel", ...args], { on })
@@ -300,6 +319,13 @@ export default class Dispatch extends View {
       });
       return;
     }
+    if (this.role === "approval") {
+      this.sending = false; this.failed = null; this.replying = false; this.approvalState = null;
+      this.approvalResult = null; this.decidedNote = null;
+      this.noteBox = TextareaState.new({ rows: 3, placeholder: "写给申请方的附言；其他回复必须填写" });
+      this.noteBox.on("change", (_e, cx) => cx.notify());
+      return;
+    }
     if (this.role === "tasksum") {
       const p = blockProps() ?? {}, files = io(p.on ?? null);
       this.reports = {};
@@ -311,6 +337,14 @@ export default class Dispatch extends View {
         }));
         cx.notify();
       });
+      return;
+    }
+    if (this.role === "dependencies") {
+      const p = blockProps() ?? {};
+      this.sending = false; this.failed = null;
+      this.depends = new Set(taskRefs(p.topic.id, p.task.dependsOn).split(",").filter(Boolean));
+      this.blocks = new Set(p.blockRefs ?? (p.groups ?? []).flatMap((group) => group.tasks.filter((task) => task.blocks).map((task) => task.ref)));
+      this.originalDependencies = { depends: new Set(this.depends), blocks: new Set(this.blocks) };
       return;
     }
     if (this.role === "messages" || this.role === "timeline") {
@@ -351,6 +385,8 @@ export default class Dispatch extends View {
     this.bg = { runs: {}, sessions: {} };
     this.quota = {}; // agent -> { q, at, busy }
     this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
+    this.dependencyVersion = dependencyVersion;
+    this.approvalVersion = approvalVersion;
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
   }
 
@@ -417,8 +453,11 @@ export default class Dispatch extends View {
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
-        // Only a repository with Topics has requests, messages or queued notices to deliver.
-        if (repo && topics.some((topic) => !topic.implicit) && !checking()) {
+        // Deleted Topics can still have terminal results queued in their outboxes.
+        const canDeliver = repo && !checking() && (topics.some((topic) => !topic.implicit)
+          || (await files.sh('test -d "$1/.cc-dispatch/topics"', [repo])).code === 0);
+        if (token !== this.token) return;
+        if (canDeliver) {
           const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", repo]);
           if (token !== this.token) return;
           if (!delivered.ok) this.error = `自动送达失败：${commandError(delivered.out)}`;
@@ -541,6 +580,14 @@ export default class Dispatch extends View {
       this.ctxKey = key; this.ctx = ctx; this.token++; this.loading = false; this.statsBusy = false;
       later(cx, (cx) => this.refresh(cx));
     }
+    if (this.dependencyVersion !== dependencyVersion) {
+      this.dependencyVersion = dependencyVersion;
+      later(cx, (cx) => this.refresh(cx));
+    }
+    if (this.approvalVersion !== approvalVersion) {
+      this.approvalVersion = approvalVersion;
+      later(cx, (cx) => this.refresh(cx));
+    }
     // Helpers came, went or relabelled themselves: re-read meta.json now, not at the next poll.
     const live = (terminals() ?? []).filter((x) => x?.labels?.["cc.run"]);
     const liveKey = live.map((x) => `${x.address}:${x.state}:${JSON.stringify(x.labels)}`).sort().join("|");
@@ -570,7 +617,8 @@ export default class Dispatch extends View {
   }
 
   topicActive(topic) {
-    return !topic.archived && (topic.pausedAt || topic.tasks.some((task) => ["active", "you"].includes(taskGroup(task, topic))));
+    return !topic.archived && (topic.pausedAt || topic.approvals?.open.length > 0 || topic.approvals?.readFailed
+      || topic.tasks.some((task) => ["active", "you"].includes(taskGroup(task, topic))));
   }
 
   topicRunning(topic) {
@@ -588,7 +636,7 @@ export default class Dispatch extends View {
   topicProps(topic) {
     return topic ? { id: topic.id, title: topic.title, implicit: topic.implicit, archived: topic.archived, pausedAt: topic.pausedAt,
       deleting: topic.deleting, follows: topic.follows ?? [], messages: topic.messages,
-      owner: topic.owner, tasks: topic.tasks.map((task) => ({ id: task.id, title: task.title, run: task.runDir })),
+      owner: topic.owner, tasks: topic.tasks.map((task) => ({ id: task.id, title: task.title, run: task.runDir, dependsOn: [...(task.dependsOn ?? [])] })),
       runs: topic.runs.map((r) => ({ id: r.id, dir: r.dir, hd: r.hd })) } : null;
   }
 
@@ -610,6 +658,16 @@ export default class Dispatch extends View {
       props: { role, topic: this.topicProps(topic), repo: this.topicRepo(topic), hd: this.topicHD(topic),
         on: this.ctx?.on ?? null, space: (spaces() ?? []).find((s) => s.active)?.id,
         ownerLive, programs: this.programs, ...extra } });
+  }
+
+  openDependencies(topic, task) {
+    if (topic.implicit || topic.archived || topic.deleting || task.runDir || task.run || taskGroup(task, topic) !== "queued") return;
+    const repo = this.topicRepo(topic), peers = this.topics.filter((peer) => this.topicRepo(peer) === repo);
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 560, height: 700,
+      props: { role: "dependencies", topic: this.topicProps(topic),
+        task: { id: task.id, title: task.title, dependsOn: [...(task.dependsOn ?? [])] },
+        groups: dependencyChoices(peers, topic, task), blockRefs: taskBlockRefs(peers, topic, task),
+        repo, hd: this.topicHD(topic), on: this.ctx?.on ?? null } });
   }
 
   command(cx, topic, op, args = []) {
@@ -671,7 +729,7 @@ export default class Dispatch extends View {
     if (!others.length) return body;
     body.child(div().flex_none().pt(6).px(2).text_size(S().label).text_color(t.muted).child("其他空间"));
     for (const g of others) {
-      const waiting = g.topics.some((topic) => topic.tasks.some((task) => taskGroup(task, topic) === "you"));
+      const waiting = g.topics.some((topic) => topic.approvals?.open.length > 0 || topic.tasks.some((task) => taskGroup(task, topic) === "you"));
       body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().px(10).py(6).gap(8).items_center().rounded(8)
         .border_1().border_dashed().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
         .when(Boolean(g.id), (el) => el.on_click(() => run("space.select", { id: g.id })))
@@ -689,7 +747,7 @@ export default class Dispatch extends View {
     const active = this.topicActive(topic);
     // Open by default while something is running, waiting on you, or drafted and not yet dispatched.
     const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
-    const waiting = topic.tasks.some((task) => taskGroup(task, topic) === "you");
+    const waiting = topic.approvals?.open.length > 0 || topic.tasks.some((task) => taskGroup(task, topic) === "you");
     const paused = Boolean(topic.pausedAt);
     // Spins only while one of its Tasks runs; open work that waits on the main agent shows a still accent dot.
     const running = this.topicRunning(topic);
@@ -781,6 +839,7 @@ export default class Dispatch extends View {
     const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
     const folded = this.fold.get(key) ?? !(group === "active" || group === "you"), inset = 42;
     const queued = group === "queued", request = requestState(task);
+    const canEditDependencies = queued && !task.runDir && !r && !topic.implicit && !topic.archived && !topic.deleting;
     const dependencies = (task.dependsOn ?? []).map((ref) => dependsState(this.topics, topic, ref));
     const blockers = dependencies.filter((dep) => ["pending", "stopped", "cycle"].includes(dep.state));
     const dependencyHint = blockers.map((dep) => dependencyText(this.topics, topic, dep)).join("；");
@@ -809,13 +868,17 @@ export default class Dispatch extends View {
       .children(task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
     for (const dep of dependencies.filter((dep) => dep.state !== "done")) {
       box.child(note(t, dependencyText(this.topics, topic, dep), ["abandoned", "missing"].includes(dep.state) ? t.ansi3 : t.muted)
-        .pl(inset).pr(10).pb(5));
+        .pl(inset).pr(10).pb(5)
+        .when(canEditDependencies, (el) => el.id(`edit-dependency-${key}-${dep.topic}:${dep.task}`).cursor_pointer()
+          .tooltip("编辑依赖与阻挡").hover((s) => s.text_color(t.accent)).on_mouse_down("left", stop)
+          .on_click((_e, cx) => { cx.stop_propagation(); this.openDependencies(topic, task); })));
     }
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
     if (queued && !topic.archived && !topic.deleting) {
       box.child(h_flex().pl(inset).pr(10).py(6).gap(6).flex_wrap()
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
+        .when(canEditDependencies, (el) => el.child(action(`dependencies-${key}`, "编辑依赖", "task", t, () => this.openDependencies(topic, task))))
         .child(action(`remove-${key}`, "删除", "trash", t, (_e, cx) => this.command(cx, topic, "task-rm", ["--task", task.id]), { color: t.ansi1 }))
         .when(!topic.pausedAt, (el) => el.child(action(`dispatch-${key}`, request ? "改派…" : "派发…", "send", t,
           () => this.openForm("dispatch", topic, { task, dependencyHint }), { color: t.accent, enabled: !blockers.length, tooltip: dependencyHint })))
@@ -853,7 +916,9 @@ export default class Dispatch extends View {
           const dep = dependsState(this.topics, topic, ref);
           const title = `${this.topics.find((x) => x.id === dep.topic)?.title ?? dep.topic}·${dep.title || dep.task}`;
           return dep.state === "done" ? title : `${title} · ${dependencyText(this.topics, topic, dep)}`;
-        }), programs: this.programs,
+        }), blocks: dependencyChoices(this.topics.filter((peer) => this.topicRepo(peer) === this.topicRepo(topic)), topic, task)
+          .flatMap((group) => group.tasks.filter((item) => item.blocks)
+            .map((item) => `${group.title}·${item.id} · ${item.title} · ${MARK_WORDS[item.status] ?? item.status}${item.pendingBlock ? " · 待批准" : ""}`)), programs: this.programs,
         cards: taskCards(task) } });
   }
 
@@ -1071,21 +1136,54 @@ export default class Dispatch extends View {
         reportPath: call?.reportPath ?? null, reportBackup: call?.agentDir ? `${call.agentDir}/report-r${call.round}.json` : null } });
   }
 
+  approvalApplicant(topic, item) {
+    const from = item.from, repo = this.topicRepo(topic);
+    if (from.topic == null) return `来自终端 ${from.terminal}（${agentLabel(from.agent) || "agent"}）`;
+    const peer = this.topics.find((peer) => !peer.implicit && peer.id === from.topic && this.topicRepo(peer) === repo);
+    return `${peer?.title ?? `${from.topic}（已删除）`} · ${agentLabel(from.agent) || (from.terminal ? "agent" : "用户")}`;
+  }
+
+  openApproval(topic, item) {
+    openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 680, height: 680,
+      props: { role: "approval", topic: this.topicProps(topic), item, applicant: this.approvalApplicant(topic, item),
+        repo: this.topicRepo(topic), hd: this.topicHD(topic), on: this.ctx?.on ?? null } });
+  }
+
+  renderApprovalRow(t, topic, item) {
+    const done = item.state !== "open", failed = item.state === "failed", z = S();
+    const applicant = this.approvalApplicant(topic, item);
+    return v_flex().id(`approval-${topic.id}|${item.id}`).flex_none().pl(28).pr(10).py(5).gap(2)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => this.openApproval(topic, item))
+      .child(h_flex().gap(7).items_center()
+        .child(icon(failed ? "close" : done ? "check" : "decide", 11, failed ? t.ansi1 : done ? t.muted : t.ansi3))
+        .child(div().flex_1().min_w(0).truncate().tooltip(item.summary).text_size(z.small).text_color(done ? t.muted : t.foreground).child(item.summary))
+        .child(div().flex_none().text_size(z.label).text_color(t.muted).child(ago(item.createdAt))))
+      .child(div().pl(18).truncate().tooltip(applicant).text_size(z.label).text_color(t.accent).child(`申请方：${applicant}`))
+      .child(div().pl(18).truncate().tooltip(item.reason).text_size(z.label).text_color(t.muted).child(`理由：${item.reason}`))
+      .when(done, (el) => el.child(div().pl(18).text_size(z.label).text_color(failed ? t.ansi1 : t.muted)
+        .child(`${APPROVAL_WORDS[item.state]}${item.result?.failure ? ` · ${item.result.failure}` : ""}${item.note ? ` · ${item.note}` : ""}`)));
+  }
+
   renderAsks(t, topic) {
     const items = topic.tasks.flatMap((task) => task.run ? this.itemsOf(task.run).map((x) => ({ task, r: task.run, x })) : []);
-    if (!items.length) return null;
-    const open = items.filter(({ x }) => !x.answer).length, z = S();
+    const approvals = topic.approvals ?? { open: [], history: [], readFailed: false };
+    if (!items.length && !approvals.open.length && !approvals.history.length && !approvals.readFailed) return null;
+    const open = items.filter(({ x }) => !x.answer).length + approvals.open.length, z = S();
+    const title = open || approvals.readFailed ? "需要你处理" : items.length ? "已回答 · 等主 agent 处理" : "修改申请";
     const key = `asks|${topic.id}`, folded = this.groupFold.get(key) ?? false;
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.background)
       .child(h_flex().id(`asks-${topic.id}`).h(28).flex_none().pl(12).pr(10).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
         .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
         .child(icon("decide", 11, open ? t.ansi3 : t.muted))
-        .child(div().flex_1().min_w(0).truncate().tooltip(open ? "需要你处理" : "已回答 · 等主 agent 处理").text_size(z.label).font_semibold().text_color(open ? t.ansi3 : t.muted)
-          .child(open ? "需要你处理" : "已回答 · 等主 agent 处理"))
+        .child(div().flex_1().min_w(0).truncate().tooltip(title).text_size(z.label).font_semibold().text_color(open || approvals.readFailed ? t.ansi3 : t.muted)
+          .child(title))
         .child(h_flex().h(16).px(6).flex_none().items_center().rounded(8).bg(open ? t.ansi3 : t.selected)
-          .text_size(z.label).text_color(open ? t.background : t.foreground).child(String(open || items.length))));
+          .text_size(z.label).text_color(open ? t.background : t.foreground)
+          .child(approvals.readFailed ? "!" : String(open || items.length || approvals.history.length))));
     if (folded) return box;
+    if (approvals.readFailed) box.child(note(t, "修改申请读取失败，请检查 approvals.json 后刷新；待处理数量暂不可用。", t.ansi1).pl(28).pr(10).py(6));
+    box.children(approvals.open.map((item) => this.renderApprovalRow(t, topic, item)));
     box.children(items.map(({ task, r, x }) => {
       const done = Boolean(x.answer), color = done ? t.muted : t.foreground;
       return v_flex().id(`item-${r.dir}|${x.id}`).flex_none().pl(28).pr(10).py(5).gap(2).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -1099,6 +1197,15 @@ export default class Dispatch extends View {
         .child(div().pl(18).truncate().tooltip(String(`Task ${task.id} · ${task.title}`)).text_size(z.label).text_color(t.accent).child(`Task ${task.id} · ${task.title}`))
         .child(div().pl(18).truncate().tooltip(String(itemLine(x))).text_size(z.label).text_color(t.muted).child(itemLine(x)));
     }));
+    if (approvals.history.length) {
+      const key = `approval-history|${topic.id}`, folded = this.groupFold.get(key) ?? true;
+      box.child(h_flex().id(`approval-history-${topic.id}`).h(28).flex_none().pl(28).pr(10).gap(7).items_center()
+        .cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.groupFold.set(key, !folded); cx.notify(); })
+        .child(icon(folded ? "chevron-right" : "chevron-down", 10, t.muted))
+        .child(note(t, `已处理的修改申请 · 最近 ${Math.min(5, approvals.history.length)} 条`)));
+      if (!folded) box.children(approvals.history.slice(0, 5).map((item) => this.renderApprovalRow(t, topic, item)));
+    }
     return box;
   }
 
@@ -1344,8 +1451,9 @@ export default class Dispatch extends View {
     const live = topics.filter((topic) => this.topicActive(topic) && !topic.pausedAt).length;
     const calls = new Map(topics.flatMap((topic) => topic.runs.flatMap((r) => r.calls.map((c) => [c.key, c]))));
     const helpers = [...calls.values()].filter((c) => c.state === "live" && c.status === "working").length;
-    const waiting = topics.reduce((n, topic) => n + topic.runs.reduce((n, r) => n + this.itemsOf(r).filter((x) => !x.answer).length, 0), 0);
-    const text = `${topics.length} 个 Topic · ${live} 个进行中 · ${helpers} 个 agent 在干活 · ${waiting} 项等你`;
+    const waiting = topics.reduce((n, topic) => n + (topic.approvals?.open.length ?? 0)
+      + topic.runs.reduce((n, r) => n + this.itemsOf(r).filter((x) => !x.answer).length, 0), 0);
+    const text = `${topics.length} 个 Topic · ${live} 个进行中 · ${helpers} 个 agent 在干活 · ${waiting} 项等你${topics.some((topic) => topic.approvals?.readFailed) ? " · 修改申请读取失败，计数不完整" : ""}`;
     return h_flex().h(34).flex_none().px(14).items_center().border_t(1).border_color(t.border)
       .text_size(S().label).text_color(t.muted)
       .child(div().flex_1().min_w(0).truncate().tooltip(text).child(text))
@@ -1353,6 +1461,95 @@ export default class Dispatch extends View {
   }
 
   // ---- Dialogs ----
+
+  decideApproval(cx, p, decision, close) {
+    const note = this.replying ? (this.noteBox?.value() ?? "").trim() : "";
+    if (this.sending || this.approvalState || p.item.state !== "open" || (decision === "answer" && !note)) return;
+    this.sending = true; this.failed = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const res = await topicCmd(io(p.on ?? null), p.hd, ["topic", "approval-decide", "--repo", p.repo,
+          "--topic", p.topic.id, "--id", p.item.id, `--decision=${decision}`, ...(note ? [`--note=${note}`] : [])]);
+        const finalLinesFirst = res.out.split("\n").reverse().join("\n");
+        const state = outputValue(finalLinesFirst, "STATE"), failure = outputValue(finalLinesFirst, "FAILURE");
+        if (res.ok && state === "failed") {
+          this.approvalState = state; this.decidedNote = note; approvalVersion++;
+          const output = res.out.split("\n").filter((line) => !line.startsWith("STATE=")).join("\n").trim();
+          this.approvalResult = { ok: false, failure, output };
+          this.failed = `申请已批准，但执行失败${failure ? `（${failure}）` : ""}：${commandError(output)}`;
+          return;
+        }
+        if (!res.ok) {
+          if (failure === "APPROVAL_CLOSED") {
+            this.approvalState = "closed"; approvalVersion++;
+            throw new Error("这条修改申请已被处理，正在刷新 Topic。请关闭弹窗查看最新结果。");
+          }
+          const reason = {
+            APPROVAL_INTERRUPTED: "上次处理被中断，请刷新查看记录。本次决定未执行。",
+            TOPIC_ARCHIVED: "Topic 已归档，无法处理这条申请。",
+            TOPIC_DELETING: "Topic 正在删除，无法处理这条申请。",
+            TOPIC_STOPPING: "Topic 正在终止，请稍后重试。",
+            TOPIC_MESSAGES_PENDING: "Topic 仍有待发送的关闭通知，请稍后重试。",
+          }[failure];
+          if (reason) {
+            if (failure === "APPROVAL_INTERRUPTED") this.approvalState = "closed";
+            approvalVersion++;
+            throw new Error(reason);
+          }
+          throw new Error(`处理修改申请失败${failure ? `（${failure}）` : ""}：${commandError(res.out)}`);
+        }
+        approvalVersion++;
+        if (!["approved", "rejected", "answered"].includes(state)) {
+          throw new Error("未能确认修改申请的处理结果，正在刷新 Topic。请查看最新状态后重试。");
+        }
+        this.approvalState = state;
+        close();
+      } catch (e) { this.failed = String(e?.message ?? e); }
+      finally { this.sending = false; cx.notify(); }
+    });
+  }
+
+  renderApproval(t, p, close) {
+    const item = p.item, z = S(), state = this.approvalState ?? item.state;
+    const editable = state === "open", result = this.approvalResult ?? item.result, op = approvalOperation(item);
+    const decidedNote = item.note ?? this.decidedNote;
+    const section = (label, text) => v_flex().flex_none().min_w(0).gap(4)
+      .child(note(t, label)).child(div().text_size(z.body).text_color(t.foreground).child(text));
+    const body = v_flex().id("approval-body").flex_1().min_h(0).overflow_y_scrollbar().p(14).gap(14).rounded(8)
+      .border_1().border_color(t.border).bg(t.background)
+      .child(section("申请方", p.applicant))
+      .when(item.from.topic != null, (el) => el.child(note(t, `Topic ${item.from.topic}${item.from.task ? ` · Task ${item.from.task}` : ""}${item.from.terminal ? ` · terminal ${item.from.terminal}` : ""}${item.from.run ? `\n运行：${item.from.run}` : ""}`)))
+      .child(section("要做什么", item.summary)).child(section("申请理由", item.reason))
+      .child(note(t, `${ago(item.createdAt)}提交 · ${APPROVAL_WORDS[state] ?? "已被处理"}`, state === "failed" ? t.ansi1 : t.muted))
+      .child(v_flex().id("approval-operation").flex_none().min_w(0).p(12).gap(8).rounded(8).bg(t.raised)
+        .child(section(`批准后将在「${p.topic.title}」执行`, op.title))
+        .children(op.args.map((arg) => section(arg.label, arg.text)))
+        .when(!op.args.length, (el) => el.child(note(t, "无额外参数。"))))
+      .when(Boolean(decidedNote), (el) => el.child(section("处理附言", decidedNote)))
+      .when(state === "closed" && Boolean(this.noteBox.value().trim()), (el) => el.child(section("未发送的附言", this.noteBox.value())))
+      .when(Boolean(result), (el) => el.child(v_flex().id("approval-result").flex_none().min_w(0).gap(6)
+        .child(note(t, result?.ok ? "执行成功" : `执行失败${result?.failure ? ` · ${result.failure}` : ""}`, result?.ok ? t.done : t.ansi1))
+        .when(Boolean(result?.output), (node) => node.child(div().text_size(z.small).font_family(mono()).child(result.output)))))
+      .when(editable && this.replying, (el) => el.child(v_flex().id("approval-reply").flex_none().min_w(0).gap(6)
+        .child(note(t, "附言（其他回复必填，也会随批准或驳回发送）"))
+        .child(Textarea.new(this.noteBox).h(90).w_full().px(10).py(8).rounded(8).border_1()
+          .border_color(t.input).bg(t.background).text_size(z.body).text_color(t.foreground))));
+    const ready = editable && !this.sending;
+    return dialogFrame(t, "approval", "跨 Topic 修改申请", [
+      body, this.failed && div().id("approval-error").flex_none().max_h(120).overflow_y_scrollbar()
+        .text_size(z.small).text_color(t.ansi1).child(this.failed),
+    ], [
+      dialogButton("cancel", editable ? "取消" : "关闭", t, close),
+      editable && dialogButton("approval-other", this.replying ? "收起附言" : "其他回复", t,
+        (_e, cx) => { if (!this.sending) { this.replying = !this.replying; cx.notify(); } }, "secondary", ready),
+      editable && this.replying && dialogButton("approval-answer", "发送回复", t,
+        (_e, cx) => this.decideApproval(cx, p, "answer", close), "secondary", ready && Boolean(this.noteBox.value().trim())),
+      editable && dialogButton("approval-reject", "驳回", t,
+        (_e, cx) => this.decideApproval(cx, p, "reject", close), "secondary", ready),
+      editable && dialogButton("approval-approve", this.sending ? "处理中…" : "批准并执行（推荐）", t,
+        (_e, cx) => this.decideApproval(cx, p, "approve", close), "primary", ready),
+    ], close);
+  }
 
   // A structured doc: the outline (all, then each group and its parts), and what the chosen entry shows.
   renderDoc(t, p) {
@@ -1601,6 +1798,79 @@ export default class Dispatch extends View {
     return box;
   }
 
+  renderDependencies(t, p, close) {
+    const editable = !p.topic.archived && !p.topic.deleting;
+    const list = v_flex().id("dependency-list").flex_1().min_h(0).overflow_y_scrollbar().gap(18).p(12).rounded(8)
+      .border_1().border_color(t.border).bg(t.background);
+    for (const [direction, title, hint] of [
+      ["depends", "要等的 Task", "勾选这个 Task 开始前要等的 Task。"],
+      ["blocks", "在等它的 Task", "只能修改未绑定运行的草稿。"],
+    ]) {
+      const section = v_flex().id(`dependency-${direction}`).flex_none().min_w(0).gap(8)
+        .child(div().text_size(S().body).font_semibold().child(title)).child(note(t, hint));
+      const groups = (p.groups ?? []).map((group) => ({ ...group, tasks: group.tasks.filter((task) => direction === "depends" || !task.unavailableReason) }))
+        .filter((group) => group.tasks.length);
+      if (!groups.length) section.child(note(t, "没有可选择的 Task。"));
+      for (const group of groups) {
+        section.child(v_flex().flex_none().min_w(0).gap(4)
+          .child(div().text_size(S().small).font_semibold().text_color(t.muted)
+            .child(`${group.title} · ${group.id}${group.archived ? " · 已归档" : ""}${group.id === p.topic.id ? " · 本 Topic" : ""}`))
+          .children(group.tasks.map((task) => {
+            const selected = this[direction].has(task.ref);
+            const enabled = editable && !this.sending && (direction === "depends" ? !task.unavailableReason || selected : task.canBlock);
+            const status = (task.unavailableReason ?? MARK_WORDS[task.status] ?? task.status)
+              + (direction === "blocks" && task.pendingBlock ? " · 待批准" : "");
+            return h_flex().id(`${direction}-${task.ref}`).min_h(40).px(8).py(6).gap(8).items_start().rounded(6)
+              .bg(selected ? t.selected : t.background).text_color(enabled ? t.foreground : t.muted)
+              .tooltip(`${task.ref} · ${task.title || "已删除"} · ${status}${!enabled && direction === "blocks" ? " · 仅未绑定的草稿可修改" : ""}`)
+              .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => {
+                if (this.sending) return;
+                if (this[direction].has(task.ref)) this[direction].delete(task.ref); else this[direction].add(task.ref);
+                cx.notify();
+              }))
+              .child(div().size(16).mt(2).flex_none().rounded(3).border_1().border_color(selected ? t.accent : t.input)
+                .when(selected, (el) => el.child(icon("check", 14, t.accent))))
+              .child(v_flex().flex_1().min_w(0).gap(3)
+                .child(div().text_size(S().small).child(`${task.id} · ${task.title || "已删除"}`))
+                .child(note(t, `${status}${direction === "blocks" && !task.canBlock ? " · 不可修改" : ""}`, task.missing ? t.ansi3 : t.muted)));
+          })));
+      }
+      list.child(section);
+    }
+    const submit = (_e, cx) => {
+      if (this.sending || !editable) return;
+      const args = [];
+      for (const direction of ["depends", "blocks"]) {
+        const value = taskRefs(p.topic.id, [...this[direction]]);
+        const current = value.split(",").filter(Boolean), original = this.originalDependencies[direction];
+        if (current.length !== original.size || current.some((ref) => !original.has(ref))) {
+          args.push(`--${direction}`, value);
+        }
+      }
+      if (!args.length) { close(); return; }
+      this.sending = true; this.failed = null; cx.notify();
+      cx.spawn(async (cx) => {
+        try {
+          const res = await topicCmd(io(p.on ?? null), p.hd, ["topic", "task-edit", "--repo", p.repo, "--topic", p.topic.id,
+            "--task", p.task.id, ...args]);
+          if (!res.ok) throw new Error(dependencyError(res.out));
+          dependencyVersion++;
+          close();
+        } catch (e) {
+          this.failed = String(e?.message ?? e); this.sending = false; cx.notify();
+        }
+      });
+    };
+    return dialogFrame(t, "dependencies", "编辑依赖", [
+      note(t, `${p.task.id} · ${p.task.title}`, t.foreground), list,
+      this.failed && div().id("dependency-error").flex_none().max_h(120).overflow_y_scrollbar()
+        .text_size(S().small).text_color(t.ansi1).child(this.failed),
+    ], [
+      dialogButton("cancel", "取消", t, close),
+      dialogButton("save-dependencies", this.sending ? "保存中…" : "保存", t, submit, "primary", editable && !this.sending),
+    ], close);
+  }
+
   renderForm(t, p, close) {
     const role = p.role, topic = p.topic, task = p.task;
     const title = this.titleBox.value(), detail = this.detailBox.value(), text = this.backlogBox.value();
@@ -1771,6 +2041,8 @@ export default class Dispatch extends View {
         .child(`${when(n.at)}${n.end ? ` → ${when(n.end)}` : ""}`))));
     if (p.detail) box.child(v_flex().gap(4).child(head("说明")).child(div().text_size(z.small).text_color(t.foreground).child(p.detail)));
     if (p.deps?.length) box.child(v_flex().gap(4).child(head("依赖")).child(div().text_size(z.small).child(p.deps.join("、"))));
+    box.child(v_flex().gap(4).child(head("在等它的 Task"))
+      .child(div().text_size(z.small).child(p.blocks?.length ? p.blocks.join("、") : "没有 Task 在等它。")));
     if (n.line) box.child(v_flex().gap(4).child(head("结论")).child(div().text_size(z.small).text_color(n.status === "abandoned" ? t.muted : t.foreground).child(n.line)));
     if (n.done.length) box.child(v_flex().gap(3).child(head("已完成", t.done)).children(bullets(n.done, t.done)));
     if (n.open.length) box.child(v_flex().gap(3).child(head("遗留待决", t.ansi3)).children(bullets(n.open, t.ansi3)));
@@ -1850,6 +2122,8 @@ export default class Dispatch extends View {
   renderDialog() {
     const t = theme(), p = blockProps() ?? {}, close = () => closeOverlay(p.overlay);
     if (["dispatch", "task", "backlog", "newtopic"].includes(p.role)) return this.renderForm(t, p, close);
+    if (p.role === "dependencies") return this.renderDependencies(t, p, close);
+    if (p.role === "approval") return this.renderApproval(t, p, close);
     if (p.role === "abandon") return this.renderAbandon(t, p, close);
     if (p.role === "messages") return this.renderMessages(t, p, close);
     if (p.role === "text") {

@@ -55,7 +55,9 @@ Herdr 原生 Agents 栏负责"谁活着、什么状态、谁是谁的子 agent"�
 
 Topic 下的 Task 按 **等你 / 进行中 / 待分发 / 已完成** 分组，摘要按钮里看说明、结论、产物和每张卡片的回报，展开看运行中的任务卡、子 agent 轮次、回报检查、失败原因和历史。行内可跳转终端、读回报与任务文件、看 worktree 改动，或经确认请主 agent 收回报、诊断和清理终端。Topic 的汇总统计合并下属运行，后台任务按会话与任务编号去重。
 
-**草稿与待细化条目**：可以新建 Topic、增加或编辑未启动的 Task，也可以先记下 backlog 条目，请主 agent 细化成一批草稿 Task。细化提交后等待你派发；主 agent 收尾也可提议下一步草稿。已绑定运行的 Task 不再编辑；修改草稿职责、说明或待细化条目会撤销相应旧请求。
+**草稿与待细化条目**：可以新建 Topic、增加或编辑未启动的 Task，也可以先记下 backlog 条目，请主 agent 细化成一批草稿 Task。主 agent 在建草稿、细化和编辑时主动识别并标记依赖与阻挡；`task-add`、`task-edit` 用 `--depends` 表示要等谁、`--blocks` 表示谁要等本 Task，`refined` 草稿对应使用 `depends_on`、`blocks` 数组。编辑时两项都是全集，省略保留、空串清空；新增或移除阻挡边要求等待方未绑定，已存在且未变化的边可以保留。依赖与阻挡一起校验，成环等失败不会部分写入。细化提交后等待你派发；主 agent 收尾也可提议下一步草稿。已绑定运行的 Task 不再编辑；修改草稿职责、说明或待细化条目会撤销相应旧请求。
+
+有终端的调用者修改 Topic 的 Task、backlog、请求或生命周期时，必须是该 Topic 的负责人，或该 Topic 下未完成绑定运行的控制终端；否则返回 `NOT_OWNER`。面板和用户不带 `HC_TERMINAL_ID`，操作方式不变。主 agent 修改其他 Topic 时使用 `topic approval-request` 提交修改申请，等待用户在对方 Topic 的面板通过 `topic approval-decide` 批准并执行、驳回或回复，结果以 notice 送回申请方；申请方可用 `topic approval-withdraw` 撤回未决申请，目标 Topic 归档或删除时也会自动撤回。终端调用者通过 `--blocks` 或细化草稿的 `blocks` 改动跨 Topic 阻挡时，脚本自动提交等待方的 `task-edit --depends` 申请并输出 `APPROVAL=<topic>:<id>`（多个用逗号分隔），本 Topic 部分正常保存，对方 Task 等待批准后更新。
 
 **派发请求**：选择由主 agent 接手，或在新标签页启动。交给主 agent 的请求先排队，只在它在线、空闲且没有进行中的 Task 时投递；细化只要求空闲。Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`，其他 agent 收到同义文字。面板显示请求排队或已送达，可撤销、重发或改派。skill 通过 `topic start` 核对仍有效的请求，读取 Task 说明并绑定运行；原有确认点照常保留。
 

@@ -20,6 +20,7 @@ export const ASKS_SEP = "@@cc-dispatch-asks ";
 export const ANSWERS_SEP = "@@cc-dispatch-answers ";
 export const TOPIC_SEP = "@@cc-dispatch-topic ";
 export const BACKLOG_SEP = "@@cc-dispatch-backlog ";
+export const APPROVALS_SEP = "@@cc-dispatch-approvals ";
 export const STATE_SEP = "@@cc-dispatch-state ";
 export const MESSAGE_SUMMARY_SEP = "@@cc-dispatch-message-summary ";
 
@@ -68,6 +69,11 @@ export const LIST_SCRIPT = [
   '    if [ -f "$b" ]; then',
   `      printf '\\n${BACKLOG_SEP}%s\\n' "$b"`,
   '      cat "$b"',
+  '    fi',
+  '    a="${f%/topic.json}/approvals.json"',
+  '    if [ -e "$a" ]; then',
+  `      printf '\\n${APPROVALS_SEP}%s\\n' "$a"`,
+  '      cat "$a"',
   '    fi',
   '  done',
   'done',
@@ -163,16 +169,77 @@ export function parseAsks(text) {
 // Keep source paths and grouping context without adding fields to the public Topic / Task shapes.
 const topicDirs = new WeakMap(), taskContexts = new WeakMap(), runTerminals = new WeakMap();
 
-/** Topic JSON and its optional backlog, following the existing run sections. */
+const APPROVAL_STATES = ["open", "approved", "failed", "rejected", "answered", "withdrawn"];
+export const APPROVAL_WORDS = {
+  open: "待处理", approved: "已批准并执行", failed: "已批准 · 执行失败", rejected: "已驳回", answered: "已回复", withdrawn: "已撤回",
+};
+const APPROVAL_OPS = {
+  "task-add": "新建 Task 草稿", "task-edit": "修改 Task 草稿", "task-rm": "删除 Task 草稿",
+  "backlog-add": "新增待细化条目", "backlog-edit": "修改待细化条目", "backlog-rm": "删除待细化条目",
+  request: "调整派发或细化请求", abandon: "放弃 Task", pause: "暂停 Topic", resume: "继续 Topic",
+};
+
+/** Missing approvals are empty; a damaged file is explicitly unreadable, never a processed list. */
+export function parseApprovals(text) {
+  const empty = { open: [], history: [], readFailed: false };
+  if (text == null) return empty;
+  const value = parseJSON(text);
+  if (!objectJSON(value) || !Array.isArray(value.items) || !Number.isInteger(value.next) || value.next < 1 || value.items.some((item) =>
+    !objectJSON(item) || typeof item.id !== "string" || !item.id
+    || !objectJSON(item.from) || !(typeof item.from.topic === "string" && item.from.topic
+      || item.from.topic === null && typeof item.from.terminal === "string" && item.from.terminal
+        && item.from.task == null && item.from.run == null)
+    || ["task", "terminal", "agent", "run"].some((key) => item.from[key] != null && typeof item.from[key] !== "string")
+    || !Object.prototype.hasOwnProperty.call(APPROVAL_OPS, item.op) || !objectJSON(item.args)
+    || typeof item.summary !== "string" || typeof item.reason !== "string"
+    || typeof item.created !== "number" || !Number.isFinite(item.created)
+    || !APPROVAL_STATES.includes(item.state)
+    || (item.decided_at != null && (typeof item.decided_at !== "number" || !Number.isFinite(item.decided_at)))
+    || (item.note != null && typeof item.note !== "string")
+    || (item.result != null && (!objectJSON(item.result) || typeof item.result.ok !== "boolean"
+      || (item.result.failure != null && typeof item.result.failure !== "string")
+      || typeof item.result.output !== "string")))) return { ...empty, readFailed: true };
+  const items = value.items.map((item) => ({ ...item, createdAt: item.created * 1000,
+    decidedAt: item.decided_at == null ? null : item.decided_at * 1000 }));
+  return {
+    open: items.filter((item) => item.state === "open").sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
+    history: items.filter((item) => item.state !== "open").sort((a, b) =>
+      (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt) || b.id.localeCompare(a.id)),
+    readFailed: false,
+  };
+}
+
+/** Describe the exact stored operation and every argument without reconstructing a shell command. */
+export function approvalOperation(item) {
+  const labels = { task: "Task", title: "标题", kind: "职责", detail: "说明", depends: "要等的 Task", blocks: "在等它的 Task",
+    add_depends: "增加依赖", remove_depends: "移除依赖",
+    from_backlog: "来源条目", item: "条目", text: "内容", items: "条目", type: "请求类型", target: "接收方",
+    agent: "agent", cancel: "撤销请求", resend: "重发请求", reason: "放弃原因", force: "仍然放弃" };
+  return {
+    title: `${APPROVAL_OPS[item.op] ?? item.op}（${item.op}）`,
+    args: Object.entries(item.args ?? {}).map(([key, value]) => {
+      const name = key.replace(/-/g, "_");
+      const words = { target: { owner: "Topic 负责人", new_tab: "新标签页" }, type: { dispatch: "派发 Task", refine: "细化条目" } };
+      const text = typeof value === "boolean" ? value ? "是" : "否"
+        : value === "" ? ["depends", "blocks"].includes(name) ? "清空" : "空字符串"
+        : words[name]?.[value] ?? (typeof value === "string" ? value : JSON.stringify(value));
+      return { label: `${labels[name] ?? key}（--${key.replace(/_/g, "-")}）`, text };
+    }),
+  };
+}
+
+/** Topic JSON and its optional backlog and approvals, following the existing run sections. */
 export function parseTopics(text) {
   const out = {};
   for (const part of sectionsOf(beforeSections(text, [STATE_SEP, MESSAGE_SUMMARY_SEP]), TOPIC_SEP)) {
-    const [chunk, back] = part.split(`\n${BACKLOG_SEP}`), nl = chunk.indexOf("\n");
+    const [data, approval] = part.split(`\n${APPROVALS_SEP}`);
+    const [chunk, back] = data.split(`\n${BACKLOG_SEP}`), nl = chunk.indexOf("\n");
     if (nl < 0) continue;
     const path = chunk.slice(0, nl).trim(), topic = parseJSON(chunk.slice(nl + 1));
     if (!path || !objectJSON(topic) || typeof topic.id !== "string" || !topic.id) continue;
     const backlog = back ? parseJSON(back.slice(back.indexOf("\n") + 1)) : null;
     out[topic.id] = { topic, backlog: objectJSON(backlog) ? backlog : { items: [] } };
+    if (approval != null) out[topic.id].approvals = parseApprovals(approval.slice(approval.indexOf("\n") + 1));
     topicDirs.set(topic, path.replace(/\/topic\.json$/, ""));
   }
   return out;
@@ -468,7 +535,7 @@ const requestView = (r) => objectJSON(r) ? {
 /** Explicit Topics and historical, single-run Topics share the same panel shape. */
 export function buildTopics(runs, topics = {}, states = {}, summaries = []) {
   const list = [], claimed = new Set(), allRuns = runs ?? [];
-  for (const { topic: raw, backlog } of Object.values(topics ?? {})) {
+  for (const { topic: raw, backlog, approvals } of Object.values(topics ?? {})) {
     if (!objectJSON(raw) || !raw.id) continue;
     const topic = {
       id: raw.id, title: raw.title ?? raw.id, implicit: false, archived: epochMs(raw.archived),
@@ -476,6 +543,7 @@ export function buildTopics(runs, topics = {}, states = {}, summaries = []) {
       createdAt: epochMs(raw.created_at) ?? 0, tasks: [], backlog: [], runs: [], updatedAt: 0,
       follows: Array.isArray(raw.follows) ? raw.follows.filter((id) => typeof id === "string") : [],
       messages: { unacked: 0, openIn: 0, answersUnacked: 0, openOut: 0 },
+      approvals: approvals ?? parseApprovals(null),
     };
     const dir = topicDirs.get(raw);
     if (dir) topicDirs.set(topic, dir);
@@ -525,6 +593,7 @@ export function buildTopics(runs, topics = {}, states = {}, summaries = []) {
       archived: run.archived ?? null, pausedAt: run.control?.state === "paused" ? epochMs(run.control.at) : null,
       deleting: false, owner: null, createdAt: run.startedAt || 0, tasks: [task], backlog: [], runs: [run], updatedAt: 0,
       follows: [], messages: { unacked: 0, openIn: 0, answersUnacked: 0, openOut: 0 },
+      approvals: parseApprovals(null),
     });
   }
   for (const topic of list) {
@@ -544,6 +613,7 @@ export function buildTopics(runs, topics = {}, states = {}, summaries = []) {
     }
     for (const task of topic.tasks) task.group = taskGroup(task, topic);
     topic.updatedAt = Math.max(topic.createdAt, topic.archived || 0, topic.pausedAt || 0, lastMessageAt,
+      ...[...topic.approvals.open, ...topic.approvals.history].flatMap((item) => [item.createdAt, item.decidedAt || 0]),
       ...topic.tasks.flatMap((t) => [t.createdAt, t.startedAt || 0, t.finishedAt || 0, t.abandonedAt || 0, t.request?.at || 0, t.request?.deliveredAt || 0]),
       ...topic.backlog.flatMap((b) => [b.updatedAt, b.request?.at || 0, b.request?.deliveredAt || 0]),
       ...topic.runs.map((r) => r.lastAt || r.startedAt || 0));
@@ -606,13 +676,107 @@ export function dependencyText(topics, srcTopic, dep) {
     cycle: `依赖成环：${dep.path.join(" → ")} · 请编辑依赖` }[dep.state] ?? "";
 }
 
+/** The script accepts local kN refs and explicit Topic:kN refs. */
+export function parseTaskRef(srcTopic, ref) {
+  if (typeof ref !== "string" || !/^(?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)?k[1-9][0-9]*$/.test(ref)) return null;
+  const parts = ref.split(":");
+  return { topic: parts.length === 1 ? srcTopic : parts[0], task: parts.at(-1) };
+}
+
+/** Normalize and deduplicate selections, retaining invalid old refs until the user removes them. */
+export function taskRefs(srcTopic, refs) {
+  return [...new Set((refs ?? []).map((ref) => {
+    const parsed = parseTaskRef(srcTopic, ref);
+    return parsed ? parsed.topic === srcTopic ? parsed.task : `${parsed.topic}:${parsed.task}` : String(ref ?? "");
+  }).filter(Boolean))].join(",");
+}
+
+const dependencyPeers = (topics, srcTopic) => {
+  const repo = (topic) => topicDir(topic)?.replace(/\/\.cc-dispatch\/topics\/[^/]+$/, "") ?? topic?.repo;
+  const sourceRepo = repo(srcTopic), sourceOn = srcTopic?.on ?? null;
+  return (topics ?? []).filter((topic) => !topic.implicit
+    && (!sourceRepo || repo(topic) === sourceRepo) && (topic.on ?? null) === sourceOn);
+};
+
+function reverseEdges(peers, srcTopic, srcTask) {
+  const refs = new Set(), pending = new Set();
+  for (const topic of peers) {
+    for (const task of topic.tasks ?? []) {
+      if (topic.id === srcTopic.id && task.id === srcTask.id) continue;
+      if ((task.dependsOn ?? []).some((value) => {
+        const parsed = parseTaskRef(topic.id, value);
+        return parsed?.topic === srcTopic.id && parsed.task === srcTask.id;
+      })) refs.add(topic.id === srcTopic.id ? task.id : `${topic.id}:${task.id}`);
+    }
+    if (topic.id === srcTopic.id) continue;
+    for (const item of topic.approvals?.open ?? []) {
+      if (item.op === "task-edit" && item.from.topic === srcTopic.id && item.from.task === srcTask.id
+        && item.from.run == null && item.args.add_depends === `${srcTopic.id}:${srcTask.id}`) {
+        const target = parseTaskRef(topic.id, item.args.task);
+        if (target && target.task === item.args.task) pending.add(`${topic.id}:${target.task}`);
+      }
+    }
+  }
+  return { refs, pending };
+}
+
+/** Include selected reverse edges even when their Topic is hidden in the editor. */
+export function taskBlockRefs(topics, srcTopic, srcTask) {
+  const { refs, pending } = reverseEdges(dependencyPeers(topics, srcTopic), srcTopic, srcTask);
+  return [...new Set([...refs, ...pending])];
+}
+
+/** Same-repository choices, including automatic blocks still awaiting a decision. */
+export function dependencyChoices(topics, srcTopic, srcTask) {
+  const peers = dependencyPeers(topics, srcTopic), blocked = reverseEdges(peers, srcTopic, srcTask);
+  const selected = new Set(taskRefs(srcTopic.id, srcTask.dependsOn).split(",").filter(Boolean));
+  const groups = new Map(), available = new Set();
+  const groupFor = (id) => {
+    if (!groups.has(id)) {
+      const peer = peers.find((topic) => topic.id === id);
+      groups.set(id, { id, title: peer?.title ?? id, archived: Boolean(peer?.archived), tasks: [] });
+    }
+    return groups.get(id);
+  };
+  for (const topic of peers.filter((peer) => !peer.deleting)) {
+    for (const task of topic.tasks ?? []) {
+      if (topic.id === srcTopic.id && task.id === srcTask.id) continue;
+      const ref = topic.id === srcTopic.id ? task.id : `${topic.id}:${task.id}`;
+      const committed = blocked.refs.has(ref), pendingBlock = blocked.pending.has(ref);
+      const group = taskGroup(task, topic), request = requestState(task), control = task.run?.control;
+      const status = task.abandonedAt != null ? "abandoned" : task.finishedAt != null ? "done"
+        : control?.state === "stopped" || control?.retired ? "stopped"
+        : ["paused", "stopping", "handoff"].includes(control?.state) ? control.state
+        : group === "done" ? "done" : group === "you" ? "blocked"
+        : task.runDir || task.run ? "running" : request ?? "draft";
+      groupFor(topic.id).tasks.push({
+        id: task.id, title: task.title, ref, status, depends: selected.has(ref), blocks: committed || pendingBlock,
+        pendingBlock, missing: false, canBlock: (pendingBlock && !committed) || (!task.runDir && !task.run && !topic.archived),
+      });
+      available.add(ref);
+    }
+  }
+  for (const ref of selected) {
+    if (available.has(ref)) continue;
+    const parsed = parseTaskRef(srcTopic.id, ref), peer = peers.find((topic) => topic.id === parsed?.topic);
+    const existing = peer?.tasks?.find((task) => task.id === parsed?.task);
+    const reason = !existing ? "已删除或编号无效" : peer.deleting ? "Topic 正在删除" : "Task 不能依赖自己";
+    groupFor(parsed?.topic ?? srcTopic.id).tasks.push({
+      id: parsed?.task ?? ref, title: existing?.title ?? "", ref, status: "missing", depends: true,
+      blocks: false, missing: !existing, unavailableReason: reason, canBlock: false,
+    });
+  }
+  return [...groups.values()].sort((a, b) => (b.id === srcTopic.id) - (a.id === srcTopic.id) || a.id.localeCompare(b.id))
+    .map((group) => ({ ...group, tasks: group.tasks.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)) || a.id.localeCompare(b.id)) }));
+}
+
 /** A question's terminal state takes precedence over delivery and acknowledgement. */
 export const questionState = (item) => item?.kind !== "question" ? null
   : item.answer ? "answered" : item.withdrawn_at != null ? "withdrawn" : item.dropped ? "dropped" : "open";
 
 export function messageStatus(item) {
   const state = questionState(item);
-  const delivery = item.acked_at != null ? "已确认" : item.delivered ? "已送达" : "排队";
+  const delivery = item.user_seen === true ? "已读" : item.acked_at != null ? "已确认" : item.delivered ? "已送达" : "排队";
   const word = { open: "待回答", answered: "已回答", withdrawn: "已撤销", dropped: "已作废" }[state];
   return state === "withdrawn" || state === "dropped" ? word
     : item.dropped && !state ? "已作废" : [word, delivery].filter(Boolean).join(" · ");
@@ -635,8 +799,9 @@ export function messageGroups(data, topics = []) {
       const own = item.from?.user || (!incoming && item.from?.topic === data.topic);
       groups.get(id).items.push({ item, direction, status: messageStatus(item),
         canWithdraw: Boolean(own && state === "open"),
-        canAck: Boolean((incoming && item.acked_at == null && item.withdrawn_at == null && !item.dropped)
-          || (item.answer && item.answer.acked_at == null && own)),
+        canAck: Boolean(item.user_seen !== true
+          && ((incoming && item.acked_at == null && item.withdrawn_at == null && !item.dropped)
+            || (item.answer && item.answer.acked_at == null && own))),
       });
     }
   }
@@ -691,7 +856,8 @@ export function taskCards(task) {
  * rest that are not archived, each newest first; archived last, most recently archived first.
  */
 export function orderTopics(topics) {
-  const running = (x) => x.tasks.some((task) => ["active", "you"].includes(taskGroup(task, x)));
+  const running = (x) => x.approvals?.open.length > 0 || x.approvals?.readFailed
+    || x.tasks.some((task) => ["active", "you"].includes(taskGroup(task, x)));
   const open = topics.filter((x) => !x.archived);
   return {
     running: open.filter((x) => !x.pausedAt && running(x)),

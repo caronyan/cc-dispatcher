@@ -323,7 +323,12 @@ class Topics(unittest.TestCase):
         topic = self.init("Made outside herdr", HC_TERMINAL_ID="")
         self.assertIsNone(self.data(topic)["owner"]["terminal"])
         self.command("start", "--run", self.w.run_dir, "--topic", topic)
-        self.assertTrue(self.data(topic)["owner"]["terminal"])
+        self.assertEqual(self.data(topic)["owner"]["terminal"], "t1")
+        before = self.snapshot(topic)
+        result = self.command("start", "--run", self.new_run("dev-next"), "--topic", topic,
+                              HC_TERMINAL_ID="t2", code=3)
+        self.assertEqual(result["FAILURE"], "NOT_OWNER")
+        self.assertEqual(self.snapshot(topic), before)
 
     def test_list_shows_this_terminals_open_topics_and_their_tasks(self):
         mine = self.start(title="Build")

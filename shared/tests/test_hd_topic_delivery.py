@@ -28,6 +28,10 @@ class TopicDelivery(unittest.TestCase):
         self.b = self.command("init", "--title", "Second", HC_TERMINAL_ID="t2")["TOPIC"]
 
     def raw(self, name, *args, **env):
+        if name in self.hd.TOPIC_WRITER_COMMANDS and "--topic" in args:
+            topic = args[args.index("--topic") + 1]
+            data = self.hd.read_json(self.hd.topic_dir(self.w.repo, topic) / "topic.json", {})
+            env.setdefault("HC_TERMINAL_ID", (data.get("owner") or {}).get("terminal") or "")
         result = self.w.hd("topic", name, "--repo", str(self.w.repo), *map(str, args), **env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -76,9 +80,14 @@ class TopicDelivery(unittest.TestCase):
     def bind(self, topic=None, run=None, terminal="t2"):
         run = run or self.w.run_dir
         run.mkdir(exist_ok=True)
-        task = self.command("task-add", "--topic", topic or self.b, "--title", "Task",
+        topic = topic or self.b
+        task = self.command("task-add", "--topic", topic, "--title", "Task",
                             "--kind", "dev")["TASK"]
-        self.command("start", "--run", run, "--topic", topic or self.b, "--task", task,
+        flags = []
+        if self.hd.load_topic(self.w.repo, topic)["owner"]["terminal"] != terminal:
+            request = self.command("request", "--topic", topic, "--task", task, "--target", "new_tab")
+            flags = ["--request", request["REQUEST"]]
+        self.command("start", "--run", run, "--topic", topic, "--task", task, *flags,
                      HC_TERMINAL_ID=terminal)
         return run, task
 

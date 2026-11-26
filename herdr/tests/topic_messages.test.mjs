@@ -139,6 +139,23 @@ test("message groups retain delivery and question states and only allow authoriz
   assert.equal(model.questionState(item("race", { kind: "question", answer: {}, withdrawn_at: 2, dropped: "deleted" })), "answered");
 });
 
+test("user_seen notices appear read without changing delivery or agent acknowledgement fields", () => {
+  const known = item("known", { kind: "notice", user_seen: true });
+  const ordinary = item("e-approval-ordinary", { kind: "notice" });
+  const rows = model.messageGroups({ topic: "A", incoming: [known, ordinary] })[0].items;
+  assert.equal(rows[0].status, "已读");
+  assert.equal(rows[0].canAck, false);
+  assert.equal(rows[1].canAck, true);
+  assert.equal(rows[1].status, "排队");
+  assert.equal(known.acked_at, null);
+  assert.equal(known.delivered, null);
+  assert.equal(model.messageStatus({ ...known, delivered: { terminal: "t1" }, acked_at: 3 }), "已读");
+  const topics = model.buildTopics([], { A: record("A") }, {}, [
+    { topic: "A", repo: null, summary: { unacked: 1, open_in: 0, by_sender: {} } },
+  ]);
+  assert.equal(topics[0].messages.unacked, 1);
+});
+
 function node() {
   const target = { attrs: {}, nodes: [] };
   const proxy = new Proxy(target, {
@@ -219,6 +236,20 @@ test("the message dialog reads inbox as user, groups peers, and rereads after se
   assert.equal(h.calls.at(-1).args[1], "inbox");
   assert.equal(h.view.messageBox.value(), "");
   assert.ok(h.remote.every((on) => on === "remote"));
+});
+
+test("the message dialog shows user_seen approval outcomes as read without a confirm button", async () => {
+  const h = harness(dialogProps());
+  h.setData({ topic: "A", incoming: [
+    item("known", { kind: "notice", user_seen: true, text: "修改申请已批准" }),
+    item("ordinary", { kind: "notice", text: "普通消息" }),
+  ], answers: [], outgoing: [] });
+  h.view.init({}, h.cx); await h.flush();
+  const dialog = h.view.renderDialog();
+  assert.ok(texts(dialog).includes("修改申请已批准"));
+  assert.ok(texts(dialog).some((text) => text.includes("已读")));
+  assert.equal(byId(dialog, "ack-known"), undefined);
+  assert.ok(byId(dialog, "ack-ordinary"));
 });
 
 test("failed message changes keep the draft and reread current state; long or archived messages cannot send", async () => {
@@ -340,6 +371,7 @@ test("each refresh in a repository with Topics delivers without requests and rel
   const h = harness({}, {
     findRepo: async () => "/plain",
     loadRuns: async () => ({ runs: [], topics: [], states: {}, error: null }),
+    exec: async () => ({ code: 1 }),
     topicCmd: async (_files, _hd, args) => { calls.push(Array.from(args)); return { ok: true, out: "" }; },
   });
   h.view.init({}, h.cx);
@@ -361,6 +393,26 @@ test("static app checks retain the existing guard against delivery side effects"
   assert.equal(delivered, false);
 });
 
+test("refresh still delivers queued terminal results after the final Topic was deleted", async () => {
+  const calls = [], probes = [];
+  let loads = 0;
+  const h = harness({}, {
+    findRepo: async () => "/r",
+    loadRuns: async () => { loads++; return { runs: [], topics: [], states: {}, error: null }; },
+    exec: async (_program, args) => { probes.push(Array.from(args)); return { code: 0 }; },
+    topicCmd: async (_files, _hd, args) => {
+      calls.push(Array.from(args));
+      return { ok: true, out: "MESSAGE_DELIVERED=terminal:term-4" };
+    },
+  });
+  h.view.init({}, h.cx);
+  Object.assign(h.view, { ctx: { folder: "/r" }, refreshStats() {}, refreshQuota() {}, refreshPrograms() {} });
+  h.view.refresh(h.cx); await h.flush();
+  assert.deepEqual(calls, [["topic", "deliver", "--repo", "/r"]]);
+  assert.equal(loads, 2);
+  assert.equal(probes.length, 1);
+});
+
 test("marker text inside any dumped JSON value cannot cut or forge a list section", () => {
   const title = `x ${model.MESSAGE_SUMMARY_SEP}y ${model.STATE_SEP}z ${model.TOPIC_SEP}w ${model.SEP}v ${model.ASKS_SEP}u`;
   const dump = [
@@ -375,9 +427,10 @@ test("marker text inside any dumped JSON value cannot cut or forge a list sectio
   assert.equal(model.parseAsks(dump)["/r/.cc-dispatch/dev-a"].asks.q1.title, title);
 });
 
-test("the panel delivers only in a repository with Topics, reloads on any delivery change, and keeps Topics with unread answers in view", () => {
+test("the panel delivers in repositories with current or historical Topics, reloads changes and keeps unread answers in view", () => {
   const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
-  assert.match(main, /if \(repo && topics\.some\(\(topic\) => !topic\.implicit\) && !checking\(\)\)/, "main.js: call topic deliver only when the repository has Topics");
+  assert.match(main, /repo && !checking\(\) && \(topics\.some\(\(topic\) => !topic\.implicit\)/, "main.js: delivery requires a repository outside static checks");
+  assert.match(main, /test -d "\$1\/\.cc-dispatch\/topics"/, "main.js: deleted Topics can retain terminal notices");
   assert.match(main, /\["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"\]\.some/, "main.js: reload the list on UPDATED as well");
   assert.match(main, /topic\.messages\?\.answersUnacked \?\? 0\) > 0/, "main.js: unread answers keep an ended Topic out of the earlier list");
 });

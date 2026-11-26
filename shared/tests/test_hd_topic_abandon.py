@@ -121,6 +121,7 @@ class TopicAbandon(unittest.TestCase):
     def test_another_live_main_refuses_and_force_can_override(self):
         self.bind()
         self.hd.set_control(self.w.run_dir, state="running", owner="t1")
+        self.alter(owner=dict(self.data()["owner"], terminal="t9"))
         topic_before = self.snapshot(self.folder)
         run_before = self.snapshot(self.w.run_dir)
         self.assertEqual(self.abandon(code=3, HC_TERMINAL_ID="t9")["FAILURE"], "MAIN_LIVE")
@@ -134,8 +135,10 @@ class TopicAbandon(unittest.TestCase):
 
     def test_main_is_checked_from_helper_parent_without_control_owner(self):
         self.bind()
+        self.hd.write_json(self.w.run_dir / "control.json", {"state": "running"})
         meta = self.w.dispatch()
         self.w.patch(meta["name"], status="done")
+        self.alter(owner=dict(self.data()["owner"], terminal="t9"))
         self.assertEqual(self.abandon(code=3, HC_TERMINAL_ID="t9")["FAILURE"], "MAIN_LIVE")
         self.assertEqual(self.abandon()["ABANDONED"], self.task)
 
@@ -225,7 +228,7 @@ class TopicAbandon(unittest.TestCase):
         self.hd.set_control(self.w.run_dir, state="handoff", owner="t1",
                             package=str(self.w.run_dir / "handoff" / "1"),
                             prev={"state": "paused", "held": ["a"]})
-        self.assertEqual(self.abandon(HC_TERMINAL_ID="t9")["ABANDONED"], self.task)
+        self.assertEqual(self.abandon(HC_TERMINAL_ID="")["ABANDONED"], self.task)
         control = self.hd.control(self.w.run_dir)
         self.assertEqual(control["state"], "running")
         self.assertEqual(control["retired"]["from"], "handoff")

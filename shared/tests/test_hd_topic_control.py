@@ -23,7 +23,12 @@ class TopicControl(unittest.TestCase):
         self.topic = self.init()
 
     def command(self, name, *args, code=0):
-        result = self.w.hd("topic", name, "--repo", str(self.w.repo), *map(str, args))
+        env = {}
+        if name in self.hd.TOPIC_WRITER_COMMANDS and "--topic" in args:
+            topic = args[args.index("--topic") + 1]
+            data = self.hd.read_json(self.hd.topic_dir(self.w.repo, topic) / "topic.json", {})
+            env["HC_TERMINAL_ID"] = (data.get("owner") or {}).get("terminal") or ""
+        result = self.w.hd("topic", name, "--repo", str(self.w.repo), *map(str, args), **env)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         return self.w.kv(result)
 

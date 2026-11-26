@@ -171,6 +171,7 @@ RUN_CONTROL=paused (at its timeout) or RUN_CONTROL=stopped STOP_REPORT=<path>.
 import argparse
 import contextlib
 import fcntl
+import io
 import json
 import os
 import re
@@ -263,6 +264,9 @@ def fail(msg, failure="other", code=2):
 
 
 def hc(*args, check=False):
+    # A process argument cannot carry NUL or unpaired surrogates; clean them so one stored text
+    # cannot stall delivery.
+    args = tuple(arg.replace("\0", "").encode("utf-8", "replace").decode("utf-8") for arg in args)
     r = subprocess.run(["hc", *args], capture_output=True, text=True)
     if check and r.returncode != 0:
         fail(f"HC_ERROR: hc {' '.join(args[:2])}: {(r.stderr or r.stdout).strip()[:400]}")
@@ -2306,8 +2310,9 @@ def depends_blockers(repo, src_topic, task):
     return [state for state in states if state["state"] in ("pending", "stopped", "cycle")]
 
 
-def validate_task_depends(repo, topic, tid, data):
-    snapshots = {topic: data}
+def validate_task_depends(repo, topic, tid, data, snapshots=None):
+    snapshots = dict(snapshots or {})
+    snapshots[topic] = data
     for ref in data["tasks"][tid].get("depends_on", []):
         target, task_id = parse_ref(topic, ref)
         if (target, task_id) == (topic, tid):
@@ -2346,6 +2351,164 @@ def add_topic_task(data, title, kind, detail="", depends_on=None, from_backlog=N
     return tid
 
 
+def auto_block_edge(item, topic):
+    sender = item["from"]
+    source, target = sender.get("task"), item["args"].get("task")
+    if (item["state"] == "open" and item["op"] == "task-edit" and source and target
+            and sender.get("topic") == topic and sender.get("run") is None):
+        for flag in ("add_depends", "remove_depends"):
+            if item["args"].get(flag) == f"{topic}:{source}":
+                return source, target, flag
+    return None
+
+
+@contextmanager
+def task_dependency_topics(repo, topic, refs=(), replace=None):
+    """The dependency lock stabilizes edges during discovery. Re-read writable Topics under sorted locks."""
+    topics = {topic}
+    for ref in refs:
+        target = parse_ref(topic, ref, strict=False)
+        if target:
+            topics.add(target[0])
+    if replace is not None:
+        for path in (Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json"):
+            target = path.parent.name
+            if target in topics:
+                continue
+            data = read_json_strict(path, {})
+            if any(f"{topic}:{replace}" in task.get("depends_on", [])
+                   for task in data.get("tasks", {}).values()):
+                topics.add(target)
+            elif any(edge and edge[0] == replace for edge in (
+                    auto_block_edge(item, topic) for item in load_approvals(repo, target)["items"])):
+                topics.add(target)
+    with contextlib.ExitStack() as locks:
+        for target in sorted(topics):
+            locks.enter_context(topic_lock(repo, target))
+        snapshots = {target: read_json_strict(topic_dir(repo, target) / "topic.json", {})
+                     for target in sorted(topics)}
+        if not snapshots[topic]:
+            fail(f"topic not found: {topic}", failure="TOPIC_NOT_FOUND", code=3)
+        yield snapshots
+
+
+def apply_task_blocks(topic, blocks, snapshots, replace=False):
+    """Change only added or removed reverse edges, leaving retained bound or closed targets untouched."""
+    changed = {}
+    for tid, refs in blocks.items():
+        wanted = {parse_ref(topic, ref) for ref in refs}
+        source = (topic, tid)
+        if source in wanted:
+            fail(f"task cannot depend on itself: {topic}:{tid}", failure="DEPENDS_SELF", code=3)
+        for target, task_id in sorted(wanted):
+            if task_id not in snapshots.get(target, {}).get("tasks", {}):
+                fail(f"dependency not found: {target}:{task_id}", failure="DEPENDS_MISSING", code=3)
+        candidates = wanted
+        if replace:
+            candidates = ((target, task_id) for target, data in snapshots.items()
+                          for task_id in data.get("tasks", {}))
+        existing = {(target, task_id) for target, task_id in candidates if any(
+            parse_ref(target, dep, strict=False) == source
+            for dep in snapshots[target]["tasks"][task_id].get("depends_on", []))}
+        for target, task_id in sorted(wanted ^ existing):
+            data = snapshots[target]
+            task = topic_task(data, task_id, draft=True)
+            topic_writable(data)
+            depends = task.get("depends_on", [])
+            if (target, task_id) in wanted:
+                ref = tid if target == topic else f"{topic}:{tid}"
+                task["depends_on"] = [*depends, ref]
+            else:
+                task["depends_on"] = [ref for ref in depends
+                                      if parse_ref(target, ref, strict=False) != source]
+            flag = "add_depends" if (target, task_id) in wanted else "remove_depends"
+            changed.setdefault((target, task_id), []).append((tid, flag))
+    return changed
+
+
+def validate_task_dependency_edits(repo, topic, snapshots, updated, changed):
+    edited = updated.union(changed)
+    for target, tid in sorted(edited):
+        validate_task_depends(repo, target, tid, snapshots[target], snapshots)
+    pending = {target for target, _ in changed if target != topic}
+    if os.environ.get("HC_TERMINAL_ID") and pending:
+        committed = dict(snapshots)
+        for target in pending:
+            committed[target] = read_json_strict(topic_dir(repo, target) / "topic.json", {})
+        # A requested remote removal has not happened yet; local edits must also be safe while waiting.
+        for target, tid in sorted(edited):
+            if target == topic:
+                validate_task_depends(repo, target, tid, committed[target], committed)
+
+
+def reconcile_block_requests(repo, topic, snapshots, keep, replace):
+    pending = {target for target, *_ in keep}
+    stores = {target: load_approvals(repo, target) for target in snapshots if target != topic
+              and (replace is not None or target in pending)}
+    journals = {target: load_approval_journal(repo, target, store) for target, store in stores.items()}
+    retained = {}
+    for target, store in stores.items():
+        journal = journals[target]
+        if any(item["id"] in journal and auto_block_edge(item, topic) for item in store["items"]):
+            recover_approvals(repo, target, snapshots[target])
+            store = load_approvals(repo, target)
+            journal = load_approval_journal(repo, target, store)
+        for item in store["items"]:
+            edge = auto_block_edge(item, topic)
+            if not edge:
+                continue
+            key = (target, *edge)
+            if key in keep:
+                retained[key] = item["id"]
+            elif edge[0] == replace:
+                withdraw_approval(repo, target, snapshots[target], store, item, journal, "来源 Task 已重新设置阻挡")
+    return retained
+
+
+def save_task_dependency_edits(repo, topic, snapshots, changed, replace=None):
+    terminal = os.environ.get("HC_TERMINAL_ID") or None
+    requests = {(target, source, tid, flag) for (target, tid), edges in changed.items()
+                if terminal and target != topic for source, flag in edges}
+    if requests:
+        # The source was authorized by the writer guard or the acknowledged refinement request.
+        owner = snapshots[topic].get("owner") or {}
+        identity = {"topic": topic, "task": None, "terminal": terminal, "run": None,
+                    "agent": agent_on(hc_json("get", terminal)) or owner.get("agent")}
+    retained = reconcile_block_requests(repo, topic, snapshots, requests, replace)
+    direct = {topic} | {target for target, _ in changed if not terminal or target == topic}
+    for target in sorted(direct):
+        save_topic(repo, target, snapshots[target])
+    approvals = []
+    for key in sorted(requests):
+        target, source, tid, flag = key
+        aid = retained.get(key)
+        if not aid:
+            aid, _ = topic_approval_request(
+                repo, target, dict(identity, task=source), "task-edit", {"task": tid, flag: f"{topic}:{source}"},
+                f"{'新增' if flag == 'add_depends' else '移除'} {target}:{tid} 对 {topic}:{source} 的依赖。")
+        approvals.append(f"{target}:{aid}")
+    return approvals
+
+
+def user_block_selection(repo, topic, source, refs, snapshots):
+    """Separate outstanding add proposals from the user's direct graph edits."""
+    keep, effective = set(), []
+    pending = {}
+    for ref in refs:
+        target, tid = parse_ref(topic, ref)
+        if target != topic:
+            if target not in pending:
+                pending[target] = {auto_block_edge(item, topic) for item in load_approvals(repo, target)["items"]}
+            edge = (source, tid, "add_depends")
+            if edge in pending[target]:
+                keep.add((target, *edge))
+                deps = snapshots[target].get("tasks", {}).get(tid, {}).get("depends_on", [])
+                if not any(parse_ref(target, dep, strict=False) == (topic, source) for dep in deps):
+                    continue
+        effective.append(ref)
+    return effective, keep
+
+
 def cmd_topic_init(a):
     repo, owner = topic_repo(a), topic_owner(a.owner)
     while True:
@@ -2363,15 +2526,18 @@ def cmd_topic_task(a):
     repo = topic_repo(a)
     # Dependency edits in different Topics validate against each other's files; serializing them keeps
     # two concurrent edits from committing a cycle.
-    depends = depends_lock(repo) if getattr(a, "depends", None) is not None else contextlib.nullcontext()
-    with depends, topic_lock(repo, a.topic):
-        data = load_topic(repo, a.topic)
+    blocks = getattr(a, "blocks", None)
+    edit_depends = any(getattr(a, flag, None) is not None for flag in ("depends", "add_depends", "remove_depends"))
+    depends = depends_lock(repo) if edit_depends or blocks is not None else contextlib.nullcontext()
+    refs = topic_ids(blocks) if blocks is not None else []
+    replace = a.task if a.topic_cmd == "task-edit" and blocks is not None else None
+    with depends, task_dependency_topics(repo, a.topic, refs, replace) as snapshots:
+        data = snapshots[a.topic]
         topic_writable(data)
         if a.topic_cmd == "task-add":
             if a.from_backlog:
                 topic_items(load_backlog(repo, a.topic), [a.from_backlog])
             tid = add_topic_task(data, a.title, a.kind, a.detail, topic_ids(a.depends), a.from_backlog)
-            validate_task_depends(repo, a.topic, tid, data)
         else:
             tid = a.task
             task = topic_task(data, tid, draft=True)
@@ -2388,12 +2554,33 @@ def cmd_topic_task(a):
                     if field in ("kind", "detail") and value != task.get(key):
                         task["request"] = None
                     task[key] = value
-                if a.depends is not None:
-                    validate_task_depends(repo, a.topic, tid, data)
-        save_topic(repo, a.topic, data)
+                for flag in ("add_depends", "remove_depends"):
+                    value = getattr(a, flag, None)
+                    if value is not None:
+                        deps = task.setdefault("depends_on", [])
+                        for ref in topic_ids(value):
+                            edge = parse_ref(a.topic, ref)
+                            matches = [d for d in deps if parse_ref(a.topic, d, strict=False) == edge]
+                            if flag == "add_depends" and not matches:
+                                deps.append(ref)
+                            elif flag == "remove_depends":
+                                deps[:] = [d for d in deps if d not in matches]
+        user_replacement = replace is not None and not os.environ.get("HC_TERMINAL_ID")
+        if user_replacement:
+            refs, keep = user_block_selection(repo, a.topic, tid, refs, snapshots)
+        changed = (apply_task_blocks(a.topic, {tid: refs}, snapshots, replace is not None)
+                   if blocks is not None else {})
+        updated = {(a.topic, tid)} if edit_depends else set()
+        validate_task_dependency_edits(repo, a.topic, snapshots, updated, changed)
+        if user_replacement:
+            reconcile_block_requests(repo, a.topic, snapshots, keep, replace)
+        approvals = save_task_dependency_edits(repo, a.topic, snapshots, changed,
+                                               None if user_replacement else replace)
     if a.topic_cmd == "task-rm":
         flush_outbox(repo, only=a.topic)
     out(**{"removed" if a.topic_cmd == "task-rm" else "task": tid})
+    if approvals:
+        out(approval=",".join(approvals))
 
 
 def cmd_topic_backlog(a):
@@ -2429,17 +2616,13 @@ def topic_message(repo, data, request, task_id=None, item_ids=None):
     title = "".join(ch if ch.isprintable() else " " for ch in data["title"])
     return (f"[cc-dispatch 面板] 请细化 Topic {data['id']}「{title}」的 backlog 条目 {','.join(item_ids)}："
             f"读 {topic_dir(repo, data['id'])}/backlog.json 里这些条目，拆成草稿 Task（每个有 title、kind、detail），"
+            "结合已有 Task 和产物，主动识别每个草稿要等的 Task（depends_on）和要等它的 Task（blocks），用数组标记。"
             f"用 python3 {Path(__file__).resolve()} topic refined --topic {data['id']} --ack {request['id']} "
             "--drafts '<json>' 一次提交。只建草稿，不要派发。")
 
 
 def cmd_topic_request(a):
-    request_type = a.type or ("dispatch" if a.task else "refine")
-    if (request_type == "dispatch") != bool(a.task):
-        a.topic_parser.error("dispatch needs --task; refine needs --items")
-    ids = topic_ids(a.items) if a.items is not None else None
-    if ids == []:
-        a.topic_parser.error("--items must contain at least one item")
+    request_type, ids = topic_request_args(a)
     repo = topic_repo(a)
     with topic_lock(repo, a.topic):
         data = load_topic(repo, a.topic)
@@ -2474,7 +2657,7 @@ def cmd_topic_request(a):
                 # a cleared request alone cannot identify an edited member or an acknowledged rid.
                 path = topic_dir(repo, a.topic) / "refinements.json"
                 journal = read_json(path, {})
-                journal[rid] = {"items": ids, "task_ids": None}
+                journal[rid] = {"items": ids, "task_ids": None, "target": a.target}
                 write_json(path, journal)
             result = {"request": rid, "message": json.dumps(
                 topic_message(repo, data, request, a.task, ids), ensure_ascii=False)}
@@ -2485,14 +2668,27 @@ def cmd_topic_request(a):
     out(**result)
 
 
+def topic_request_args(a):
+    request_type = a.type or ("dispatch" if a.task else "refine")
+    if (request_type == "dispatch") != bool(a.task):
+        a.topic_parser.error("dispatch needs --task; refine needs --items")
+    ids = topic_ids(a.items) if a.items is not None else None
+    if ids == []:
+        a.topic_parser.error("--items must contain at least one item")
+    return request_type, ids
+
+
 def run_topic(run: Path):
     """The Topic `run` is bound to, or None. topic.json holds the binding; state.json keeps a copy that a main
     agent rewriting state.json can drop, and a dropped copy is put back from topic.json."""
+    repo = repo_of_run(run)
+    if not canonical_topic_run(repo, run):
+        return None
     path = run / "state.json"
     state = read_json(path, {})
     if state.get("topic"):
         return state["topic"]
-    bound = topic_binding(repo_of_run(run), run)
+    bound = topic_binding(repo, run)
     if not bound:
         return None
     if path.exists():
@@ -2501,8 +2697,15 @@ def run_topic(run: Path):
     return bound[0]
 
 
+def canonical_topic_run(repo, run):
+    run = Path(run)
+    return run.resolve() == Path(repo).resolve() / ".cc-dispatch" / run.name
+
+
 def topic_binding(repo, run):
     """Find the authoritative binding, including a start interrupted before writing state.json."""
+    if not canonical_topic_run(repo, run):
+        return None
     for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
         with topic_lock(repo, path.parent.name):
             data = read_json(path, {})
@@ -2521,9 +2724,30 @@ def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
     if task["kind"] != run_kind(run) or (kind is not None and kind != task["kind"]):
         fail(f"task kind does not match run: {task_id}", failure="KIND_MISMATCH", code=3)
     current = (task.get("request") or {}).get("id")
-    allowed = task.get("consumed_request") if task.get("run") == run.name else current
+    bound = task.get("run") == run.name
+    allowed = task.get("consumed_request") if bound else current
     if request_id is not None and request_id != allowed:
         fail(f"request is stale: {request_id}", failure="REQUEST_STALE", code=3)
+    terminal = os.environ.get("HC_TERMINAL_ID")
+    if terminal:
+        if not (data.get("owner") or {}).get("terminal"):
+            data["owner"] = topic_owner()
+        controller = run_message_controller(run)
+        request = task.get("request") or {}
+        allowed_terminal = terminal == data["owner"]["terminal"]
+        if request_id and request.get("target") == "new_tab":
+            expected = request.get("agent")
+            allowed_terminal = (request.get("type") == "dispatch" and
+                                (not expected or (main_key(expected) or expected) == agent))
+        elif bound and controller:
+            allowed_terminal = run == repo / ".cc-dispatch" / task["run"] and controller == terminal
+        elif not bound and task.get("parent_task") and not allowed_terminal:
+            parent = topic_task(data, task["parent_task"])
+            allowed_terminal = run_message_controller(repo / ".cc-dispatch" / parent["run"]) == terminal
+        if not allowed_terminal or (controller and controller != terminal):
+            fail("caller does not own this start or run", failure="NOT_OWNER", code=3)
+        if not controller:
+            set_control(run, **(control(run) | {"owner": terminal}))
     if not task.get("run"):
         task.update(run=run.name, agent=agent, started_at=time.time(), request=None,
                     consumed_request=current)
@@ -2537,14 +2761,6 @@ def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
     out(topic=topic_id, task=task_id, detail=json.dumps(task["detail"], ensure_ascii=False))
 
 
-def claim_owner(data):
-    """A Topic with no owner (made without one, e.g. outside herdr) is owned by the first main agent in herdr
-    that starts work in it, so its backlog can be refined."""
-    if not (data.get("owner") or {}).get("terminal") and os.environ.get("HC_TERMINAL_ID"):
-        data["owner"] = topic_owner()
-    return data
-
-
 def cmd_topic_start(a):
     if a.task and not a.topic:
         a.topic_parser.error("--task needs --topic")
@@ -2555,14 +2771,17 @@ def cmd_topic_start(a):
     run = Path(a.run).resolve()
     if not run.is_dir():
         a.topic_parser.error(f"no run folder {run}")
-    repo, agent = repo_of_run(run), dispatcher()["dispatcher_agent"]
+    repo = repo_of_run(run)
+    if not canonical_topic_run(repo, run):
+        fail("run must belong to the repository's .cc-dispatch directory", failure="NO_TOPIC", code=3)
+    agent = dispatcher()["dispatcher_agent"]
     bound = topic_binding(repo, run)
     if bound and a.task and bound != (a.topic, a.task):
         fail("run is already bound to another task", failure="TASK_TAKEN", code=3)
     if a.task or bound:
         topic_id, task_id = (a.topic, a.task) if a.task else bound
         with topic_lock(repo, topic_id):
-            bind_topic_run(repo, topic_id, task_id, claim_owner(load_topic(repo, topic_id)), run, a.request,
+            bind_topic_run(repo, topic_id, task_id, load_topic(repo, topic_id), run, a.request,
                            agent, a.kind)
         return
     parent_task = None
@@ -2581,7 +2800,7 @@ def cmd_topic_start(a):
         fail("task kind does not match run", failure="KIND_MISMATCH", code=3)
     if parent_task is not None:
         with topic_lock(repo, topic_id):
-            data = claim_owner(load_topic(repo, topic_id))
+            data = load_topic(repo, topic_id)
             topic_writable(data, active=True)
             task_id = add_topic_task(data, a.title or run.name, kind, parent_task=parent_task or None)
             bind_topic_run(repo, topic_id, task_id, data, run, a.request, agent, a.kind)
@@ -2625,6 +2844,8 @@ def clean_line(s):
 
 
 def topic_binding_snapshot(repo, run):
+    if not canonical_topic_run(repo, run):
+        return None
     for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
         data = read_json(path, {})
         for tid, task in data.get("tasks", {}).items():
@@ -2680,6 +2901,19 @@ def caller(args, repo):
             "run": Path(run).name if run else None, "task": task}
 
 
+def require_topic_writer(a, repo, topic):
+    """Reuse message ownership without changing a command's missing-Topic errors or taking locks."""
+    if not os.environ.get("HC_TERMINAL_ID"):
+        return
+    if not read_json_strict(topic_dir(repo, topic) / "topic.json", {}):
+        return
+    try:
+        caller(argparse.Namespace(topic=topic), repo)
+    except SystemExit:
+        print("可改用 topic approval-request 提交跨 Topic 修改申请。")
+        raise
+
+
 def MSG_DIR(repo):
     return Path(repo) / ".cc-dispatch" / "messages"
 
@@ -2697,6 +2931,9 @@ def read_json_strict(path: Path, default):
         return default
     try:
         text = path.read_text()
+    except UnicodeDecodeError as e:
+        raise FileUnreadable(f"{path} is damaged; repair or move it aside before retrying",
+                             damaged=True) from e
     except OSError as e:
         raise FileUnreadable(f"cannot read {path}: {e}", damaged=False) from e
     try:
@@ -2731,7 +2968,7 @@ def recompute_summary(repo, topic):
     for item in data["items"]:
         times.append(item["at"])
         if (item.get("acked_at") is None and item.get("withdrawn_at") is None
-                and item.get("dropped") is None):
+                and item.get("dropped") is None and item.get("user_seen") is not True):
             summary["unacked"] += 1
         sender = item.get("from") or {}
         key = sender.get("topic") or "user"
@@ -2807,6 +3044,418 @@ def outbox_add(repo, S, events):
     write_json(path, data)
 
 
+TOPIC_WRITER_COMMANDS = {
+    "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
+    "request", "abandon", "pause", "resume", "stop", "archive", "unarchive", "delete",
+}
+APPROVAL_OPS = (
+    "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
+    "request", "abandon", "pause", "resume",
+)
+
+
+class ApprovalParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def approval_command(repo, topic, op, args):
+    """Validate only this operation's own flags using the same parser as the CLI."""
+    try:
+        if op not in APPROVAL_OPS or not isinstance(args, dict):
+            raise ValueError("unsupported operation or args is not an object")
+        parser = ApprovalParser()
+        choices = register_topic_parser(parser.add_subparsers(dest="cmd", required=True))
+        actions = {flag.removeprefix("--"): action for action in choices[op]._actions
+                   for flag in action.option_strings
+                   if flag.startswith("--") and action.dest not in ("repo", "topic", "help")}
+        argv, normalized = ["topic", op, "--repo", str(repo), "--topic", topic], {}
+        for key, value in args.items():
+            action = actions.get(key.replace("_", "-")) if isinstance(key, str) else None
+            if action is None or action.dest in normalized:
+                raise ValueError(f"invalid or duplicate argument: {key}")
+            normalized[action.dest] = value
+            flag = action.option_strings[0]
+            if isinstance(action, argparse._StoreTrueAction):
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be a boolean")
+                if value:
+                    argv.append(flag)
+            else:
+                if not isinstance(value, str):
+                    raise ValueError(f"{key} must be a string")
+                if "\0" in value:
+                    raise ValueError(f"{key} must not contain a NUL character")
+                try:
+                    value.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise ValueError(f"{key} must be valid text") from None
+                argv.append(f"{flag}={value}")
+        parsed = parser.parse_args(argv)
+        if "task" in normalized:
+            task = normalized["task"]
+            if parse_ref(topic, task, strict=False) != (topic, task):
+                raise ValueError(f"invalid task id: {task}")
+        for key in ("depends", "add_depends", "remove_depends"):
+            for ref in topic_ids(normalized.get(key, "")):
+                if parse_ref(topic, ref, strict=False) is None:
+                    raise ValueError(f"invalid dependency: {ref}")
+        if "blocks" in normalized:
+            raise ValueError("--blocks may change another Topic; request an edit to the waiting Task instead")
+        if op == "request":
+            topic_request_args(parsed)
+            if parsed.target != "owner":
+                raise ValueError("approval requests only support --target owner")
+        return parsed, normalized
+    except (ValueError, TypeError) as e:
+        fail(f"invalid approval: {e}", failure="APPROVAL_INVALID", code=3)
+
+
+def load_approvals(repo, topic):
+    path = topic_dir(repo, topic) / "approvals.json"
+    data = read_json_strict(path, {"items": [], "next": 1})
+    fields = {"id", "from", "op", "args", "summary", "reason", "created", "state", "decided_at",
+              "note", "result"}
+
+    def valid_source(sender):
+        return isinstance(sender, dict) and (
+            isinstance(sender.get("topic"), str) and bool(sender["topic"])
+            or "topic" in sender and sender["topic"] is None
+            and sender.get("task") is None and sender.get("run") is None
+            and isinstance(sender.get("terminal"), str) and bool(sender["terminal"]))
+
+    if (not isinstance(data.get("items"), list) or type(data.get("next")) is not int
+            or data["next"] < 1 or any(
+                not isinstance(item, dict) or not fields.issubset(item)
+                or not valid_source(item["from"])
+                or not isinstance(item["args"], dict)
+                or item["state"] not in ("open", "approved", "failed", "rejected", "answered", "withdrawn")
+                for item in data["items"])):
+        raise FileUnreadable(f"{path} is damaged; repair or move it aside before retrying", damaged=True)
+    return data
+
+
+def approval_journal_path(repo, topic):
+    return topic_dir(repo, topic) / "approval-decisions.json"
+
+
+def load_approval_journal(repo, topic, approvals):
+    path = approval_journal_path(repo, topic)
+    journal = read_json_strict(path, {})
+    ids = {item["id"] for item in approvals["items"]}
+    for aid, record in journal.items():
+        valid = (aid in ids and isinstance(record, dict)
+                 and type(record.get("decided_at")) in (int, float)
+                 and "note" in record and (record["note"] is None or isinstance(record["note"], str)))
+        if valid and record.get("phase") == "executing":
+            pid = record.get("pid")
+            valid = (record.get("decision") in ("approve", "reject", "answer") and "pid" in record
+                     and (pid is None or type(pid) is int and 0 < pid <= 2**31 - 1)
+                     and not record.get("pending"))
+        elif valid and record.get("phase") == "done":
+            state, result = record.get("state"), record.get("result")
+            valid = (state in ("approved", "failed", "rejected", "answered", "withdrawn")
+                     and type(record.get("pending")) is bool and "result" in record)
+            if state != "withdrawn":
+                decision = {"approved": "approve", "failed": "approve", "rejected": "reject",
+                            "answered": "answer"}.get(state) if isinstance(state, str) else None
+                valid = valid and decision == record.get("decision") and isinstance(record.get("output"), str)
+            if state in ("approved", "failed"):
+                valid = (valid and isinstance(result, dict) and type(result.get("ok")) is bool
+                         and "failure" in result and isinstance(result.get("output"), str)
+                         and (result["failure"] is None or isinstance(result["failure"], str)))
+            else:
+                valid = valid and result is None
+        else:
+            valid = False
+        if not valid:
+            raise FileUnreadable(f"{path}: damaged decision {aid}", damaged=True)
+    return journal
+
+
+def approval_decision_lock(repo, topic):
+    # Execution releases the Topic lock before invoking handlers that take dependency or other locks.
+    return file_lock(topic_dir(repo, topic).parent / f".{topic}.approvals.lock")
+
+
+def approval_identity(a, repo):
+    terminal = os.environ.get("HC_TERMINAL_ID")
+    if terminal and not a.run and not a.from_topic:
+        return {"topic": None, "task": None, "run": None, "terminal": terminal,
+                "agent": agent_on(hc_json("get", terminal))}
+    identity = caller(argparse.Namespace(run=a.run, topic=a.from_topic), repo)
+    data = read_json_strict(topic_dir(repo, identity["topic"]) / "topic.json", {})
+    owner = data.get("owner") or {}
+    return {key: identity[key] for key in ("topic", "task", "terminal", "run")} | {
+        "agent": ((agent_on(hc_json("get", identity["terminal"])) or owner.get("agent"))
+                  if identity["terminal"] else None)}
+
+
+def topic_approval_request(repo, topic, identity, op, args, reason):
+    """Create a validated request, returning (id, already_open); the source identity is caller-checked."""
+    _, args = approval_command(repo, topic, op, args)
+    labels = dict(zip(APPROVAL_OPS, ("新增 Task", "编辑 Task", "删除 Task", "新增待细化条目",
+                                   "编辑待细化条目", "删除待细化条目", "调整派发或细化请求",
+                                   "放弃 Task", "暂停 Topic", "继续 Topic")))
+    summary = labels[op]
+    subject = args.get("title") or args.get("task") or args.get("item") or args.get("text")
+    if subject:
+        summary += f"：{clean_line(subject)}"
+    with topic_lock(repo, topic):
+        data = read_json_strict(topic_dir(repo, topic) / "topic.json", {})
+        if not data:
+            fail(f"topic not found: {topic}", failure="TOPIC_NOT_FOUND", code=3)
+        topic_writable(data)
+        approvals = load_approvals(repo, topic)
+        for item in approvals["items"]:
+            if (item["state"] == "open" and all(item["from"].get(k) == identity.get(k)
+                                                for k in ("topic", "task", "run", "terminal"))
+                    and item["op"] == op and item["args"] == args):
+                return item["id"], True
+        aid = f"a{approvals['next']}"
+        approvals["next"] += 1
+        approvals["items"].append({
+            "id": aid, "from": identity, "op": op, "args": args, "summary": summary, "reason": reason,
+            "created": time.time(), "state": "open", "decided_at": None, "note": None, "result": None})
+        write_json(topic_dir(repo, topic) / "approvals.json", approvals)
+    return aid, False
+
+
+def cmd_topic_approval_request(a):
+    repo = topic_repo(a)
+    try:
+        args = json.loads(a.args)
+    except ValueError:
+        fail("--args must be a JSON object", failure="APPROVAL_INVALID", code=3)
+    approval_command(repo, a.topic, a.op, args)
+    identity = approval_identity(a, repo)
+    aid, exists = topic_approval_request(repo, a.topic, identity, a.op, args, a.reason)
+    out(approval=f"{a.topic}:{aid}")
+    if exists:
+        out(approval_exists=1)
+
+
+def approval_item(approvals, aid):
+    item = next((item for item in approvals["items"] if item["id"] == aid), None)
+    if item is None:
+        fail(f"approval not found: {aid}", failure="APPROVAL_NOT_FOUND", code=3)
+    return item
+
+
+APPROVAL_NOTICE_LIMIT = 8000
+
+
+def queue_approval_notice(repo, topic, data, item, record):
+    owner = data.get("owner") or {}
+    sender = {"topic": topic, "title": clean_line(data.get("title")), "task": None, "run": None,
+              "terminal": owner.get("terminal"), "agent": owner.get("agent")}
+    labels = {"approved": "已批准并执行", "failed": "批准后执行失败", "rejected": "已驳回",
+              "answered": "已回复", "withdrawn": "已撤回"}
+    text = (f"修改申请 {topic}:{item['id']}（{item['summary']}）{labels[item['state']]}。"
+            f"\n申请理由：{item['reason']}")
+    if record.get("why"):
+        text += f"\n原因：{record['why']}"
+    if item.get("note"):
+        text += f"\n用户附言：{item['note']}"
+    result = item.get("result")
+    if result is not None:
+        text += f"\n执行结果：{'成功' if result['ok'] else '失败'}"
+        if result["failure"]:
+            text += f"（FAILURE={result['failure']}）"
+        if result["output"]:
+            text += f"\n{result['output']}"
+    if len(text) > APPROVAL_NOTICE_LIMIT:
+        # A terminal notice travels as one process argument, so keep it far below the system limit.
+        text = (text[:APPROVAL_NOTICE_LIMIT]
+                + f"\n……（内容过长已截断，完整结果见目标 Topic 的修改申请）")
+    event = {
+        "id": f"e-approval-{topic}-{item['id']}", "at": item["decided_at"], "op": "notice",
+        "to": item["from"]["topic"], "from": sender, "text": text, "refs": [], "reason": "approval",
+        "user_seen": True}
+    if event["to"] is None:
+        event.update(terminal=item["from"]["terminal"], agent=item["from"].get("agent"), delivered_at=None)
+    outbox_add(repo, topic, [event])
+
+
+def complete_approval(repo, topic, data, approvals, item, journal, record):
+    """Commit the decision and its stable notice before marking the durable receipt complete."""
+    item.update({key: record[key] for key in ("state", "decided_at", "note", "result")})
+    write_json(topic_dir(repo, topic) / "approvals.json", approvals)
+    queue_approval_notice(repo, topic, data, item, record)
+    record["pending"] = False
+    write_json(approval_journal_path(repo, topic), journal)
+
+
+def withdraw_approval(repo, topic, data, approvals, item, journal, why):
+    record = {"phase": "done", "state": "withdrawn", "decided_at": time.time(), "note": None,
+              "result": None, "pending": True, "why": why}
+    journal[item["id"]] = record
+    write_json(approval_journal_path(repo, topic), journal)
+    complete_approval(repo, topic, data, approvals, item, journal, record)
+
+
+def legacy_block_snapshot(topic, item):
+    sender, args = item["from"], item["args"]
+    return (item["op"] == "task-edit" and set(args) == {"task", "depends"}
+            and sender.get("terminal") and not sender.get("run") and not sender.get("task")
+            and item["reason"] == f"调整阻挡关系，使 {topic}:{args['task']} 的依赖与 Topic {sender['topic']} 的草稿安排一致。")
+
+
+def interrupted_approval(record):
+    decision = record.get("decision")
+    state = {"reject": "rejected", "answer": "answered"}.get(decision, "failed")
+    result = ({"ok": False, "failure": "APPROVAL_INTERRUPTED",
+               "output": "申请执行被中断，执行结果无法确认；为避免重复修改，不会自动重试。"}
+              if state == "failed" else None)
+    record.update(phase="done", state=state, pending=True, result=result, output="")
+
+
+def recover_approvals(repo, topic, data, *, decision_locked=False):
+    """Called under this Topic's lock; execution receipts also repair interrupted notice commits."""
+    path = approval_journal_path(repo, topic)
+    if not path.exists():
+        return False
+    approvals, changed = load_approvals(repo, topic), False
+    journal = load_approval_journal(repo, topic, approvals)
+    for aid, record in journal.items():
+        if record["phase"] == "executing" and (decision_locked or not pid_alive(record["pid"])):
+            interrupted_approval(record)
+            write_json(path, journal)
+        if record.get("pending"):
+            item = approval_item(approvals, aid)
+            complete_approval(repo, topic, data, approvals, item, journal, record)
+            changed = True
+    return changed
+
+
+def cmd_topic_approval_decide(a):
+    if os.environ.get("HC_TERMINAL_ID"):
+        fail("only a user can decide an approval", failure="NOT_OWNER", code=3)
+    repo, output, closed = topic_repo(a), "", False
+    # Serialize an edge decision with source-side replacement through its receipt and graph edit.
+    with depends_lock(repo), approval_decision_lock(repo, a.topic):
+        with topic_lock(repo, a.topic):
+            data = read_json_strict(topic_dir(repo, a.topic) / "topic.json", {})
+            if not data:
+                fail(f"topic not found: {a.topic}", failure="TOPIC_NOT_FOUND", code=3)
+            approvals = load_approvals(repo, a.topic)
+            item = approval_item(approvals, a.id)
+            journal = load_approval_journal(repo, a.topic, approvals)
+            record = journal.get(a.id)
+            interrupted = record and record["phase"] == "executing"
+            closed = (item["state"] != "open" or (record is not None and
+                      (record.get("decision"), record["note"]) != (a.decision, a.note)))
+            if recover_approvals(repo, a.topic, data, decision_locked=True):
+                approvals = load_approvals(repo, a.topic)
+                item = approval_item(approvals, a.id)
+                journal = load_approval_journal(repo, a.topic, approvals)
+                record = journal.get(a.id)
+            interrupted = interrupted or (item.get("result") or {}).get("failure") == "APPROVAL_INTERRUPTED"
+            if not closed and record is None:
+                topic_writable(data)
+                if data.get("messages_pending"):
+                    fail("Topic closing notices are pending", failure="TOPIC_MESSAGES_PENDING", code=3)
+                if a.decision == "answer" and not (a.note or "").strip():
+                    fail("answer requires a nonblank --note", failure="APPROVAL_INVALID", code=3)
+                record = {"decision": a.decision, "note": a.note, "decided_at": time.time(),
+                          "phase": "executing", "pid": os.getpid()}
+                journal[a.id] = record
+                write_json(approval_journal_path(repo, a.topic), journal)
+                execute = True
+            else:
+                execute = False
+        if execute:
+            captured = io.StringIO()
+            ok = True
+            try:
+                with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+                    if a.decision == "approve":
+                        try:
+                            if legacy_block_snapshot(a.topic, item):
+                                fail("旧版自动阻挡申请保存的是依赖全集，请来源方重新设置阻挡。",
+                                     failure="APPROVAL_INVALID", code=3)
+                            command, _ = approval_command(repo, a.topic, item["op"], item["args"])
+                            cmd_topic(command)
+                        except SystemExit as e:
+                            ok = e.code in (None, 0)
+                        except FileUnreadable as e:
+                            ok = False
+                            print(str(e))
+                            out(failure="FILE_DAMAGED" if e.damaged else "READ_FAILED")
+                        except Exception as e:
+                            ok = False
+                            print(f"approval execution failed: {e}")
+                            out(failure="APPROVAL_EXECUTION_FAILED")
+            except BaseException:
+                record["pid"] = None
+                with topic_lock(repo, a.topic):
+                    journal = read_json_strict(approval_journal_path(repo, a.topic), {})
+                    journal[a.id] = record
+                    write_json(approval_journal_path(repo, a.topic), journal)
+                raise
+            output = captured.getvalue()
+            failures = [line.removeprefix("FAILURE=") for line in output.splitlines()
+                        if line.startswith("FAILURE=")]
+            result = ({"ok": ok, "failure": (failures[-1] if failures else "other") if not ok else None,
+                       "output": "\n".join(output.splitlines()[-15:])} if a.decision == "approve" else None)
+            record.update(phase="done", state=("approved" if ok else "failed") if a.decision == "approve"
+                          else {"reject": "rejected", "answer": "answered"}[a.decision],
+                          result=result, output=output, pending=True)
+            with topic_lock(repo, a.topic):
+                journal = read_json_strict(approval_journal_path(repo, a.topic), {})
+                journal[a.id] = record
+                write_json(approval_journal_path(repo, a.topic), journal)
+        with topic_lock(repo, a.topic):
+            # Other callers may have submitted new requests while the operation ran without this lock.
+            approvals = load_approvals(repo, a.topic)
+            item = approval_item(approvals, a.id)
+            journal = read_json_strict(approval_journal_path(repo, a.topic), {})
+            record = journal.get(a.id)
+            if record and record.get("pending"):
+                complete_approval(repo, a.topic, data, approvals, item, journal, record)
+            if record:
+                output = record.get("output", "")
+    nudge(repo)
+    if interrupted:
+        fail("previous decision was interrupted; check its recorded result",
+             failure="APPROVAL_INTERRUPTED", code=3)
+    if closed:
+        fail("approval is already closed", failure="APPROVAL_CLOSED", code=3)
+    print(output, end="")
+    out(state=item["state"])
+
+
+def cmd_topic_approval_withdraw(a):
+    repo = topic_repo(a)
+    identity = approval_identity(a, repo)
+    with approval_decision_lock(repo, a.topic), topic_lock(repo, a.topic):
+        data = read_json_strict(topic_dir(repo, a.topic) / "topic.json", {})
+        if not data:
+            fail(f"topic not found: {a.topic}", failure="TOPIC_NOT_FOUND", code=3)
+        recover_approvals(repo, a.topic, data)
+        approvals = load_approvals(repo, a.topic)
+        item = approval_item(approvals, a.id)
+        if (item["from"]["topic"] != identity["topic"]
+                or identity["topic"] is None and item["from"]["terminal"] != identity["terminal"]):
+            fail("cannot withdraw another applicant's approval", failure="NOT_OWNER", code=3)
+        if item["state"] != "open":
+            fail("approval is already closed", failure="APPROVAL_CLOSED", code=3)
+        journal = read_json_strict(approval_journal_path(repo, a.topic), {})
+        withdraw_approval(repo, a.topic, data, approvals, item, journal, "申请方已撤回")
+    nudge(repo)
+    out(state="withdrawn")
+
+
+def close_topic_approvals(repo, topic, data):
+    recover_approvals(repo, topic, data)
+    approvals = load_approvals(repo, topic)
+    journal = read_json_strict(approval_journal_path(repo, topic), {})
+    for item in approvals["items"]:
+        if item["state"] != "open":
+            continue
+        withdraw_approval(repo, topic, data, approvals, item, journal, "目标 Topic 已删除或归档")
+
+
 def flush_outbox(repo, only=None, updates=None):
     """Copy one event at a time without holding the source and destination locks together."""
     paths = ([MSG_DIR(repo) / f"{only}.outbox.json"] if only is not None
@@ -2820,6 +3469,9 @@ def flush_outbox(repo, only=None, updates=None):
         except OSError:
             continue
         for event in events:
+            # Terminal results stay in the outbox until the serialized terminal delivery round.
+            if event["to"] is None:
+                continue
             try:
                 target, changed = event["to"], False
                 with topic_lock(repo, target):
@@ -2835,15 +3487,20 @@ def flush_outbox(repo, only=None, updates=None):
                                     and question_state(item) == "open"):
                                 item["withdrawn_at"] = event["at"]
                                 changed = True
-                    elif (topic and topic.get("archived") is None and topic.get("deleting") is None
+                    # Approval outcomes remain in the applicant's mailbox even after it closes.
+                    elif ((event.get("reason") == "approval"
+                           or topic and topic.get("archived") is None and topic.get("deleting") is None)
                           and not any(item.get("event") == event["id"] for item in data["items"])):
                         reasons = set(event.get("reason", "").split(","))
                         label = " + ".join(label for key, label in (("follow", "关注"), ("depends", "依赖"))
                                            if key in reasons)
                         text = event["text"] + (f"\n通知原因：{label}" if label else "")
-                        data["items"].append(new_message(
+                        notice = new_message(
                             target, event["from"], "notice", text, event.get("refs", []),
-                            event=event["id"], at=event["at"]))
+                            event=event["id"], at=event["at"])
+                        if event.get("user_seen") is True:
+                            notice["user_seen"] = True
+                        data["items"].append(notice)
                         changed = True
                     if changed:
                         save_messages(repo, target, data)
@@ -3263,6 +3920,7 @@ def cmd_topic_msg_ack(a):
 
 def close_topic_messages(repo, topic, data):
     """Called under this Topic's lock; cross-Topic effects are queued for after release."""
+    close_topic_approvals(repo, topic, data)
     mailbox = load_messages(repo, topic)
     affected, changed = set(), False
     for item in mailbox["items"]:
@@ -3384,6 +4042,9 @@ def cmd_topic_finish(a):
         task = topic_task(data, task_id)
         if task.get("run") != run.name:
             fail("task belongs to another run", failure="TASK_TAKEN", code=3)
+        terminal = os.environ.get("HC_TERMINAL_ID")
+        if terminal and terminal != run_message_controller(run):
+            fail("only the run controller can finish this task", failure="NOT_OWNER", code=3)
         now = time.time()
         summary = topic_dir(repo, topic_id) / "summary.md"
         entry = f"## {task_id} {task['title']}（{task['kind']}）\n{a.line}\n"
@@ -3442,8 +4103,18 @@ def cmd_topic_abandon(a):
 
 def cmd_topic_refined(a):
     repo = topic_repo(a)
-    with depends_lock(repo), topic_lock(repo, a.topic):
-        data = load_topic(repo, a.topic)
+    drafts, drafts_error = None, None
+    try:
+        raw = a.drafts
+        if not raw.lstrip().startswith("["):
+            raw = Path(raw).read_text()
+        drafts = json.loads(raw)
+    except (OSError, ValueError) as e:
+        drafts_error = f"cannot read --drafts: {e}"
+    refs = [ref for draft in drafts if isinstance(draft, dict) and isinstance(draft.get("blocks"), list)
+            for ref in draft["blocks"]] if isinstance(drafts, list) else []
+    with depends_lock(repo), task_dependency_topics(repo, a.topic, refs) as snapshots:
+        data = snapshots[a.topic]
         backlog = load_backlog(repo, a.topic)
         path = topic_dir(repo, a.topic) / "refinements.json"
         journal = read_json(path, {})
@@ -3451,38 +4122,49 @@ def cmd_topic_refined(a):
         by_id = {item["id"]: item for item in backlog["items"]}
         ids = receipt["items"] if receipt else []
         items = [by_id.get(i) for i in ids]
+        terminal = os.environ.get("HC_TERMINAL_ID")
+        not_owner = terminal and terminal != (data.get("owner") or {}).get("terminal")
         if receipt and receipt["task_ids"] is not None and all(
                 item and item["status"] == "refined" and item["task_ids"] == receipt["task_ids"]
                 and item["updated_at"] == receipt["at"] for item in items):
+            if not_owner and receipt.get("target", "owner") == "owner":
+                fail("only the topic owner can acknowledge this refinement", failure="NOT_OWNER", code=3)
             out(tasks=",".join(receipt["task_ids"]))
+            if receipt.get("approvals"):
+                out(approval=",".join(receipt["approvals"]))
             return
         if not ids or any(not item or (item.get("request") or {}).get("id") != a.ack for item in items):
             fail(f"refinement request is stale: {a.ack}", failure="REQUEST_STALE", code=3)
-        try:
-            raw = a.drafts
-            if not raw.lstrip().startswith("["):
-                raw = Path(raw).read_text()
-            drafts = json.loads(raw)
-        except (OSError, ValueError) as e:
-            a.topic_parser.error(f"cannot read --drafts: {e}")
+        if not_owner and any(item["request"]["target"] == "owner" for item in items):
+            fail("only the topic owner can acknowledge this refinement", failure="NOT_OWNER", code=3)
+        if drafts_error:
+            a.topic_parser.error(drafts_error)
         if not isinstance(drafts, list) or any(
                 not isinstance(d, dict) or not isinstance(d.get("title"), str)
                 or d.get("kind") not in TOPIC_KINDS or not isinstance(d.get("detail", ""), str)
                 or not isinstance(d.get("depends_on", []), list)
-                or any(not isinstance(dep, str) for dep in d.get("depends_on", [])) for d in drafts):
-            a.topic_parser.error("--drafts needs [{title, kind, detail?, depends_on?}]")
+                or any(not isinstance(dep, str) for dep in d.get("depends_on", []))
+                or not isinstance(d.get("blocks", []), list)
+                or any(not isinstance(ref, str) for ref in d.get("blocks", [])) for d in drafts):
+            a.topic_parser.error("--drafts needs [{title, kind, detail?, depends_on?, blocks?}]")
         task_ids = [add_topic_task(data, d["title"], d["kind"], d.get("detail", ""), d.get("depends_on"),
                                    from_backlog=ids[0]) for d in drafts]
-        for tid in task_ids:
-            validate_task_depends(repo, a.topic, tid, data)
+        changed = apply_task_blocks(a.topic, {tid: d["blocks"] for tid, d in zip(task_ids, drafts)
+                                             if "blocks" in d}, snapshots)
+        validate_task_dependency_edits(
+            repo, a.topic, snapshots, {(a.topic, tid) for tid in task_ids}, changed)
         now = time.time()
         for item in items:
             item.update(status="refined", request=None, task_ids=list(task_ids), updated_at=now)
         receipt.update(task_ids=task_ids, at=now)
-        save_topic(repo, a.topic, data)
+        approvals = save_task_dependency_edits(repo, a.topic, snapshots, changed)
+        if approvals:
+            receipt["approvals"] = approvals
         save_backlog(repo, a.topic, backlog)
         write_json(path, journal)
     out(tasks=",".join(task_ids))
+    if approvals:
+        out(approval=",".join(approvals))
 
 
 def topic_runs(repo, data):
@@ -3721,9 +4403,7 @@ def topic_owner_busy(repo, terminal):
     return False
 
 
-def topic_delivery_target(data):
-    owner = data.get("owner") or {}
-    terminal = owner.get("terminal")
+def terminal_delivery_target(terminal, expected_agent):
     if not terminal:
         return None
     info = hc_json("get", terminal)
@@ -3732,7 +4412,7 @@ def topic_delivery_target(data):
             or status not in ("idle", "done")):
         return None
     agent = main_key(agent_on(info))
-    if not agent or agent != main_key(owner.get("agent")):
+    if not agent or agent != main_key(expected_agent):
         return None
     if agent == "claude":
         screen = hc("read", terminal)
@@ -3740,6 +4420,22 @@ def topic_delivery_target(data):
         if screen.returncode or (prompts and prompts[-1].strip()):
             return None
     return info
+
+
+def topic_delivery_target(data):
+    owner = data.get("owner") or {}
+    return terminal_delivery_target(owner.get("terminal"), owner.get("agent"))
+
+
+def send_terminal_text(terminal, info, message):
+    condition = ("--if", "idle") if info["status"]["state"] == "idle" else ()
+    result = hc("send", terminal, message, *condition, "--json")
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError:
+        reply = {}
+    return (not result.returncode
+            and not (isinstance(reply, dict) and (reply.get("error") or reply.get("started") is False)))
 
 
 def deliver_topic_request(repo, data, request, task_id, item_ids):
@@ -3787,20 +4483,50 @@ def deliver_topic_messages(repo, topic, owners):
     message = (f"[cc-dispatch 跨 Topic] Topic {clean_line(data.get('title'))} "
                f"有 {len(entries)} 条来自其他 Topic 的消息，运行 python3 "
                f"{shlex.quote(str(Path(__file__).resolve()))} topic inbox --topic {topic} 查看。")
-    condition = ("--if", "idle") if info["status"]["state"] == "idle" else ()
     try:
-        result = hc("send", terminal, message, *condition, "--json")
-        try:
-            reply = json.loads(result.stdout)
-        except ValueError:
-            reply = {}
-        sent = (not result.returncode
-                and not (isinstance(reply, dict) and (reply.get("error") or reply.get("started") is False)))
+        sent = send_terminal_text(terminal, info, message)
     except Exception:
         settle_message_claims(repo, entries, claim, False)
         raise
     settle_message_claims(repo, entries, claim, sent)
     return (info.get("address") or terminal) if sent else None
+
+
+def deliver_terminal_notices(repo, owners, updates=None):
+    delivered = []
+    for path in sorted(MSG_DIR(repo).glob("*.outbox.json")):
+        source = path.name.removesuffix(".outbox.json")
+        try:
+            with topic_lock(repo, source):
+                queued = read_json_strict(path, {"events": []})
+                for event in queued["events"]:
+                    if event["to"] is not None or event.get("delivered_at") is not None:
+                        continue
+                    terminal = event["terminal"]
+                    if terminal in owners:
+                        continue
+                    expected_agent = event["agent"] or agent_on(hc_json("get", terminal))
+                    info = terminal_delivery_target(terminal, expected_agent)
+                    if not info or info.get("address") in owners:
+                        continue
+                    try:
+                        sent = send_terminal_text(terminal, info, event["text"])
+                    except (OSError, ValueError) as error:
+                        # One notice that cannot be sent holds back only itself.
+                        print(f"notice {event['id']} not sent: {clean_line(error)}", file=sys.stderr)
+                        continue
+                    if not sent:
+                        continue
+                    # Retain a receipt so replaying a recovered approval cannot enqueue it again.
+                    event["delivered_at"] = time.time()
+                    write_json(path, queued)
+                    owners.update((terminal, info.get("address") or terminal))
+                    delivered.append(f"terminal:{terminal}")
+                    if updates is not None:
+                        updates.add(source)
+        except OSError:
+            continue
+    return delivered
 
 
 def deliver_topics(repo, waiting=None, report=True, updates=None):
@@ -3824,6 +4550,8 @@ def deliver_topics(repo, waiting=None, report=True, updates=None):
             try:
                 with topic_lock(repo, tid):
                     data = read_json(path, {})
+                    if recover_approvals(repo, tid, data) and updates is not None:
+                        updates.add(tid)
                     if data.get("messages_pending"):
                         close_topic_messages(repo, tid, data)
                         data.pop("messages_pending", None)
@@ -3914,13 +4642,22 @@ def deliver_topics(repo, waiting=None, report=True, updates=None):
                 terminal = (read_json(path, {}).get("owner") or {}).get("terminal")
                 owners.update((terminal, address))
                 message_delivered.append(tid)
+        message_delivered.extend(deliver_terminal_notices(repo, owners, updates))
     return delivered, message_delivered, messages
 
 
 def cmd_topic_deliver(a):
     updates = set()
-    delivered, messages, _ = deliver_topics(topic_repo(a), updates=updates)
-    out(delivered=",".join(delivered), message_delivered=",".join(messages))
+    repo = topic_repo(a)
+    delivered, messages, _ = deliver_topics(repo, updates=updates)
+    approvals_open = 0
+    for path in sorted((Path(repo) / ".cc-dispatch" / "topics").glob("*/topic.json")):
+        try:
+            approvals_open += sum(item["state"] == "open"
+                                  for item in load_approvals(repo, path.parent.name)["items"])
+        except FileUnreadable as e:
+            out(skipped=clean_line(str(e)))
+    out(delivered=",".join(delivered), message_delivered=",".join(messages), approvals_open=approvals_open)
     if updates and not delivered and not messages:
         out(updated=1)
 
@@ -3931,13 +4668,22 @@ def cmd_topic(a):
                 "peers": cmd_topic_peers, "follow": cmd_topic_follow, "msg": cmd_topic_msg,
                 "msg-withdraw": cmd_topic_msg_withdraw, "inbox": cmd_topic_inbox,
                 "msg-ack": cmd_topic_msg_ack,
+                "approval-request": cmd_topic_approval_request,
+                "approval-decide": cmd_topic_approval_decide,
+                "approval-withdraw": cmd_topic_approval_withdraw,
                 "refined": cmd_topic_refined, "deliver": cmd_topic_deliver,
                 "pause": cmd_topic_pause, "resume": cmd_topic_resume, "stop": cmd_topic_stop,
                 "archive": cmd_topic_archive, "unarchive": cmd_topic_unarchive, "delete": cmd_topic_delete}
     handler = (cmd_topic_task if a.topic_cmd.startswith("task-") else
                cmd_topic_backlog if a.topic_cmd.startswith("backlog-") else
                handlers[a.topic_cmd])
-    handler(a)
+    if a.topic_cmd in TOPIC_WRITER_COMMANDS:
+        repo = topic_repo(a)
+        require_topic_writer(a, repo, a.topic)
+    guard = (approval_decision_lock(topic_repo(a), a.topic)
+             if a.topic_cmd in ("archive", "unarchive", "delete") else contextlib.nullcontext())
+    with guard:
+        handler(a)
 
 
 def register_topic_parser(sub):
@@ -3946,7 +4692,8 @@ def register_topic_parser(sub):
     commands = topic.add_subparsers(dest="topic_cmd", required=True)
     for name in ("init", "task-add", "task-edit", "task-rm", "backlog-add", "backlog-edit", "backlog-rm",
                  "request", "deliver", "start", "finish", "abandon", "list", "refined", "pause", "resume", "stop",
-                 "archive", "unarchive", "delete", "peers", "follow", "msg", "msg-withdraw", "inbox", "msg-ack"):
+                 "archive", "unarchive", "delete", "peers", "follow", "msg", "msg-withdraw", "inbox", "msg-ack",
+                 "approval-request", "approval-decide", "approval-withdraw"):
         c = commands.add_parser(name)
         c.set_defaults(topic_parser=c)
         c.add_argument("--repo", default=argparse.SUPPRESS)
@@ -3966,7 +4713,12 @@ def register_topic_parser(sub):
             c.add_argument("--title", required=name == "task-add")
             c.add_argument("--kind", choices=TOPIC_KINDS, required=name == "task-add")
             c.add_argument("--detail", default="" if name == "task-add" else None)
-            c.add_argument("--depends", default="" if name == "task-add" else None)
+            deps = c.add_mutually_exclusive_group()
+            deps.add_argument("--depends", default="" if name == "task-add" else None)
+            if name == "task-edit":
+                deps.add_argument("--add-depends")
+                deps.add_argument("--remove-depends")
+            c.add_argument("--blocks")
             if name == "task-add":
                 c.add_argument("--from-backlog")
         elif name == "task-rm":
@@ -4017,6 +4769,21 @@ def register_topic_parser(sub):
             c.add_argument("--ids", required=True)
         elif name == "inbox":
             c.add_argument("--all", action="store_true")
+        elif name in ("approval-request", "approval-withdraw"):
+            identity = c.add_mutually_exclusive_group()
+            identity.add_argument("--run")
+            identity.add_argument("--from-topic")
+            if name == "approval-request":
+                c.add_argument("--op", required=True)
+                c.add_argument("--args", required=True)
+                c.add_argument("--reason", required=True)
+            else:
+                c.add_argument("--id", required=True)
+        elif name == "approval-decide":
+            c.add_argument("--id", required=True)
+            c.add_argument("--decision", required=True, choices=("approve", "reject", "answer"))
+            c.add_argument("--note")
+    return commands.choices
 
 
 def check_ask(i: str, item) -> str | None:
