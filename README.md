@@ -179,8 +179,19 @@ source ~/cc-dispatcher/shared/herdr-shell.zsh   # 换成你克隆的路径
 ```
 /cc-herdr-dispatch-research <问题>
 /cc-herdr-dispatch-review <方案文件 | diff>
+/cc-herdr-dispatch-dev <方案文件>
 /cc-herdr-dispatch-fix <问题描述>
+/cc-herdr-dispatch-test <范围 | full>
 /cc-herdr-dispatch-retro [仓库路径]
 ```
+
+改了这个仓库之后跑测试（面板测试要 Node.js）：
+
+```sh
+node --test herdr/tests/*.test.mjs
+cd shared/tests && env -u HC_TERMINAL_ID CLAUDE_CODE_SESSION_ID=fixture-session python3 -B -m unittest discover -p 'test_*.py'
+```
+
+`shared/scripts/hd_usage.py` 是装进 `~/.claude/settings.json` 的全局 hook，本机每个 Claude Code 会话的每次工具调用都会运行它，改它之后务必先跑 `shared/tests/test_hd_usage.py`。改了面板要重跑 `./install.sh`。
 
 卸载：`python3 shared/scripts/hd_usage.py settings --remove`，删除上面两类软链接，以及 `~/.config/herdr-app/mods/cc-dispatch`、`layouts/herdr-cc-dispatch.*`。
