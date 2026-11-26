@@ -502,6 +502,8 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}, asks
     return {
       dir, id: baseName(dir), kind: kindOf(dir), repo: repoOf(dir),
       calls, counts, need, control, archived: archived?.[dir] ?? null,
+      // The terminal that holds the run (control.json owner), known even before it dispatched any helper.
+      owner: controls?.[dir]?.owner ?? null,
       asks: asks?.[dir]?.asks ?? {}, answers: asks?.[dir]?.answers ?? [],
       hd: calls.find((c) => c.hd)?.hd ?? null,
       helpersLive: calls.some((c) => c.state === "live"),

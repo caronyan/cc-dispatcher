@@ -73,6 +73,14 @@ test("assignTasks: each task goes to the latest run of its session that started 
   assert.deepEqual(Object.fromEntries(Object.entries(got).map(([k, v]) => [k, v.map((t) => t.id)])), { A: ["a"], B: ["b", "c"] });
 });
 
+test("assignTasks: a run that finished before a task started does not take it", () => {
+  const runs = [{ dir: "open", startedAt: 1_000_000 }, { dir: "done", startedAt: 5_000_000 }];
+  const sessions = { s: [{ id: "during", started: 5_500_000 }, { id: "after", started: 9_000_000 }] };
+  const got = assignTasks(runs, { open: ["s"], done: ["s"] }, sessions, { done: 6_000 });
+  assert.deepEqual(Object.fromEntries(Object.entries(got).map(([k, v]) => [k, v.map((t) => t.id)])),
+    { done: ["during"], open: ["after"] });
+});
+
 test("assignTasks: a task whose command names a run folder goes to that run", () => {
   const runs = [{ dir: "/r/.cc-dispatch/old", startedAt: 1000 }, { dir: "/r/.cc-dispatch/old-2", startedAt: 5000 }];
   const sessions = { s: [{ id: "w", started: 9000, command: "hd_dispatch.py wait --run /r/.cc-dispatch/old --timeout 600" },

@@ -128,9 +128,11 @@ const MARKS = {
   retrying: ["refresh", "ansi3"], await: ["clock-dashed", "accent"], collect: ["inbox", "accent"], review: ["clipboard-check", "accent"],
   handoff: ["handover", "accent"], delivered: ["send", "accent"], queued: ["hourglass", "muted"], draft: ["draft", "muted"],
   pending: ["hourglass", "muted"], accepting: ["clipboard-check", "accent"], finishing: ["archive", "accent"],
+  idle: ["clock-dashed", "muted"],
 };
 const MARK_WORDS = { ...STAGE_WORDS, ...CARD_WORDS, done: "已完成", stopped: "已终止", stopping: "终止中", handoff: "交接中",
-  delivered: "已送达", queued: "已排队", draft: "草稿", abandoned: "已放弃", finishing: "待收尾" };
+  delivered: "已送达", queued: "已排队", draft: "草稿", abandoned: "已放弃", finishing: "待收尾",
+  idle: "等待主 agent" };
 const statusMark = (t, id, stage) => {
   const glyph = stage === "stopping" ? icon("ring", 11, t.ansi1).spin(900)
     : stage === "running" ? icon("ring", 11, t.working).spin(900)
@@ -801,7 +803,8 @@ export default class Dispatch extends View {
       const totals = topicTotals({ ...this.stats, runs: Object.fromEntries(topic.runs.map((r) => [r.dir, runCards(r, this.stats.runs[r.dir])])) }, topic);
       if (totals.known || totals.cards || topic.tasks.length) card.child(this.renderStats(t, topic, totals));
       // The main agents' background tasks, each under the Task whose run it belongs to.
-      const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions);
+      const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions,
+        Object.fromEntries(Object.entries(this.states).map(([dir, s]) => [dir, s?.finished ?? null])));
       // Most urgent first (waiting on you, running, drafted, done); each Task's status is the mark after its title.
       card.children(groupTasks(topic).flatMap((g) => g.tasks).map((task) => this.renderTask(t, topic, task, assigned)));
       if (!topic.implicit && !topic.archived && !topic.deleting) card.child(h_flex().px(12).py(8)
@@ -821,7 +824,8 @@ export default class Dispatch extends View {
     if (group === "queued") return request === "delivered" ? "delivered" : request ? "queued" : "draft";
     if (group === "you") return "blocked";
     const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
-    const top = stages.length ? runStage(stages) : "working";
+    if (!stages.length) return this.mainWorksOn(r) ? "working" : "idle";
+    const top = runStage(stages);
     // Every helper has settled but the Task is not finished: the main agent still owes its wrap-up.
     return FINISHING_STAGES.has(top) ? "finishing" : top;
   }
@@ -1123,8 +1127,18 @@ export default class Dispatch extends View {
   }
 
   // The run's main agent, if its terminal runs an agent now: who an answer is sent to.
+  /** A run without helpers is worked on only while its main agent is busy and holds no other unfinished run. */
+  mainWorksOn(r) {
+    const main = r ? this.mainAgentOf(r) : null;
+    const state = typeof main?.status === "string" ? main.status : main?.status?.state;
+    if (state !== "working") return false;
+    const held = this.runs.filter((x) => (x.control?.owner || x.owner || x.parent) === main.address
+      && !x.control?.retired && x.control?.state !== "stopped" && !this.states[x.dir]?.finished && !x.archived);
+    return held.length === 1 && held[0].dir === r.dir;
+  }
+
   mainAgentOf(r) {
-    const term = r.control?.owner || r.parent;
+    const term = r.control?.owner || r.owner || r.parent;
     return term ? (agents() ?? []).find((a) => a.address === term) ?? null : null;
   }
 

@@ -345,6 +345,27 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.ok(!byId(panel.renderTask(colors, topic, task, {}), "bg-topic-a|k1|s1|b1"));
   });
 
+  await t.test("a Task whose run has no helper spins only while its main agent works on that run alone", () => {
+    const runs = buildRuns([], [], { [RUN]: { state: "running", owner: "t-main" } }, {}, {}, { [RUN]: { topic: "topic-a" } });
+    const topic = buildTopics(runs, { a: topicRecord({ k1: { run: "review-0107", kind: "dev" } }) },
+      { [RUN]: { topic: "topic-a" } })[0];
+    const task = topic.tasks[0];
+    const saved = { runs: panel.runs, mainAgentOf: panel.mainAgentOf, agents: context.agents };
+    panel.runs = runs; panel.mainAgentOf = context.TaskView.prototype.mainAgentOf;
+    try {
+      context.agents = () => [{ address: "t-main", status: "idle" }];
+      assert.equal(panel.taskStage(topic, task), "idle", "主 agent 空闲时不转圈");
+      context.agents = () => [{ address: "t-main", status: "working" }];
+      assert.equal(panel.taskStage(topic, task), "working", "主 agent 在忙且只管这一个运行时转圈");
+      panel.runs = [...runs, ...buildRuns([], [], { "/r/.cc-dispatch/other": { state: "running", owner: "t-main" } }, {}, {}, { "/r/.cc-dispatch/other": {} })];
+      assert.equal(panel.taskStage(topic, task), "idle", "主 agent 同时管着别的运行时，看不出在做哪个，不转圈");
+      const rendered = panel.renderTask(colors, topic, task);
+      assert.equal(byId(rendered, "mark-topic-a|k1").attrs.tooltip, "等待主 agent");
+    } finally {
+      panel.runs = saved.runs; panel.mainAgentOf = saved.mainAgentOf; context.agents = saved.agents;
+    }
+  });
+
   await t.test("abandoned status overrides stale pause controls and pending items do not block archive", () => {
     const { topic, task } = groupedTask({
       control: { state: "paused" }, task: { abandoned_at: 20, abandon_reason: "不再继续" },

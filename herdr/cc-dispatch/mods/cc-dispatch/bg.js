@@ -503,10 +503,10 @@ export const BG_MORE = 5;       // each "earlier" click shows this many more
 /**
  * Each run's tasks: a task whose command names one of its session's run folders (hd_dispatch.py
  * wait --run …) belongs to that run; any other to the latest run of the session that started before
- * it (less BG_GRACE). A run's sessions are the ones the script gave for it (`found`: recorded, found or
+ * it (less BG_GRACE) and had not finished by then (`finished`: {dir: seconds}). A run's sessions are the ones the script gave for it (`found`: recorded, found or
  * named by a handoff package), else its recorded ones. → { dir: [task] }.
  */
-export function assignTasks(runs, found, sessions) {
+export function assignTasks(runs, found, sessions, finished = {}) {
   const out = {}, bySession = new Map();
   for (const r of runs) {
     const own = found?.[r.dir] ?? (r.mains ?? []).map((m) => m.session);
@@ -521,7 +521,9 @@ export function assignTasks(runs, found, sessions) {
     for (const t of sessions?.[sid] ?? []) {
       const cmd = t.command ?? "";
       const named = list.filter((r) => r.dir && cmd.includes(r.dir)).sort((a, b) => b.dir.length - a.dir.length)[0];
-      const owner = named ?? [...list].reverse().find((r) => (t.started || 0) >= (r.startedAt || 0) - BG_GRACE);
+      // A run that had already finished when the task started cannot own it.
+      const open = (r) => !finished[r.dir] || finished[r.dir] * 1000 >= (t.started || 0);
+      const owner = named ?? [...list].reverse().find((r) => open(r) && (t.started || 0) >= (r.startedAt || 0) - BG_GRACE);
       if (owner) (out[owner.dir] ??= []).push({ ...t, session: sid });
     }
   }
