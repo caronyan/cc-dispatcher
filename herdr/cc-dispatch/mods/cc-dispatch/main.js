@@ -85,6 +85,8 @@ const mono = () => settings().font_family || "Menlo";
 const icon = (name, size, color) => svg(`mods/cc-dispatch/icons/${name}.svg`).size(size).flex_none().text_color(color);
 const mark = (size, color) => svg("mods/cc-dispatch/mark.svg").size(size).flex_none().text_color(color);
 const stop = (_e, cx) => cx.stop_propagation();
+// A theme color made see-through (alpha "00"–"ff"), for a soft highlight that follows light and dark themes.
+const tint = (color, alpha) => /^#[0-9a-fA-F]{6}$/.test(color ?? "") ? `${color}${alpha}` : color;
 
 // Stage colors: green once the work landed, accent while Claude still has to look, red/yellow when it went wrong.
 function stageColor(t, stage) {
@@ -1233,7 +1235,8 @@ export default class Dispatch extends View {
     const row = (task) => {
       const running = task.status === "running", age = fmtDur((task.ended || Date.now()) - (task.started || Date.now()));
       const id = `bg-${key}|${task.session}|${task.id}`;
-      return h_flex().id(id).flex_none().h(30).pl(inset).pr(10).gap(7).items_center().bg(t.surface)
+      // A running task stands out from the ended ones with a light wash of the working color.
+      return h_flex().id(id).flex_none().h(30).pl(inset).pr(10).gap(7).items_center().bg(running ? tint(t.working, "2e") : t.surface)
         .cursor_pointer().hover((s) => s.bg(t.hover))
         .on_click(() => openOverlay({ mod: "cc-dispatch", kind: "dialog", width: 860, height: 640,
           props: { role: "bgtask", title: task.title, output: task.output ?? null, log: task.output ? null : task.log ?? null, on,
