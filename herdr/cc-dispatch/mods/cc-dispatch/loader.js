@@ -21,8 +21,9 @@ export async function loadRuns({ sh }, repo, terminals) {
   const r = await sh(LIST_SCRIPT, roots);
   if (r.code !== 0 && !r.stdout) return { runs: [], topics: [], states: {}, error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };
   const states = parseStates(r.stdout);
-  const runs = buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout), states);
-  return { runs, topics: buildTopics(runs, parseTopics(r.stdout), states, parseMessageSummaries(r.stdout)), states, error: null };
+  const topics = parseTopics(r.stdout);
+  const runs = buildRuns(parseMetaDump(r.stdout), terminals, parseControls(r.stdout), parseArchived(r.stdout), parseAsks(r.stdout), states, topics);
+  return { runs, topics: buildTopics(runs, topics, states, parseMessageSummaries(r.stdout)), states, error: null };
 }
 
 /** Archive or unarchive a run (op "archive" | "unarchive"): { ok, error }. */

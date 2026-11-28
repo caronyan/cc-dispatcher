@@ -484,8 +484,15 @@ export function runMains(calls) {
   return out;
 }
 
-export function buildRuns(entries, terminals, controls = {}, archived = {}, asks = {}, states = {}) {
+export function buildRuns(entries, terminals, controls = {}, archived = {}, asks = {}, states = {}, topics = {}) {
   const byRun = new Map();
+  // topic.json's binding of each run (hd_dispatch.py topic start): its agent, session and start, all a run
+  // whose main agent works alone has, since no helper's meta.json records them.
+  const bound = new Map();
+  for (const { topic } of Object.values(topics ?? {})) {
+    const root = topicDirs.get(topic) ? parentOf(parentOf(topicDirs.get(topic))) : null;
+    if (root) for (const t of Object.values(topic.tasks ?? {})) if (objectJSON(t) && t.run) bound.set(`${root}/${t.run}`, t);
+  }
   for (const { path, meta } of entries ?? []) {
     const dir = runDirOf(path);
     if (!byRun.has(dir)) byRun.set(dir, []);
@@ -499,7 +506,7 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}, asks
     const counts = {};
     for (const c of calls) { const n = callNeed(c); counts[n] = (counts[n] ?? 0) + 1; }
     const need = calls.map(callNeed).sort((a, b) => rank(a) - rank(b))[0] ?? "gone";
-    return {
+    const run = {
       dir, id: baseName(dir), kind: kindOf(dir), repo: repoOf(dir),
       calls, counts, need, control, archived: archived?.[dir] ?? null,
       // The terminal that holds the run (control.json owner), known even before it dispatched any helper.
@@ -518,6 +525,13 @@ export function buildRuns(entries, terminals, controls = {}, archived = {}, asks
       mainAgent: calls.find((c) => c.adoptedFrom && c.mainAgent)?.mainAgent ?? calls.find((c) => c.mainAgent)?.mainAgent ?? null,
       startedAt: Math.min(...calls.map((c) => c.startedAt || Infinity)),
     };
+    const b = calls.length ? null : bound.get(dir);
+    if (b) {
+      const at = epochMs(b.started_at) ?? 0;
+      Object.assign(run, { startedAt: at, lastAt: at, parent: run.owner, mainAgent: b.agent ?? null,
+        mains: [{ agent: mainKey(b.agent), session: b.session ?? null }] });
+    }
+    return run;
   });
   for (const r of runs) if (!Number.isFinite(r.startedAt)) r.startedAt = 0;
   // `live`: the run is still going, the one test the whole panel uses (polling, tasks, quota, controls,

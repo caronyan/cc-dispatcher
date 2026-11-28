@@ -261,6 +261,13 @@ class Topics(unittest.TestCase):
         self.assertEqual(self.start(topic, task, request=rid)["TASK"], task)
         self.assertEqual(self.data(topic)["tasks"][task]["started_at"], saved["started_at"])
 
+    def test_start_records_the_main_agents_session_for_a_run_without_helpers(self):
+        topic = self.init()
+        task = self.task(topic)
+        self.command("start", "--run", self.w.run_dir, "--topic", topic, "--task", task,
+                     CLAUDE_CODE_SESSION_ID="sess-main")
+        self.assertEqual(self.data(topic)["tasks"][task]["session"], "sess-main")
+
     def test_start_with_no_arguments_creates_topic_and_retry_finds_it(self):
         result = self.start(title="Fresh")
         topic, task = result["TOPIC"], result["TASK"]

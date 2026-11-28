@@ -23,6 +23,15 @@ const topicRecord = (tasks = {}, extra = {}) => ({
   backlog: { items: [] },
 });
 
+test("a run without helpers takes its main agent, session and start from its Topic binding", () => {
+  const { topic } = topicRecord({ k1: { title: "T", kind: "review", run: "review-0107", agent: "claude-code", session: "s1", started_at: 100 } });
+  const topics = parseTopics(section(TOPIC_SEP, "/r/.cc-dispatch/topics/topic-a/topic.json", topic));
+  const terms = [{ address: "t-main", state: "live" }];
+  const [run] = buildRuns([], terms, { [RUN]: { state: "running", owner: "t-main" } }, {}, {}, { [RUN]: {} }, topics);
+  assert.deepEqual([run.parent, run.startedAt, run.lastAt, run.mains, run.live],
+    ["t-main", 100_000, 100_000, [{ agent: "claude", session: "s1" }], true]);
+});
+
 test("Topic and state sections preserve the existing parsers, including when old sections are absent", () => {
   const { topic } = topicRecord();
   const topics = section(TOPIC_SEP, "/r/.cc-dispatch/topics/topic-a/topic.json", topic)

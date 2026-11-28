@@ -773,6 +773,13 @@ def main_key(program) -> str | None:
     return next((k for k, v in MAIN_AGENTS.items() if any(n in name for n in v.get("names", (k,)))), None)
 
 
+def main_session(agent):
+    """This main agent's own session id from its environment (Claude Code's session, Codex's thread, …)."""
+    key = main_key(agent)
+    envs = [MAIN_AGENTS[key]["session_env"]] if key else [v["session_env"] for v in MAIN_AGENTS.values()]
+    return next((os.environ[e] for e in envs if os.environ.get(e)), None)
+
+
 def dispatcher():
     """The main agent that dispatches: its terminal, its herdr space, its program and its own session id
     (Claude Code's session, whose transcript the panel reads for background tasks; Codex's thread; …)."""
@@ -780,12 +787,10 @@ def dispatcher():
     g = hc_json("get", me) if me else None
     g = g if isinstance(g, dict) else {}
     agent = agent_on(g)
-    key = main_key(agent)
-    envs = [MAIN_AGENTS[key]["session_env"]] if key else [v["session_env"] for v in MAIN_AGENTS.values()]
     return {
         "parent": me,
         "space": (g.get("labels") or {}).get("herdr.space"),
-        "session": next((os.environ[e] for e in envs if os.environ.get(e)), None),
+        "session": main_session(agent),
         "claude_cwd": (g.get("foreground") or {}).get("cwd") or os.getcwd(),
         "dispatcher_agent": agent,
     }
@@ -2749,7 +2754,9 @@ def bind_topic_run(repo, topic_id, task_id, data, run, request_id, agent, kind):
         if not controller:
             set_control(run, **(control(run) | {"owner": terminal}))
     if not task.get("run"):
-        task.update(run=run.name, agent=agent, started_at=time.time(), request=None,
+        # session: whose transcript the panel reads for the background tasks of a run without helpers.
+        task.update(run=run.name, agent=agent, session=main_session(agent) if terminal else None,
+                    started_at=time.time(), request=None,
                     consumed_request=current)
     save_topic(repo, topic_id, data)
     state_path = run / "state.json"
