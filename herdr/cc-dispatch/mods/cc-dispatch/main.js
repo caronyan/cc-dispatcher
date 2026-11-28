@@ -45,6 +45,19 @@ const dependencyError = (out) => {
 // A saved dependency edit invalidates panel snapshots on their next render.
 let dependencyVersion = 0;
 let approvalVersion = 0;
+// A manual operation (pause, archive, delete, …) from the panel or one of its dialogs, until the panel has
+// re-read its result: the item shows what is under way instead of its buttons, then changes or leaves.
+// key → { label, doneAt }; keys: topic:<id>, task:<topic>|<task>, item:<topic>|<item>, run:<dir>.
+const pendingOps = new Map();
+let pendingVersion = 0;
+const PENDING_WORDS = { pause: "正在暂停…", resume: "正在继续…", stop: "正在终止…", retire: "正在收尾…", archive: "正在归档…",
+  unarchive: "正在取消归档…", delete: "正在删除…", "task-rm": "正在删除…", "backlog-rm": "正在删除…", request: "正在提交…", abandon: "正在放弃…" };
+const beginOp = (key, op) => { pendingOps.set(key, { label: PENDING_WORDS[op] ?? "处理中…", doneAt: null }); pendingVersion++; };
+const endOp = (key, ok) => {
+  const p = pendingOps.get(key);
+  if (!ok || !p) pendingOps.delete(key); else p.doneAt = Date.now();
+  pendingVersion++;
+};
 
 const io = (on) => ({
   sh: (script, args = []) => exec("sh", ["-c", script, "cc-dispatch-panel", ...args], { on })
@@ -388,10 +401,12 @@ export default class Dispatch extends View {
     this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.statsBusy = false;
     this.bg = { runs: {}, sessions: {} };
     this.quota = {}; // agent -> { q, at, busy }
-    this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
-    this.dependencyVersion = dependencyVersion;
+    this.programs = []; this.programsAt = 0; this.programsBusy = false;
+    this.dependencyVersion = dependencyVersion; this.pendingVersion = pendingVersion;
     this.approvalVersion = approvalVersion;
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
+    // An operation started or finished in a dialog shows on the panel right away, not at the next poll.
+    cx.timer.every(300, (cx) => { if (this.pendingVersion !== pendingVersion) cx.notify(); });
   }
 
   shown() { return !find(layout(), PANEL)?.hidden; }
@@ -435,14 +450,14 @@ export default class Dispatch extends View {
   startOver() {
     this.open = null; this.error = null; this.statsError = null;
     this.stats = { calls: {}, runs: {}, finished: {}, pending: {} }; this.statsFor = new Set(); this.bg = { runs: {}, sessions: {} }; this.quota = {};
-    this.programs = []; this.programsAt = 0; this.programsBusy = false; this.busy = new Set();
+    this.programs = []; this.programsAt = 0; this.programsBusy = false;
     this.fold.clear(); this.groupFold.clear(); this.bgMore.clear(); this.showOld = false; this.showArchived = false; this.lastAgent = null;
   }
 
   refresh(cx) {
     if (this.loading) return;
     this.loading = true;
-    const token = this.token, ctx = this.ctx;
+    const token = this.token, ctx = this.ctx, startedAt = Date.now();
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -454,6 +469,10 @@ export default class Dispatch extends View {
         const place = `${ctx?.on ?? null}|${repo}`;
         if (place !== this.place) { this.place = place; this.startOver(); }
         this.repo = repo; this.runs = runs; this.topics = topics; this.states = states; this.error = error;
+        // Operations that finished before this read began are now shown as they are; later ones read again.
+        let again = false;
+        for (const [k, op] of pendingOps) if (op.doneAt != null) { if (op.doneAt <= startedAt) pendingOps.delete(k); else again = true; }
+        if (again) later(cx, (cx) => { if (token === this.token) this.refresh(cx); });
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
@@ -588,6 +607,10 @@ export default class Dispatch extends View {
       this.dependencyVersion = dependencyVersion;
       later(cx, (cx) => this.refresh(cx));
     }
+    if (this.pendingVersion !== pendingVersion) {
+      this.pendingVersion = pendingVersion;
+      if (this.ctxKey) later(cx, (cx) => this.refresh(cx));
+    }
     if (this.approvalVersion !== approvalVersion) {
       this.approvalVersion = approvalVersion;
       later(cx, (cx) => this.refresh(cx));
@@ -675,9 +698,12 @@ export default class Dispatch extends View {
   }
 
   command(cx, topic, op, args = []) {
-    if (this.busy.has(topic.id)) return;
+    const arg = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
+    const key = arg("--task") ? `task:${topic.id}|${arg("--task")}` : arg("--items") ?? arg("--item") ? `item:${topic.id}|${arg("--items") ?? arg("--item")}` : `topic:${topic.id}`;
+    if (pendingOps.has(key)) return;
     const token = this.token, files = io(this.ctx?.on ?? null), hd = this.topicHD(topic), repo = this.topicRepo(topic);
-    this.busy.add(topic.id); this.error = null; cx.notify();
+    beginOp(key, op); this.error = null; cx.notify();
+    let ok = false;
     cx.spawn(async (cx) => {
       try {
         // Historical Topics have no topic.json; their controls still address the underlying run.
@@ -687,13 +713,13 @@ export default class Dispatch extends View {
           const got = ["archive", "unarchive"].includes(op) ? await archiveRun(files, r, op) : await controlRun(files, r, op);
           res = { ok: got.ok, out: got.text ?? got.error };
         } else res = await topicCmd(files, hd, ["topic", op, "--repo", repo, "--topic", topic.id, ...args]);
+        ok = res.ok;
         if (token !== this.token) return;
         if (!res.ok) this.error = commandError(res.out);
-        else later(cx, (cx) => { if (token === this.token) this.refresh(cx); });
       } catch (e) {
         if (token === this.token) this.error = String(e?.message ?? e);
       } finally {
-        if (token === this.token) { this.busy.delete(topic.id); cx.notify(); }
+        endOp(key, ok); cx.notify();
       }
     });
   }
@@ -756,11 +782,12 @@ export default class Dispatch extends View {
     // Spins only while one of its Tasks runs; open work that waits on the main agent shows a still accent dot.
     const running = this.topicRunning(topic);
     const messageCount = (topic.messages?.unacked ?? 0) + (topic.messages?.answersUnacked ?? 0);
+    const pending = this.pendingOf(topic);
     const head = h_flex().id(`topic-${topic.id}`).min_h(36).flex_none().pl(10).pr(6).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(topic.id, !folded); cx.notify(); })
       .child(icon(folded ? "chevron-right" : "chevron-down", 12, t.muted))
       .child(dot(t, waiting ? "blocked" : running ? "working" : active ? "review" : "done", paused ? { state: "paused" } : topic.deleting ? { state: "stopping" } : null))
-      .child(div().flex_1().min_w(0).truncate().tooltip(String(topic.title)).text_size(S().body).font_semibold().text_color(topic.archived ? t.muted : t.foreground).child(topic.title))
+      .child(div().flex_1().min_w(0).truncate().tooltip(String(topic.title)).text_size(S().body).font_semibold().text_color(topic.archived || pending ? t.muted : t.foreground).child(topic.title))
       .when(!topic.implicit && (messageCount > 0 || topic.messages?.openOut > 0), (el) => el.child(
         h_flex().id(`messages-${topic.id}`).min_w(24).h(22).px(4).gap(4).flex_none().justify_center().items_center().rounded(6)
           .tooltip(messageCount ? `${messageCount} 条未确认消息` : "有问题待回答").cursor_pointer().hover((s) => s.bg(t.hover))
@@ -782,8 +809,7 @@ export default class Dispatch extends View {
                 nodes, text: text ?? "", programs: this.programs } });
           });
         }).child(icon("file", 13, t.muted)))
-      .children(this.topicControlButtons(t, topic))
-      .children(this.archiveButton(t, topic));
+      .children(pending ? [this.pendingChip(t, `pending-${topic.id}`, pending)] : [...this.topicControlButtons(t, topic), ...this.archiveButton(t, topic)]);
     const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : active ? t.input : t.border)
       .bg(active ? t.surface : t.background).overflow_hidden().child(head);
     const quotaAgents = new Set();
@@ -857,6 +883,7 @@ export default class Dispatch extends View {
     // The main agent's terminal dot, as on a card: it spins while that agent works.
     const main = r && group !== "done" ? this.mainAgentOf(r) : null;
     const running = Boolean(r) && group === "active" && stage === "working";
+    const pending = this.pendingOf(topic, task);
     const box = v_flex().flex_none().border_t(1).border_color(t.border).bg(t.surface);
     box.child(h_flex().id(`task-${key}`).min_h(32).pl(12).pr(10).py(5).gap(7).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.fold.set(key, !folded); cx.notify(); })
@@ -871,7 +898,7 @@ export default class Dispatch extends View {
       .child(h_flex().id(`tasksum-${key}`).size(22).flex_none().justify_center().items_center().rounded(6)
         .tooltip("Task 摘要").cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click((_e, cx) => { cx?.stop_propagation(); this.openTaskSummary(topic, task); }).child(icon("file", 13, t.muted)))
-      .children(task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
+      .children(pending ? [this.pendingChip(t, `pending-${key}`, pending)] : task.abandonedAt == null ? this.controlButtons(t, r, topic, task) : []));
     for (const dep of dependencies.filter((dep) => dep.state !== "done")) {
       box.child(note(t, dependencyText(this.topics, topic, dep), ["abandoned", "missing"].includes(dep.state) ? t.ansi3 : t.muted)
         .pl(inset).pr(10).pb(5)
@@ -881,7 +908,7 @@ export default class Dispatch extends View {
     }
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
-    if (queued && !topic.archived && !topic.deleting) {
+    if (queued && !topic.archived && !topic.deleting && !pending) {
       box.child(h_flex().pl(inset).pr(10).py(6).gap(6).flex_wrap()
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
         .when(canEditDependencies, (el) => el.child(action(`dependencies-${key}`, "编辑依赖", "task", t, () => this.openDependencies(topic, task))))
@@ -941,7 +968,7 @@ export default class Dispatch extends View {
     if (folded) return box;
     box.children(topic.backlog.map((item) => {
       const state = item.status === "refining" ? "细化中" : item.status === "refined" ? "已细化" : "待细化";
-      const req = requestState(item);
+      const req = requestState(item), pending = this.pendingOf(topic, null, item);
       return v_flex().id(`${key}|${item.id}`).px(12).py(7).gap(5)
         .child(h_flex().gap(7).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(S().small).child(item.text.split("\n")[0])
@@ -952,7 +979,8 @@ export default class Dispatch extends View {
           : !topic.owner?.terminal ? "已排队 · 这个 Topic 还没有负责人，在新标签页派发一个 Task 后会交给它"
           : !(agents() ?? []).some((a) => a.address === topic.owner.terminal) ? "已排队 · 负责人不在线，上线后送达" : "已排队")))
         .when(Boolean(item.taskIds.length), (el) => el.child(note(t, `已生成 Task：${item.taskIds.join("、")}`)))
-        .when(editable, (el) => el.child(h_flex().gap(6).flex_wrap()
+        .when(Boolean(pending), (el) => el.child(this.pendingChip(t, `pending-${key}-${item.id}`, pending)))
+        .when(editable && !pending, (el) => el.child(h_flex().gap(6).flex_wrap()
           .child(action(`edit-${key}-${item.id}`, "编辑", "task", t, () => this.openForm("backlog", topic, { item })))
           .child(action(`remove-${key}-${item.id}`, "删除", "trash", t,
             (_e, cx) => this.command(cx, topic, "backlog-rm", ["--item", item.id]), { color: t.ansi1 }))
@@ -963,6 +991,20 @@ export default class Dispatch extends View {
     }));
     if (!topic.backlog.length) box.child(note(t, "先记下想法，再交给主 agent 细化成 Task 草稿。").px(12).py(8));
     return box;
+  }
+
+  // What is under way on a Topic, a Task or a backlog item, from a manual operation: its { label }, or null.
+  pendingOf(topic, task = null, item = null) {
+    if (item) return pendingOps.get(`item:${topic.id}|${item.id}`) ?? null;
+    if (task) return pendingOps.get(`task:${topic.id}|${task.id}`) ?? (task.run ? pendingOps.get(`run:${task.run.dir}`) : null) ?? null;
+    return pendingOps.get(`topic:${topic.id}`) ?? (topic.implicit && topic.runs[0] ? pendingOps.get(`run:${topic.runs[0].dir}`) : null) ?? null;
+  }
+
+  // In place of an item's buttons while its operation runs: a spinner and what it is doing.
+  pendingChip(t, id, op) {
+    return h_flex().id(id).h(22).px(6).gap(5).flex_none().items_center()
+      .child(icon("ring", 11, t.muted).spin(900))
+      .child(div().text_size(S().label).text_color(t.muted).child(op.label));
   }
 
   topicControlButtons(t, topic) {
@@ -1999,11 +2041,16 @@ export default class Dispatch extends View {
       const reason = this.reasonBox.value().trim();
       if (this.sending || !reason || (force && !canForce)) return;
       this.sending = true; this.failed = null; cx.notify();
+      const key = `task:${p.topic.id}|${p.task.id}`;
+      beginOp(key, "abandon");
       cx.spawn(async (cx) => {
+        let done = false;
         try {
           const res = await topicCmd(io(p.on ?? null), p.hd, ["topic", "abandon", "--repo", p.repo,
             "--topic", p.topic.id, "--task", p.task.id, "--reason", reason, ...(force ? ["--force"] : [])]);
-          if (res.ok && outputValue(res.out, "ABANDONED") != null) { close(); return; }
+          done = res.ok && outputValue(res.out, "ABANDONED") != null;
+          endOp(key, done);
+          if (done) { close(); return; }
           this.failureCode = outputValue(res.out, "FAILURE");
           const explanation = {
             REASON_REQUIRED: "请填写放弃原因。",
@@ -2015,6 +2062,7 @@ export default class Dispatch extends View {
           }[this.failureCode];
           this.failed = [explanation, commandError(res.out)].filter(Boolean).join(" ") || "放弃失败，请重试。";
         } catch (e) {
+          endOp(key, false);
           this.failureCode = null; this.failed = String(e?.message ?? e);
         }
         this.sending = false; cx.notify();
@@ -2266,11 +2314,15 @@ export default class Dispatch extends View {
       const go = (_e, cx) => {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();
+        const key = p.topic && !p.topic.implicit ? `topic:${p.topic.id}` : `run:${run.dir}`;
+        beginOp(key, "delete");
         cx.spawn(async (cx) => {
           const r = await (p.topic && !p.topic.implicit
             ? topicCmd(io(p.on ?? null), p.hd, ["topic", "delete", "--repo", p.repo, "--topic", p.topic.id]).then((res) => ({ ok: res.ok, text: res.out }))
             : controlRun(io(p.on ?? null), run, "delete")).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
-          if (r.ok && /DELETED=/.test(r.text)) { close(); return; }
+          const done = r.ok && /DELETED=/.test(r.text);
+          endOp(key, done);
+          if (done) { close(); return; }
           this.sending = false;
           this.failed = (r.text || "hd_dispatch.py 运行失败").split("\n").filter((l) => !/^FAILURE=/.test(l)).slice(-2).join(" ");
           cx.notify();
@@ -2337,11 +2389,15 @@ export default class Dispatch extends View {
       const go = (_e, cx) => {
         if (this.sending) return;
         this.sending = true; this.failed = null; cx.notify();
+        const key = p.topic && !p.topic.implicit ? `topic:${p.topic.id}` : `run:${run.dir}`;
+        beginOp(key, op);
         cx.spawn(async (cx) => {
           const r = await (p.topic && !p.topic.implicit
             ? topicCmd(io(p.on ?? null), p.hd, ["topic", op, "--repo", p.repo, "--topic", p.topic.id]).then((res) => ({ ok: res.ok, text: res.out }))
             : controlRun(io(p.on ?? null), run, op)).catch((e) => ({ ok: false, text: String(e?.message ?? e) }));
-          if (r.ok && !/RUN_CONTROL=|RUN_STOPPING/.test(r.text)) { close(); return; }
+          const done = r.ok && !/RUN_CONTROL=|RUN_STOPPING/.test(r.text);
+          endOp(key, done);
+          if (done) { close(); return; }
           this.sending = false;
           this.failed = r.ok ? `什么都没做：${r.text.split("\n").pop()}` : (r.text || "hd_dispatch.py 运行失败").split("\n").slice(-2).join(" ");
           cx.notify();
