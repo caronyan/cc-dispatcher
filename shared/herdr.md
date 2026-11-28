@@ -72,6 +72,8 @@ Topic 是一个问题或目标，Task 是其中一次 skill 工作（`research`�
 - 拒绝时输出 `FAILURE=<代码>`、退出码 3。遇到 `REQUEST_STALE`、`TOPIC_PAUSED`、`TOPIC_STOPPING`、`TASK_TAKEN`、`KIND_MISMATCH`、`TOPIC_ARCHIVED` 或 `TOPIC_DELETING` 就停下，把代码与说明告诉用户，不派发、不另建 Topic 绕过。对同一 `$RD` 重试时仍传原参数。若运行已绑定，其控制终端也可只带 `--run "$RD"` 重试，恢复 `state.json` 中的绑定。
 - Topic 命令遇到 `NOT_OWNER` 时，核对本运行的 Topic 绑定和当前负责人；需要修改别人的 Topic 时，用下面的 `topic approval-request` 提交修改申请，等待用户在对方 Topic 的面板决定，结果以 notice 送回申请方。需要接手时走交接或接手流程，不改用对方的 `--run`，也不用 `--as-user` 冒充用户。消息回答或撤销遇到 `QUESTION_CLOSED` 时，按输出的 `STATE=` 和 `topic inbox --run "$RD" --all` 核对问题已回答、已撤销还是已作废，不重复回答或撤销；批量撤销中已列在 `WITHDRAWN=` 的项仍算成功。
 
+**自己接着做的工作也要有 Task**：你不派子 agent、自己跑的工作（实跑、测试、诊断、反复调优），超出当前 Task 的标题和说明时，开跑前先在同一 Topic 新建 Task：建一个新运行目录，`topic start --run "<新运行目录>" --topic <id> --title "<现在在做的事>"`；旧 Task 做完的照常收尾，并在结论里写明后续转到新 Task。面板按命令开跑的时间把后台命令归到你当时最新的 Task，开跑超过 5 分钟后才建的 Task 收不回它。
+
 **面板派发**：Claude Code 收到 `/cc-herdr-dispatch-<kind> --topic <id> --task <tid> --request <rid>`；其他 agent 收到 `按 cc-herdr-dispatch-<kind> skill 执行，参数：--topic <id> --task <tid> --request <rid>`。照常进入对应 skill 的准备步骤。research、review、retro 的这类命令是用户从面板发起的调用；主 agent 不自行调用这些高层或独立 skill。
 
 面板只向在线、状态为 `idle` 或 `done` 且当前识别出的 agent 与 Topic owner 一致的主 agent 投递；`idle` 的文本发送带 `--if idle`，`done` 因 hc 不支持相应条件而在检查后直接发送。派发还要求该主 agent 在仓库所有 Topic 中都没有已绑定、未完成且未终止的 Task，也没有已送达、未绑定且未撤销的派发请求；细化只要求空闲，可跳过被挡住的派发。Topic 暂停、终止中、归档或删除中时不投递；终止期间也拒绝启动和激活运行，到期的自动重试、`recover` 和移交也不再启动或唤醒子 agent；终止进程中途退出时，再终止一次即可收尾。终止后清除暂停记录，继续只恢复仍为暂停的运行。暂停时仍可撤销请求。Claude Code 提示行已有未发送文字时也不投递，细化消息中的标题换行与控制字符会替换为空格。`target=new_tab` 的请求由面板在新标签页启动，首条消息相同。主 agent 不用自己排队，也不为接请求改动 `wait`。已送达未确认的请求由用户在面板重发或改派。
