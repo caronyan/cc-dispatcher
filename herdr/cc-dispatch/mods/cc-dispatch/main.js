@@ -965,7 +965,7 @@ export default class Dispatch extends View {
       box.children(r.calls.map((c) => this.renderCall(t, c, true, inset)));
       const away = cardView(this.stats.runs[r.dir], r.calls.map((c) => c.call)).undispatched;
       if (away.length) box.child(v_flex().pl(inset).pr(10).py(6).gap(4)
-        .child(note(t, "内部进度"))
+        .child(note(t, "未派出的卡片"))
         .children(away.map((k) => h_flex().id(`card-${r.dir}|${k.id}`).gap(7).items_center()
           .child(div().flex_none().text_size(S().label).child(k.id))
           .child(div().flex_1().min_w(0).truncate().tooltip(String(k.title ?? "")).text_size(S().small).text_color(t.muted).child(k.title ?? ""))
