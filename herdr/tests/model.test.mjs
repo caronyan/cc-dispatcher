@@ -10,7 +10,7 @@ import {
   ARCHIVE_SEP, parseArchived, canArchive, archivedAway, cardView, parkedWhy, handoffAsks,
   agentIn, mainLive, needsTakeover, takeoverPrompt, takeoverBanner, skillOf,
   ASKS_SEP, ANSWERS_SEP, parseAsks, pendingItems, itemLine, answerRecord, answerText, LIST_SCRIPT,
-  TOPIC_SEP, BACKLOG_SEP, STATE_SEP, parseTopics, parseStates, buildTopics, taskGroup, groupTasks, requestState,
+  TOPIC_SEP, BACKLOG_SEP, STATE_SEP, parseTopics, parseStates, buildTopics, taskGroup, timelineTasks, taskSource, taskFollowers, nextSteps, nextDraft, requestState,
 } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 const RUN = "/r/.cc-dispatch/review-0107";
@@ -174,7 +174,6 @@ test("abandoned Tasks keep the reason and finish even when their run still appea
     assert.equal(task.finishedAt, null);
     assert.equal(task.group, "done");
     assert.equal(taskGroup(task, topic), "done");
-    assert.deepEqual(groupTasks(topic), [{ group: "done", tasks: [task] }]);
     assert.equal(topic.updatedAt, 200000);
   }
   const { task } = groupedTask();
@@ -279,6 +278,57 @@ test("Task abandonment controls and confirmation follow the command contract", a
     assert.ok(!byId(panel.renderTask(colors, buildTopics([], { a: topicRecord({ k1: { run: "dev-missing" } }) })[0], buildTopics([], { a: topicRecord({ k1: { run: "dev-missing" } }) })[0].tasks[0]), "abandon-topic-a|k1").nodes.some((x) => x === "放弃"),
       "放弃不再是单独的文字按钮，并入 Task 的终止方块");
     panel.controlButtons = stub;
+  });
+
+  await t.test("a finished Task offers next steps; one opens the dispatch dialog with its output, or the draft already written for it", async () => {
+    const topic = buildTopics([], { a: topicRecord({
+      k1: { kind: "research", title: "调研", run: "research-x", started_at: 30, finished_at: 40, summary_line: "方案定了", artifact: "/r/plan.md" },
+    }) })[0];
+    const task = topic.tasks[0];
+    panel.topicRepo = () => "/r";
+    const opened = [];
+    panel.openForm = (...args) => opened.push(args);
+    panel.fold.delete("topic-a|k1");
+    let card = panel.renderTask(colors, topic, task);
+    assert.ok(byId(card, "artifact-topic-a|k1"), "最新完成且没人接的 Task 默认展开，能看到产出");
+    byId(card, "next-topic-a|k1-review").attrs.on_click({}, cx);
+    assert.equal(opened[0][0], "dispatch");
+    assert.equal(opened[0][2].next.from, "k1");
+    assert.equal(opened[0][2].next.kind, "review");
+    assert.match(opened[0][2].next.detail, /^输入：\/r\/plan\.md/);
+    byId(card, "next-topic-a|k1-other").attrs.on_click({}, cx);
+    assert.equal(opened[1][2].next.from, "k1", "其他…也带着这一步的产出");
+    const withDraft = buildTopics([], { a: topicRecord({
+      k1: { kind: "research", title: "调研", run: "research-x", started_at: 30, finished_at: 40, artifact: "/r/plan.md" },
+      k2: { kind: "review", title: "审查方案", depends_on: ["k1"], created_at: 41 },
+    }) })[0];
+    panel.fold.set("topic-a|k1", false);
+    card = panel.renderTask(colors, withDraft, withDraft.tasks[0]);
+    byId(card, "next-topic-a|k1-review").attrs.on_click({}, cx);
+    assert.equal(opened[2][2].task.id, "k2", "已有同职责的草稿接在它后面时，派发那个草稿，不重复新建");
+    assert.equal(opened[2][2].next, undefined);
+
+    const saved = { blockProps: context.blockProps, agents: context.agents };
+    context.agents = () => [{ address: "t1", program: { key: "claude", name: "Claude" } }];
+    const next = { from: "k1", ...model.nextDraft(task, "review", "/r/plan.md") };
+    const props = { role: "dispatch", topic: { id: "topic-a", owner: { terminal: "t1", agent: "claude" } }, next, repo: "/r", hd: "/hd.py", ownerLive: true };
+    context.blockProps = () => props;
+    const view = dialog();
+    view.titleBox.text = next.title; view.detailBox.text = next.detail;
+    calls.length = 0; closed = 0;
+    response = { ok: true, out: "TASK=k3" };
+    await click(byId(view.renderForm(colors, props, close), "go"));
+    const ops = calls.map((c) => c.args[1]);
+    assert.deepEqual(ops.filter((op) => op !== "programs"), ["task-add", "request"], "确认后先新建 Task，再派给主 agent");
+    const add = calls.find((c) => c.args[1] === "task-add").args;
+    assert.ok(add.includes("--depends") && add[add.indexOf("--depends") + 1] === "k1");
+    assert.ok(add.includes("review"));
+    const req = calls.find((c) => c.args[1] === "request").args;
+    assert.equal(req[req.indexOf("--task") + 1], "k3");
+    assert.equal(req[req.indexOf("--target") + 1], "owner");
+    assert.equal(closed, 1);
+    Object.assign(context, saved);
+    calls.length = 0; closed = 0;
   });
 
   await t.test("the summary timeline renders in its own dialog, where the panel's program list is absent", () => {
@@ -536,14 +586,9 @@ test("an implicit parent stays active while a nested child run is live", () => {
   assert.equal(topics.find((t) => t.id === "run:review-0107").tasks[0].group, "active");
 });
 
-test("groupTasks orders nonempty groups and requestState distinguishes queued from delivered", () => {
-  const active = groupedTask().task, done = groupedTask({ task: { finished_at: 11 } }).task;
-  const you = groupedTask({ control: { state: "paused" } }).task;
+test("requestState distinguishes queued from delivered", () => {
+  const active = groupedTask().task;
   const queued = { id: "draft", run: null, runDir: null, request: { id: "r1", deliveredAt: null } };
-  const topic = { implicit: false, tasks: [done, queued, active, you] };
-  assert.deepEqual(groupTasks(topic).map((g) => g.group), ["you", "active", "queued", "done"]);
-  assert.deepEqual(groupTasks({ tasks: [queued] }), [{ group: "queued", tasks: [queued] }]);
-  assert.deepEqual(groupTasks({ tasks: [] }), []);
   assert.equal(requestState(active), null);
   assert.equal(requestState(queued), "queued");
   assert.equal(requestState({ request: { deliveredAt: 0 } }), "delivered");
@@ -1213,3 +1258,29 @@ test("a Task or Topic spins only while work runs; a Task whose helpers all settl
   assert.match(main, /running \? "working" : active \? "review" : "done"/, "main.js: the Topic row spins only while one of its Tasks runs");
   assert.match(main, /g\.topics\.some\(\(topic\) => this\.topicRunning\(topic\)\) \? "working"/, "main.js: another space's row spins only while one of its Tasks runs");
 });
+
+test("Tasks follow the timeline: by start, drafts last; a finished Task suggests next steps by kind and hands its output on", () => {
+  const T = (id, extra = {}) => ({ id, kind: "dev", title: id, run: null, runDir: null, request: null, dependsOn: [], parentTask: null, ...extra });
+  const research = T("k1", { kind: "research", startedAt: 3000, finishedAt: 4000, runDir: "/r/a", artifact: "/r/a/plan.md", summaryLine: "方案定了" });
+  const dev = T("k2", { startedAt: 1000, createdAt: 9000, runDir: "/r/b" });
+  const draft = T("k3", { kind: "review", createdAt: 500, dependsOn: ["k1"] });
+  const topic = { id: "x1", implicit: false, tasks: [draft, research, dev], runs: [] };
+  topic.tasks.forEach((task) => { task.group = task === draft ? "queued" : task === research ? "done" : "active"; });
+  assert.deepEqual(timelineTasks(topic).map((x) => x.id), ["k2", "k1", "k3"], "按开始时间排，没派出的草稿排最后");
+  assert.equal(taskSource(draft, topic), research, "依赖本 Topic 的 Task 就是接在它后面");
+  assert.equal(taskSource(T("k4", { dependsOn: ["y9:k1"] }), topic), null, "依赖别的 Topic 不算接");
+  assert.equal(taskSource(T("k5", { parentTask: "k2" }), topic), dev);
+  assert.deepEqual(taskFollowers(research, topic), [draft]);
+  assert.deepEqual(nextSteps(research).map((s) => s.kind), ["review", "dev"], "有方案的调研：审查或开发");
+  assert.deepEqual(nextSteps({ ...research, artifact: "/r/a/research.md" }).map((s) => s.kind), ["research", "dev"]);
+  assert.deepEqual(nextSteps(T("k6", { kind: "review" })).map((s) => s.kind), ["fix", "dev"]);
+  assert.deepEqual(nextSteps(T("k7", { kind: "dev" })).map((s) => s.kind), ["review", "test"]);
+  assert.deepEqual(nextSteps(T("k8", { kind: "test" })).map((s) => s.kind), ["fix"]);
+  assert.deepEqual(nextSteps(T("k9", { kind: "fix" })).map((s) => s.kind), ["test", "review"]);
+  assert.deepEqual(nextSteps({ ...research, abandonedAt: 1 }), [], "放弃的 Task 没有下一步");
+  const next = nextDraft(research, "review", "/repo/plan.md");
+  assert.equal(next.kind, "review");
+  assert.match(next.title, /审查：k1/);
+  assert.match(next.detail, /^输入：\/repo\/plan\.md\n接 k1（research）「k1」，结论：方案定了\n审查这份方案。$/);
+});
+

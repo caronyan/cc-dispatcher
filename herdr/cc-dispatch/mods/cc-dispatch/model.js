@@ -831,6 +831,63 @@ export function messageGroups(data, topics = []) {
  * items are what the Task wrote at finish plus what its run still waits on you for (unanswered asks,
  * cards parked for you) and, for an unfinished Task, its cards not merged yet.
  */
+/**
+ * A Topic's Tasks in the order the work went: by when each started (a draft by when it was written), drafts
+ * not yet dispatched last.
+ */
+export function timelineTasks(topic) {
+  const at = (task) => task.startedAt || task.createdAt || 0;
+  const waiting = (task) => taskGroup(task, topic) === "queued";
+  return [...(topic?.tasks ?? [])].sort((a, b) => waiting(a) - waiting(b) || at(a) - at(b)
+    || a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
+/** The Task this one follows on from in its own Topic (what it was started for, or the first it waits on), or null. */
+export function taskSource(task, topic) {
+  if (task.parentTask) return topic.tasks.find((x) => x.id === task.parentTask) ?? null;
+  const ref = (task.dependsOn ?? []).find((r) => !String(r).includes(":") || String(r).startsWith(`${topic.id}:`));
+  const id = ref == null ? null : String(ref).split(":").pop();
+  return id ? topic.tasks.find((x) => x.id === id) ?? null : null;
+}
+
+/** Tasks that follow on from `task`. */
+export const taskFollowers = (task, topic) => topic.tasks.filter((x) => x !== task && taskSource(x, topic) === task);
+
+// The usual next step after each kind of Task, first is the most common one.
+const NEXT_STEPS = {
+  research: (plan) => plan ? [["review", "审查方案"], ["dev", "按方案开发"]] : [["research", "出方案"], ["dev", "直接开发"]],
+  review: () => [["fix", "修复问题"], ["dev", "重新设计"]],
+  dev: () => [["review", "审查改动"], ["test", "跑测试"]],
+  test: () => [["fix", "修复失败"]],
+  fix: () => [["test", "回归测试"], ["review", "审查修复"]],
+  retro: () => [],
+};
+
+/** A finished Task's suggested next steps: [{ kind, label }]. */
+export function nextSteps(task) {
+  if (task?.abandonedAt != null) return [];
+  const plan = /(^|\/)plan\.md$/.test(task?.artifact ?? "");
+  return (NEXT_STEPS[task?.kind]?.(plan) ?? []).map(([kind, label]) => ({ kind, label }));
+}
+
+/** The next Task's title and detail, handing it the finished Task's output. `artifact`: its absolute path. */
+export function nextDraft(task, kind, artifact) {
+  const what = { research: "调研", review: "审查", dev: "开发", fix: "修复", test: "测试", retro: "复盘" }[kind] ?? kind;
+  const lines = [
+    artifact ? `输入：${artifact}` : null,
+    `接 ${task.id}（${task.kind}）「${task.title}」${task.summaryLine ? `，结论：${task.summaryLine}` : ""}`,
+    {
+      review: task.kind === "research" ? "审查这份方案。" : "审查它带来的改动。",
+      dev: task.kind === "review" ? "按输入里需要重新设计的问题实现。" : "按输入实现。",
+      fix: task.kind === "test" ? "修复输入里失败的用例。" : "修复输入里成立、还没修的问题。",
+      test: "跑相关测试并回归。",
+      research: task.kind === "research" ? "在这份调研的基础上出方案。" : "继续调研。",
+      retro: "复盘。",
+    }[kind] ?? null,
+  ].filter(Boolean);
+  return { kind, title: `${what}：${task.title}`, detail: lines.join("\n") };
+}
+
 export function topicTimeline(topic) {
   const lines = (text) => String(text ?? "").split("\n").map((x) => x.replace(/^\s*[-*•]\s*/, "").trim()).filter(Boolean);
   return [...(topic?.tasks ?? [])].map((task) => {
@@ -928,13 +985,6 @@ export function taskGroup(task, topic) {
   const childLive = (context?.runs ?? []).some((r) => r.live && children.some((child) => child === r.dir || child === baseName(r.dir)));
   if (topic?.implicit && !run.live && !childLive && control !== "stopping" && canArchive(run, statuses)) return "done";
   return "active";
-}
-
-/** Groups stay in urgency order; task order inside each group comes from topic.json. */
-export function groupTasks(topic) {
-  return ["you", "active", "queued", "done"].map((group) => ({
-    group, tasks: (topic?.tasks ?? []).filter((t) => taskGroup(t, topic) === group),
-  })).filter((g) => g.tasks.length);
 }
 
 export const requestState = (task) => task?.request ? (task.request.deliveredAt == null ? "queued" : "delivered") : null;

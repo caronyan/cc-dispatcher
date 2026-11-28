@@ -4,7 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea, ScrollHandle } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
-import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, dependencyChoices, taskRefs, taskBlockRefs, messageGroups, APPROVAL_WORDS, approvalOperation } from "./model.js";
+import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, timelineTasks, taskSource, taskFollowers, nextSteps, nextDraft, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, dependencyChoices, taskRefs, taskBlockRefs, messageGroups, APPROVAL_WORDS, approvalOperation } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
@@ -381,14 +381,14 @@ export default class Dispatch extends View {
     }
     if (["dispatch", "task", "backlog", "newtopic"].includes(this.role)) {
       const p = blockProps() ?? {};
-      this.sending = false; this.failed = null; this.kind = p.task?.kind ?? "dev";
+      this.sending = false; this.failed = null; this.kind = p.task?.kind ?? p.next?.kind ?? "dev";
       const field = (value, rows, placeholder) => {
         const box = TextareaState.new({ value: value ?? "", rows, placeholder });
         box.on("change", (_e, cx) => cx.notify());
         return box;
       };
-      this.titleBox = field(p.task?.title, 2, "填写标题");
-      this.detailBox = field(p.task?.detail, 6, "说明要做什么、期望结果和限制");
+      this.titleBox = field(p.task?.title ?? p.next?.title, 2, "填写标题");
+      this.detailBox = field(p.task?.detail ?? p.next?.detail, 6, "说明要做什么、期望结果和限制");
       this.backlogBox = field(p.item?.text, 8, "记录想法或待办，可以写多行");
       this.programs = p.programs ?? []; this.programsAt = 0; this.programsBusy = false;
       this.pick = p.ownerLive ? "owner" : null;
@@ -855,8 +855,8 @@ export default class Dispatch extends View {
       const totals = topicTotals({ ...this.stats, runs: Object.fromEntries(topic.runs.map((r) => [r.dir, runCards(r, this.stats.runs[r.dir])])) }, topic);
       if (totals.known || totals.cards || topic.tasks.length) card.child(this.renderStats(t, topic, totals));
       // The main agents' background tasks, each under the Task whose run it belongs to.
-      // Most urgent first (waiting on you, running, drafted, done); each Task's status is the mark after its title.
-      for (const task of groupTasks(topic).flatMap((g) => g.tasks)) {
+      // In the order the work went, as the timeline in the stats; each Task's status is the mark after its title.
+      for (const task of timelineTasks(topic)) {
         this.anchors.set(`${topic.id}|${task.id}`, items.length + parts.length);
         parts.push(this.renderTask(t, topic, task, this.assigned));
       }
@@ -902,7 +902,8 @@ export default class Dispatch extends View {
 
   renderTask(t, topic, task, assigned = {}) {
     const r = task.run, group = taskGroup(task, topic), key = `${topic.id}|${task.id}`;
-    const folded = this.fold.get(key) ?? !(group === "active" || group === "you"), inset = 42;
+    const steps = this.stepsFor(topic, task);
+    const folded = this.fold.get(key) ?? !(group === "active" || group === "you" || steps.open), inset = 42;
     const queued = group === "queued", request = requestState(task);
     const canEditDependencies = queued && !task.runDir && !r && !topic.implicit && !topic.archived && !topic.deleting;
     const dependencies = (task.dependsOn ?? []).map((ref) => dependsState(this.topics, topic, ref));
@@ -941,6 +942,7 @@ export default class Dispatch extends View {
     }
     if (working.length) box.child(note(t, `已排队 · 主 agent 正在做 ${working.map((x) => x.title).join("、")}`).pl(inset).pr(10).pb(5));
     if (folded) return box;
+    if (group === "done" && task.abandonedAt == null) box.child(this.renderHandoff(t, topic, task, steps, inset));
     if (queued && !topic.archived && !topic.deleting && !pending) {
       box.child(h_flex().pl(inset).pr(10).py(6).gap(6).flex_wrap()
         .child(action(`edit-${key}`, "编辑", "task", t, () => this.openForm("task", topic, { task })))
@@ -971,6 +973,58 @@ export default class Dispatch extends View {
           .tooltip(k.waits.length ? `等 ${k.waits.join("、")}` : k.note ?? ""))));
     }
     return box;
+  }
+
+  /**
+   * A finished Task's next steps: { list: [{ kind, label }], open } — open when it is the latest finished Task
+   * and nothing follows on from it yet, so its card starts unfolded with the choices in view.
+   */
+  stepsFor(topic, task) {
+    const editable = !topic.implicit && !topic.archived && !topic.deleting;
+    if (!editable || taskGroup(task, topic) !== "done" || task.abandonedAt != null) return { list: [], open: false };
+    const list = nextSteps(task);
+    const finished = timelineTasks(topic).filter((x) => taskGroup(x, topic) === "done" && x.abandonedAt == null);
+    return { list, open: list.length > 0 && finished.at(-1) === task && !taskFollowers(task, topic).length };
+  }
+
+  artifactPath(topic, path) {
+    return !path || path.startsWith("/") ? path : `${this.topicRepo(topic)}/${path}`;
+  }
+
+  // What a finished Task handed on: its conclusion, its output file to read, and the next steps to dispatch from it.
+  renderHandoff(t, topic, task, steps, inset) {
+    const key = `${topic.id}|${task.id}`, artifact = this.artifactPath(topic, task.artifact);
+    const box = v_flex().pl(inset).pr(10).py(6).gap(6);
+    if (task.summaryLine) box.child(note(t, `结论：${task.summaryLine}`, t.foreground));
+    if (artifact) box.child(h_flex().gap(8).items_center()
+      .child(div().w(48).flex_none().whitespace_nowrap().text_size(S().label).text_color(t.muted).child("产出"))
+      .child(action(`artifact-${key}`, baseName(artifact), "file", t, (_e, cx) => this.showText(cx, `${task.title} · ${baseName(artifact)}`,
+        () => io(this.ctx?.on ?? null).readText(artifact), "这个文件已经不在了。"), { tooltip: artifact })));
+    if (steps.list.length || (!topic.implicit && !topic.archived && !topic.deleting)) {
+      const paused = Boolean(topic.pausedAt);
+      const go = (kind) => (_e, cx) => this.openNext(topic, task, kind, artifact);
+      box.child(h_flex().gap(8).items_center()
+        .child(div().w(48).flex_none().whitespace_nowrap().text_size(S().label).text_color(t.muted).child("下一步"))
+        .child(h_flex().flex_1().min_w(0).gap(6).flex_wrap()
+          .children(steps.list.map((s, i) => action(`next-${key}-${s.kind}`, `${s.label} · ${s.kind}`, "send", t, go(s.kind),
+            { color: i === 0 ? t.accent : undefined, enabled: !paused, tooltip: paused ? "Topic 已暂停，继续后才能派发" : undefined })))
+          .child(action(`next-${key}-other`, "其他…", "task", t, go(null), { enabled: !paused }))));
+    }
+    return box;
+  }
+
+  // Dispatch the next step from a finished Task: a draft already written for it (by the skill when it finished,
+  // or by hand), or a new one carrying its output; either way the dispatch dialog confirms it first.
+  openNext(topic, task, kind, artifact) {
+    const drafts = topic.tasks.filter((x) => taskGroup(x, topic) === "queued" && !x.request && (!kind || x.kind === kind)
+      && (taskSource(x, topic) === task || (x.createdAt || 0) >= (task.finishedAt || Infinity) - 60000));
+    const draft = kind ? drafts[0] : null;
+    if (draft) {
+      const hint = (draft.dependsOn ?? []).map((ref) => dependsState(this.topics, topic, ref))
+        .filter((dep) => ["pending", "stopped", "cycle"].includes(dep.state)).map((dep) => dependencyText(this.topics, topic, dep)).join("；");
+      return this.openForm("dispatch", topic, { task: draft, dependencyHint: hint });
+    }
+    this.openForm("dispatch", topic, { next: { from: task.id, ...nextDraft(task, kind ?? "dev", artifact) } });
   }
 
   /** The Task summary dialog: what the Task is, where it ended up, and each card with its status and report. */
@@ -1370,22 +1424,37 @@ export default class Dispatch extends View {
       // card's status (or helper call's, for a run without task cards). Merged counts leave parked cards out (they show in the key).
       const colors = CARD_COLORS(t), done = topic.tasks.filter((task) => taskGroup(task, topic) === "done").length;
       const v = s.cards ? cardView(s.cards, topic.runs.flatMap((r) => r.calls.map((c) => `${r.dir}#${c.call}`))) : null;
-      const rows = groupTasks(topic).flatMap((g) => g.tasks).map((task) => {
+      const order = timelineTasks(topic);
+      const when = (ms) => { const d = new Date(ms), p2 = (n) => String(n).padStart(2, "0"); return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`; };
+      const rows = order.map((task, i) => {
         const run = task.runDir ? runCards(topic.runs.find((r) => r.dir === task.runDir), this.stats.runs[task.runDir]) : null, status = run?.status ?? {};
         const ids = Object.keys(status).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
         const own = ids.length ? cardView(run) : null, stage = this.taskStage(topic, task);
-        return h_flex().id(`goto-${topic.id}|${task.id}`).gap(6).items_center().h(18).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover))
+        // A timeline node: the status mark on a line that runs on to the next Task (dotted towards drafts), then
+        // the title and its cards, and under it when it started, its kind, how long it took and what it follows on from.
+        const draft = taskGroup(task, topic) === "queued", next = order[i + 1], source = taskSource(task, topic);
+        const took = task.startedAt ? fmtDur((task.abandonedAt ?? task.finishedAt ?? Date.now()) - task.startedAt) : null;
+        const meta = [draft ? (task.request ? "已排队" : "草稿") : task.startedAt ? when(task.startedAt) : null, task.kind,
+          draft ? null : took, source ? `接 ${source.kind}` : null, task.artifact ? `产出 ${baseName(task.artifact)}` : null].filter(Boolean).join(" · ");
+        return h_flex().id(`goto-${topic.id}|${task.id}`).gap(6).items_stretch().rounded(4).cursor_pointer().hover((s) => s.bg(t.hover))
           .tooltip("跳到这个 Task").on_click((_e, cx) => this.jumpTo(topic, task, cx))
-          .child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div()))
-          .child(div().min_w(0).flex_1().truncate().tooltip(String(task.title)).text_size(z.small).child(task.title))
-          .when(ids.length > 0, (el) => el
-            .child(div().w(84).flex_none().child(bar(cardCounts({ status }).map(([st, n]) => [n, colors[st] ?? t.muted]), ids.length)))
-            .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${own.merged}/${own.goal}`)));
+          .child(v_flex().w(16).flex_none().items_center()
+            .child(h_flex().h(18).items_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div().size(8).rounded_full().border_1().border_color(t.muted)))
+            .when(Boolean(next), (el) => el.child(div().w(1).flex_1().min_h(6).bg(t.border)
+              .when(taskGroup(next, topic) === "queued", (line) => line.opacity(0.5)))))
+          .child(v_flex().flex_1().min_w(0).pb(6)
+            .child(h_flex().h(18).gap(6).items_center()
+              .child(div().min_w(0).flex_1().truncate().tooltip(String(task.title)).text_size(z.small).text_color(draft ? t.muted : t.foreground).child(task.title))
+              .when(taskGroup(task, topic) === "you", (el) => el.child(pill(t, "等你", t.ansi3)))
+              .when(ids.length > 0, (el) => el
+                .child(div().w(84).flex_none().child(bar(cardCounts({ status }).map(([st, n]) => [n, colors[st] ?? t.muted]), ids.length)))
+                .child(div().w(30).flex_none().text_size(z.label).text_color(t.muted).text_right().child(`${own.merged}/${own.goal}`))))
+            .child(div().truncate().tooltip(meta).text_size(z.label).text_color(t.muted).child(meta)));
       });
       const counts = s.cards ? cardCounts(s.cards) : [];
-      box.child(v_flex().gap(5)
-        .child(h_flex().gap(6).items_center().text_size(z.label).text_color(t.muted)
-          .child("Tasks").child(div().font_semibold().text_color(t.foreground).child(`${done}/${topic.tasks.length}`)))
+      box.child(v_flex().gap(0)
+        .child(h_flex().pb(5).gap(6).items_center().text_size(z.label).text_color(t.muted)
+          .child("时间线").child(div().font_semibold().text_color(t.foreground).child(`${done}/${topic.tasks.length}`)))
         .children(rows)
         // All cards of the Topic: one bar by status, then the key with counts.
         .when(counts.length > 0, (el) => el.child(h_flex().pt(3).gap(6).items_center()
@@ -2009,8 +2078,9 @@ export default class Dispatch extends View {
       body.child(editor("backlog 内容", "backlog-text", this.backlogBox, 160));
       if (p.item?.request) body.child(note(t, "修改内容会撤销当前细化请求，条目回到待细化。", t.ansi3));
     } else {
-      if (role === "task") body.child(editor("Task 标题", "task-title", this.titleBox, 48));
+      if (role === "task" || p.next) body.child(editor("Task 标题", "task-title", this.titleBox, 48));
       else body.child(note(t, `${task.id} · ${task.title}`, t.foreground));
+      if (p.next) body.child(note(t, `接 ${p.next.from}：派发时新建这个 Task，并记为接在 ${p.next.from} 之后。`));
       body.child(kinds).child(editor("说明", "task-detail", this.detailBox, role === "dispatch" ? 100 : 130));
       if (role === "task" && task?.request) body.child(note(t, "修改职责或说明会撤销当前派发请求。", t.ansi3));
       if (role === "dispatch") {
@@ -2025,6 +2095,7 @@ export default class Dispatch extends View {
       }
     }
     const ready = role === "backlog" ? Boolean(text.trim()) : role === "dispatch" ? Boolean(picked) && !topic?.pausedAt && !p.dependencyHint
+      && (!p.next || Boolean(title.trim()))
       : Boolean(title.trim());
     const submit = (_e, cx) => {
       if (this.sending || !ready) return;
@@ -2044,9 +2115,13 @@ export default class Dispatch extends View {
           } else if (role === "task") {
             await invoke(task ? "task-edit" : "task-add", [...(task ? ["--task", task.id] : []), `--title=${title}`, "--kind", this.kind, `--detail=${detail}`]);
           } else {
-            if (this.kind !== task.kind || detail !== task.detail) await invoke("task-edit", ["--task", task.id, "--kind", this.kind, `--detail=${detail}`]);
+            // A next step is written as a new Task following the finished one, then dispatched like any draft.
+            const id = p.next ? outputValue(await invoke("task-add", [`--title=${title}`, "--kind", this.kind, `--detail=${detail}`, "--depends", p.next.from]), "TASK")
+              : task.id;
+            if (!id) throw new Error("新建 Task 没有返回编号。");
+            if (!p.next && (this.kind !== task.kind || detail !== task.detail)) await invoke("task-edit", ["--task", task.id, "--kind", this.kind, `--detail=${detail}`]);
             const agent = picked === "owner" ? owner?.program?.key ?? topic.owner?.agent : program.key;
-            const out = await invoke("request", ["--task", task.id, "--type", "dispatch", "--target", picked === "owner" ? "owner" : "new_tab",
+            const out = await invoke("request", ["--task", id, "--type", "dispatch", "--target", picked === "owner" ? "owner" : "new_tab",
               ...(agent ? ["--agent", agent] : [])]);
             if (picked !== "owner") {
               const raw = outputValue(out, "MESSAGE");

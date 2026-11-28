@@ -117,11 +117,13 @@ test("Status is an icon after the title and every tag; no group bars or status w
   assert.match(main, /renderActions\(t, c, inset\)/, "卡片展开后的内容和卡片行同一缩进");
 });
 
-test("Topic stats: Tasks x/y, a progress bar per Task, the card bar above its key", async () => {
+test("Topic stats: a timeline of Tasks x/y, a progress bar per Task, the card bar above its key", async () => {
   const { readFileSync } = await import("node:fs");
   const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
-  // 统计区标题写 Tasks x/y；每个 Task 右侧是进度条加 x/y，不按卡片切小格；总卡片进度条在图例上方。
-  assert.match(main, /\.child\("Tasks"\)/);
+  // 统计区标题写 时间线 x/y，Task 按时间线排；每个 Task 右侧是进度条加 x/y，不按卡片切小格；总卡片进度条在图例上方。
+  assert.match(main, /\.child\("时间线"\)/);
+  assert.match(main, /const order = timelineTasks\(topic\)/, "统计区的 Task 按时间线排");
+  assert.match(main, /for \(const task of timelineTasks\(topic\)\)/, "Task 卡片和时间线同一顺序");
   assert.doesNotMatch(main, /卡片合并 \$\{|ids\.map\(\(id\) => div\(\)/, "不写长状态文案，不按卡片切小格");
   assert.match(main, /bar\(cardCounts\(\{ status \}\)/, "每个 Task 一条进度条");
   assert.match(main, /v\.total\)\)\)\s*\.child\(div\(\)\.w\(30\)[^\n]*\$\{v\.merged\}\/\$\{v\.goal\}/, "总卡片进度条右侧和 Task 行一样写全 Topic 的 x/y");
