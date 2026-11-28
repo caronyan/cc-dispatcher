@@ -110,7 +110,7 @@ function harness(initialProps = {}, mode = "dark") {
   const calls = [], overlays = [], closed = [], pending = [];
   const context = vm.createContext({
     ...model, ...loader, View: class {},
-    h_flex: node, v_flex: node, div: node, svg: node, image: node,
+    h_flex: node, v_flex: node, div: node, svg: node, image: node, ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
     settings: () => ({}), theme: () => colors(mode), agents: () => [], terminals: () => [],
     spaces: () => [], layout: () => null, blockProps: () => props,
     openOverlay: (args) => overlays.push(args), closeOverlay: (id) => closed.push(id),

@@ -2,7 +2,7 @@
 // same view through implicit, single-Task Topics. Only this file imports Herdr.
 // Only this file imports Herdr: model.js and loader.js are tested under node.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, TextView, TextareaState, Textarea, ScrollHandle } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
 import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, groupTasks, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, dependencyChoices, taskRefs, taskBlockRefs, messageGroups, APPROVAL_WORDS, approvalOperation } from "./model.js";
 import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
@@ -404,6 +404,8 @@ export default class Dispatch extends View {
     this.programs = []; this.programsAt = 0; this.programsBusy = false;
     this.dependencyVersion = dependencyVersion; this.pendingVersion = pendingVersion;
     this.approvalVersion = approvalVersion;
+    // The topic list's position, so a Task row in a Topic's stats can bring its Task into view.
+    this.scroll = ScrollHandle.new(); this.jump = null; this.anchors = new Map();
     cx.timer.every(POLL, (cx) => { if (this.shown()) this.refresh(cx); });
     // An operation started or finished in a dialog shows on the panel right away, not at the next poll.
     cx.timer.every(300, (cx) => { if (this.pendingVersion !== pendingVersion) cx.notify(); });
@@ -639,7 +641,7 @@ export default class Dispatch extends View {
           .child(this.loading ? icon("ring", 13, t.muted).spin(900) : icon("refresh", 13, t.muted)))
         .when(Boolean(node), (el) => el.child(h_flex().id("close").size(24).justify_center().items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", stop).on_click(() => run("layout.hide", { id: PANEL })).child(icon("close", 14, t.muted)))))
-      .child(this.renderTopics(t))
+      .child(this.renderTopics(t, cx))
       .child(this.renderFooter(t));
   }
 
@@ -724,43 +726,66 @@ export default class Dispatch extends View {
     });
   }
 
-  renderTopics(t) {
-    const body = v_flex().id("topics").flex_1().min_h(0).overflow_y_scrollbar().p(10).gap(8);
-    if (this.error) body.child(note(t, this.error, t.ansi1));
+  renderTopics(t, cx) {
+    // Each Topic is several direct children (its head, then each Task, …) drawn as one card, so the list
+    // can scroll to one Task; every top-level item brings its own gap above it.
+    const body = v_flex().id("topics").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.scroll).px(10).pt(2).pb(10);
+    const items = [];
+    this.anchors = new Map();
+    this.assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions,
+      Object.fromEntries(Object.entries(this.states).map(([dir, s]) => [dir, s?.finished ?? null])));
+    const done = () => { body.children(items); this.scrollToJump(cx); return this.renderOthers(t, body, others); };
     const { mine, others } = this.split();
+    if (this.error) items.push(note(t, this.error, t.ansi1).mt(8));
     if (!mine.length) {
-      body.child(v_flex().p(8).gap(6)
+      items.push(v_flex().mt(8).p(8).gap(6)
         .child(note(t, this.repo ? `${baseName(this.repo)} 里还没有 Topic。` : "打开一个空间，就能看到它的 Topic。", t.foreground))
         .child(note(t, "新建 Topic 后添加 Task 草稿，或用 cc-herdr-dispatch 系列 skill 开始工作。历史运行也会显示在这里。")));
-      return this.renderOthers(t, body, others);
+      return done();
     }
     const { running, paused, ended, archived } = orderTopics(mine);
     const unacked = (topic) => (topic.messages?.unacked ?? 0) + (topic.messages?.answersUnacked ?? 0) > 0;
     const unread = ended.filter(unacked);
     const history = ended.filter((topic) => !unacked(topic));
     const old = this.showOld ? history : history.slice(0, HISTORY);
-    body.children([...running, ...paused, ...unread, ...old].map((topic) => this.renderTopic(t, topic)));
-    const link = (id, text, onClick) => div().id(id).flex_none().py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
+    for (const topic of [...running, ...paused, ...unread, ...old]) this.renderTopic(t, topic, items);
+    const link = (id, text, onClick) => div().id(id).flex_none().mt(8).py(4).text_size(S().small).text_color(t.muted).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click(onClick).child(text);
     if (history.length > HISTORY) {
-      body.child(link("older", this.showOld ? "收起" : `再显示 ${history.length - HISTORY} 个更早的`,
+      items.push(link("older", this.showOld ? "收起" : `再显示 ${history.length - HISTORY} 个更早的`,
         (_e, cx) => { this.showOld = !this.showOld; cx.notify(); }));
     }
     if (archived.length) {
-      body.child(link("archived", this.showArchived ? "隐藏已归档" : `已归档 ${archived.length} 个 · 显示`,
+      items.push(link("archived", this.showArchived ? "隐藏已归档" : `已归档 ${archived.length} 个 · 显示`,
         (_e, cx) => { this.showArchived = !this.showArchived; cx.notify(); }));
-      if (this.showArchived) body.children(archived.map((topic) => this.renderTopic(t, topic)));
+      if (this.showArchived) for (const topic of archived) this.renderTopic(t, topic, items);
     }
-    return this.renderOthers(t, body, others);
+    return done();
+  }
+
+  // Brings the Task a stats row asked for into view: once to show its end, then once more to show its
+  // head (the list scrolls the least it can, so a Task taller than the list ends up with its head on top).
+  scrollToJump(cx) {
+    const j = this.jump, index = j ? this.anchors.get(j.key) : null;
+    if (index == null) { this.jump = null; return; }
+    this.scroll.scroll_to_item(index);
+    if (--j.steps <= 0) this.jump = null;
+    else later(cx, (cx) => cx.notify());
+  }
+
+  jumpTo(topic, task, cx) {
+    const key = `${topic.id}|${task.id}`;
+    if (this.fold.get(key) ?? true) this.fold.set(key, false);
+    this.jump = { key, steps: 2 }; cx.notify();
   }
 
   // Other spaces with Topics going: one row each.
   renderOthers(t, body, others) {
     if (!others.length) return body;
-    body.child(div().flex_none().pt(6).px(2).text_size(S().label).text_color(t.muted).child("其他空间"));
+    body.child(div().flex_none().mt(8).pt(6).px(2).text_size(S().label).text_color(t.muted).child("其他空间"));
     for (const g of others) {
       const waiting = g.topics.some((topic) => topic.approvals?.open.length > 0 || topic.tasks.some((task) => taskGroup(task, topic) === "you"));
-      body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().px(10).py(6).gap(8).items_center().rounded(8)
+      body.child(h_flex().id(`space-${g.id ?? g.name}`).min_h(36).flex_none().mt(8).px(10).py(6).gap(8).items_center().rounded(8)
         .border_1().border_dashed().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
         .when(Boolean(g.id), (el) => el.on_click(() => run("space.select", { id: g.id })))
         .child(dot(t, waiting ? "blocked" : g.topics.some((topic) => this.topicRunning(topic)) ? "working" : "review"))
@@ -773,7 +798,7 @@ export default class Dispatch extends View {
     return body;
   }
 
-  renderTopic(t, topic) {
+  renderTopic(t, topic, items = []) {
     const active = this.topicActive(topic);
     // Open by default while something is running, waiting on you, or drafted and not yet dispatched.
     const folded = this.fold.get(topic.id) ?? !(active || (!topic.archived && topic.tasks.some((task) => taskGroup(task, topic) === "queued")));
@@ -810,8 +835,7 @@ export default class Dispatch extends View {
           });
         }).child(icon("file", 13, t.muted)))
       .children(pending ? [this.pendingChip(t, `pending-${topic.id}`, pending)] : [...this.topicControlButtons(t, topic), ...this.archiveButton(t, topic)]);
-    const card = v_flex().flex_none().rounded(8).border_1().border_color(paused ? t.ansi3 : active ? t.input : t.border)
-      .bg(active ? t.surface : t.background).overflow_hidden().child(head);
+    const card = v_flex().flex_none().child(head), parts = [card];
     const quotaAgents = new Set();
     for (const r of topic.runs) {
       const agent = runQuotaAgent(r, terminals() ?? []);
@@ -831,15 +855,22 @@ export default class Dispatch extends View {
       const totals = topicTotals({ ...this.stats, runs: Object.fromEntries(topic.runs.map((r) => [r.dir, runCards(r, this.stats.runs[r.dir])])) }, topic);
       if (totals.known || totals.cards || topic.tasks.length) card.child(this.renderStats(t, topic, totals));
       // The main agents' background tasks, each under the Task whose run it belongs to.
-      const assigned = assignTasks(this.runs, this.bg.runs, this.bg.sessions,
-        Object.fromEntries(Object.entries(this.states).map(([dir, s]) => [dir, s?.finished ?? null])));
       // Most urgent first (waiting on you, running, drafted, done); each Task's status is the mark after its title.
-      card.children(groupTasks(topic).flatMap((g) => g.tasks).map((task) => this.renderTask(t, topic, task, assigned)));
-      if (!topic.implicit && !topic.archived && !topic.deleting) card.child(h_flex().px(12).py(8)
+      for (const task of groupTasks(topic).flatMap((g) => g.tasks)) {
+        this.anchors.set(`${topic.id}|${task.id}`, items.length + parts.length);
+        parts.push(this.renderTask(t, topic, task, this.assigned));
+      }
+      if (!topic.implicit && !topic.archived && !topic.deleting) parts.push(h_flex().px(12).py(8)
         .child(action(`add-task-${topic.id}`, "+ Task", "task", t, () => this.openForm("task", topic), { color: t.accent })));
-      if (!topic.implicit) card.child(this.renderBacklog(t, topic));
+      if (!topic.implicit) parts.push(this.renderBacklog(t, topic));
     }
-    return card;
+    // One card: the first part takes the top edge and the gap above, the last the bottom edge.
+    const frame = paused ? t.ansi3 : active ? t.input : t.border, fill = active ? t.surface : t.background;
+    items.push(...parts.map((el, i) => v_flex().flex_none().border_x(1).border_color(frame).bg(fill).overflow_hidden()
+      .when(i === 0, (w) => w.mt(8).border_t(1).rounded_t(8))
+      .when(i === parts.length - 1, (w) => w.border_b(1).rounded_b(8))
+      .child(el)));
+    return items;
   }
 
   /** A Task's status, as a statusMark key. */
@@ -851,6 +882,8 @@ export default class Dispatch extends View {
     if (group === "done") return "done";
     if (group === "queued") return request === "delivered" ? "delivered" : request ? "queued" : "draft";
     if (group === "you") return "blocked";
+    // A background command the main agent started for this Task keeps it running.
+    if (this.bgRunning(r)) return "working";
     const stages = r?.calls.map((c) => callStage(c, this.stats.runs[r.dir]?.status?.[c.call])) ?? [];
     if (!stages.length) return this.mainWorksOn(r) ? "working" : "idle";
     const top = runStage(stages);
@@ -1172,6 +1205,10 @@ export default class Dispatch extends View {
 
   // The run's main agent, if its terminal runs an agent now: who an answer is sent to.
   /** A run without helpers is worked on only while its main agent is busy and holds no other unfinished run. */
+  bgRunning(r) {
+    return Boolean(r) && (this.assigned?.[r.dir] ?? []).some((x) => x.status === "running" && x.kind !== "wait") && Boolean(this.mainAgentOf(r));
+  }
+
   mainWorksOn(r) {
     const main = r ? this.mainAgentOf(r) : null;
     const state = typeof main?.status === "string" ? main.status : main?.status?.state;
@@ -1337,7 +1374,8 @@ export default class Dispatch extends View {
         const run = task.runDir ? runCards(topic.runs.find((r) => r.dir === task.runDir), this.stats.runs[task.runDir]) : null, status = run?.status ?? {};
         const ids = Object.keys(status).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
         const own = ids.length ? cardView(run) : null, stage = this.taskStage(topic, task);
-        return h_flex().gap(6).items_center().h(18)
+        return h_flex().id(`goto-${topic.id}|${task.id}`).gap(6).items_center().h(18).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover))
+          .tooltip("跳到这个 Task").on_click((_e, cx) => this.jumpTo(topic, task, cx))
           .child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, `stat-${topic.id}|${task.id}`, stage === "working" ? "running" : stage) ?? div()))
           .child(div().min_w(0).flex_1().truncate().tooltip(String(task.title)).text_size(z.small).child(task.title))
           .when(ids.length > 0, (el) => el

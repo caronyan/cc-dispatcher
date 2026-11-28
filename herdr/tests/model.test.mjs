@@ -223,6 +223,7 @@ test("Task abandonment controls and confirmation follow the command contract", a
     ...model, ...bgModule, ...statsModule, View: class {}, h_flex: node, v_flex: node, div: node, svg: node, image: node,
     settings: () => ({}), agents: () => [], blockProps: () => ({ role: "abandon" }),
     Textarea: { new: node },
+    ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
     TextareaState: { new: () => ({ text: "", value() { return this.text; }, on() {} }) },
     topicCmd: async (_files, hd, args) => { calls.push({ hd, args: Array.from(args) }); return response; },
   });
@@ -469,6 +470,30 @@ test("Task abandonment controls and confirmation follow the command contract", a
     await go("/other");
     assert.equal(view.open, null);
     assert.equal(view.fold.size, 0);
+  });
+
+  await t.test("a Task stays running while its main agent's background command runs, and a stats row brings it into view", () => {
+    const { topic, task } = groupedTask({ call: { status: "done" } });
+    const main = { address: "t-main" };
+    const stage = (bgTasks, live = true) => {
+      Object.assign(panel, { assigned: { [task.runDir]: bgTasks }, mainAgentOf: () => (live ? main : null), mainWorksOn: () => false });
+      return panel.taskStage(topic, task);
+    };
+    const idle = stage([]);
+    assert.notEqual(idle, "working");
+    assert.equal(stage([{ status: "running", kind: "shell" }]), "working");
+    assert.equal(stage([{ status: "running", kind: "wait" }]), idle, "hd_dispatch.py wait 由子 agent 的状态体现");
+    assert.equal(stage([{ status: "completed", kind: "shell" }]), idle);
+    assert.equal(stage([{ status: "running", kind: "shell" }], false), idle, "主 agent 不在了，命令已失联");
+    panel.mainAgentOf = () => null;
+
+    const scrolled = [], jobs = [], cx3 = { notify() {}, spawn(fn) { jobs.push(fn); } };
+    Object.assign(panel, { scroll: { scroll_to_item: (i) => scrolled.push(i) }, anchors: new Map([[`${topic.id}|${task.id}`, 4]]) });
+    panel.fold.set(`${topic.id}|${task.id}`, true);
+    panel.jumpTo(topic, task, cx3);
+    assert.equal(panel.fold.get(`${topic.id}|${task.id}`), false, "跳过去时展开");
+    panel.scrollToJump(cx3); panel.scrollToJump(cx3); panel.scrollToJump(cx3);
+    assert.deepEqual(scrolled, [4, 4], "先露出末尾，再把开头放到顶上，之后不再滚动");
   });
 });
 

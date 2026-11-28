@@ -182,6 +182,7 @@ function harness(props = {}, overrides = {}) {
   const context = vm.createContext({
     ...model, ...loader, ...bg, ...stats, View: class {},
     h_flex: node, v_flex: node, div: node, svg: node, image: node, Textarea: { new: node },
+    ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
     TextareaState: { new: ({ value = "" } = {}) => ({ text: value, value() { return this.text; }, on() {} }) },
     settings: () => ({}), theme: () => colors, agents: () => [], terminals: () => [], checking: () => false,
     spaces: () => [{ id: "space", active: true }], blockProps: () => props,
@@ -300,7 +301,7 @@ test("envelopes count incoming and answers, omit a zero count for open questions
   ]) {
     const topic = model.buildTopics([], { A: record("A") })[0];
     topic.messages = messages; h.view.topics = [topic];
-    const button = byId(h.view.renderTopic(colors, topic), "messages-A");
+    const button = byId(h.view.renderTopic(colors, topic)[0], "messages-A");
     assert.equal(Boolean(button), visible);
     if (!button) continue;
     assert.deepEqual(texts(button), count ? [count] : []);
@@ -313,8 +314,8 @@ test("envelopes count incoming and answers, omit a zero count for open questions
 test("older ended Topics with unacknowledged incoming messages remain visible beyond the history limit", () => {
   const h = harness(), mine = Array.from({ length: 9 }, (_, i) => model.buildTopics([], { [i]: record(String(i)) })[0]);
   mine[8].messages.unacked = 1;
-  Object.assign(h.view, { split: () => ({ mine, others: [] }), renderTopic: (_t, topic) => node().id(`shown-${topic.id}`),
-    renderOthers: (_t, body) => body, showOld: false });
+  Object.assign(h.view, { split: () => ({ mine, others: [] }), renderTopic: (_t, topic, items) => items.push(node().id(`shown-${topic.id}`)),
+    renderOthers: (_t, body) => body, showOld: false, runs: [], states: {}, bg: { runs: {}, sessions: {} } });
   const rendered = h.view.renderTopics(colors);
   assert.ok(byId(rendered, "shown-8"));
   assert.ok(byId(rendered, "shown-5"));

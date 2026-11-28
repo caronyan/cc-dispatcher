@@ -146,6 +146,7 @@ function harness(initialProps = {}, mode = "dark") {
   const context = vm.createContext({
     ...model, ...loader, View: class {},
     h_flex: node, v_flex: node, div: node, svg: node, image: node, Textarea: { new: node },
+    ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
     TextareaState: { new: ({ value = "" } = {}) => ({ text: value, value() { return this.text; }, on() {} }) },
     settings: () => ({}), theme: () => colors(mode), agents: () => [], terminals: () => [],
     spaces: () => [], layout: () => null, blockProps: () => props,
