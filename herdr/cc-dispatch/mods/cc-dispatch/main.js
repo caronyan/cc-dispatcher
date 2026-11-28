@@ -5,7 +5,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea, ScrollHandle } from "gpui-base";
 import { exec, hc, run, spaces, agents, terminals, panes, focused, theme, settings, layout, openOverlay, closeOverlay, readTextFile, knownAgents, checking, props as blockProps } from "herdr";
 import { callTags, callStage, runStage, FINISHING_STAGES, cardCounts, runCards, cardView, CARD_WORDS, parkedWhy, STAGE_WORDS, splitBySpace, ago, handoffAsks, handoffText, baseName, agentTag, agentLabel, weakIsolation, canHandOver, AGENTS, resultMarkdown, roundsMarkdown, resultDoc, taskDoc, MARKDOWN_LIMIT, controlOps, controlBanner, needsTakeover, takeoverPrompt, takeoverBanner, runQuotaAgent, quotaView, pendingItems, itemLine, answerRecord, answerText, answerWords, failureWord, callLabel, taskGroup, timelineTasks, taskSource, taskFollowers, nextSteps, nextDraft, requestState, topicDir, topicTimeline, taskCards, reportGist, orderTopics, parseJSON, dependsState, dependencyText, dependencyChoices, taskRefs, taskBlockRefs, messageGroups, APPROVAL_WORDS, approvalOperation } from "./model.js";
-import { findRepo, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
+import { findRepo, knownRoots, loadRuns, loadReport, loadTasks, loadDiff, loadEvents, loadStopReport, loadHandoff, loadHandoffPrompt, controlRun, handOver, earlierReports, loadStats, loadBg, loadOutput, loadLive, loadQuota, archiveRun, saveAnswer, topicCmd, loadSummary } from "./loader.js";
 import { assignTasks, bgView, bgSummary, liveMarkdown, BG_MORE } from "./bg.js";
 import { topicTotals, callSpend, fmtTok, fmtDur } from "./stats.js";
 
@@ -24,6 +24,8 @@ const KIND_GUIDE = {
   test: { use: "跑测试或补测试，查清失败原因。", can: "运行指定范围的测试，把失败分成产品问题、测试问题和环境问题。", limit: "只出报告，不修产品代码。", hint: "写测试范围（文件、提交范围，或全部）" },
   retro: { use: "复盘已经结束的运行，改进做法。", can: "读运行记录，修改 skill 规则或项目文档。", limit: "不改产品代码，不调用其他职责。", hint: "写要复盘的运行或 Topic，以及你关心的问题" },
 };
+// The repository a Topic is kept in.
+const topicRepo = (topic) => (topic.implicit ? topic.runs[0]?.repo : topicDir(topic)?.replace(/\/\.cc-dispatch\/topics\/[^/]+$/, "")) ?? null;
 const outputValue = (out, key) => (out ?? "").split("\n").find((line) => line.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
 const commandError = (out) => (out || "hd_dispatch.py 运行失败").split("\n").filter((line) => line && !line.startsWith("FAILURE=")).slice(-2).join(" ");
 const dependencyError = (out) => {
@@ -420,10 +422,14 @@ export default class Dispatch extends View {
     const allSpaces = spaces() ?? [], shown = allSpaces.find((s) => s.active) ?? null;
     const runSplit = splitBySpace(this.runs, terminals() ?? [], allSpaces, shown, this.repo);
     const mineDirs = new Set(runSplit.mine.map((r) => r.dir)), mine = [], others = new Map();
+    const ids = new Set(allSpaces.map((s) => s.id));
     for (const topic of this.topics) {
-      const dir = topicDir(topic);
-      const repo = topic.implicit ? topic.runs[0]?.repo : dir?.replace(/\/\.cc-dispatch\/topics\/[^/]+$/, "");
-      if ((this.repo && repo === this.repo) || topic.runs.some((r) => mineDirs.has(r.dir))) { mine.push(topic); continue; }
+      const repo = topicRepo(topic);
+      // A Topic shows in the space that started it; one whose space is gone (or was not recorded) shows
+      // where its runs do, else in its repository's folder. A historical run's own space decides it.
+      const owner = ids.has(topic.owner?.space) ? topic.owner.space : null;
+      if (owner ? owner === shown?.id
+        : topic.runs.some((r) => mineDirs.has(r.dir)) || (!topic.implicit && this.repo && repo === this.repo)) { mine.push(topic); continue; }
       if (!this.topicActive(topic)) continue;
       const g = runSplit.others.find((g) => g.runs.some((r) => topic.runs.includes(r)));
       const id = g?.id ?? topic.owner?.space ?? null;
@@ -465,8 +471,9 @@ export default class Dispatch extends View {
       try {
         const files = io(ctx?.on ?? null);
         const repo = ctx ? await findRepo(files, ctx.folder) : null;
+        const known = await knownRoots(files);
         if (token !== this.token) return;
-        const { runs, topics, states, error } = await loadRuns(files, repo, terminals() ?? []);
+        const { runs, topics, states, error } = await loadRuns(files, repo, terminals() ?? [], known);
         if (token !== this.token) return;
         const place = `${ctx?.on ?? null}|${repo}`;
         if (place !== this.place) { this.place = place; this.startOver(); }
@@ -478,19 +485,24 @@ export default class Dispatch extends View {
         later(cx, (cx) => { if (token === this.token) this.refreshStats(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshQuota(cx, files, token); });
         later(cx, (cx) => { if (token === this.token) this.refreshPrograms(cx, ctx?.on ?? null, token); });
-        // Deleted Topics can still have terminal results queued in their outboxes.
-        const canDeliver = repo && !checking() && (topics.some((topic) => !topic.implicit)
-          || (await files.sh('test -d "$1/.cc-dispatch/topics"', [repo])).code === 0);
-        if (token !== this.token) return;
-        if (canDeliver) {
-          const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", repo]);
+        // Deleted Topics can still have terminal results queued in their outboxes. The folder's repository
+        // and the repositories of the Topics this space shows each deliver their own.
+        let reread = false;
+        const places = new Set([repo, ...this.split().mine.filter((topic) => !topic.implicit).map(topicRepo)].filter(Boolean));
+        for (const place of places) {
+          const canDeliver = !checking() && (topics.some((topic) => !topic.implicit && topicRepo(topic) === place)
+            || (await files.sh('test -d "$1/.cc-dispatch/topics"', [place])).code === 0);
+          if (token !== this.token) return;
+          if (!canDeliver) continue;
+          const delivered = await topicCmd(files, runs.find((r) => r.hd)?.hd, ["topic", "deliver", "--repo", place]);
           if (token !== this.token) return;
           if (!delivered.ok) this.error = `自动送达失败：${commandError(delivered.out)}`;
-          else if (["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"].some((key) => outputValue(delivered.out, key))) {
-            const next = await loadRuns(files, repo, terminals() ?? []);
-            if (token !== this.token) return;
-            this.runs = next.runs; this.topics = next.topics; this.states = next.states; this.error = next.error;
-          }
+          else if (["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"].some((key) => outputValue(delivered.out, key))) reread = true;
+        }
+        if (reread) {
+          const next = await loadRuns(files, repo, terminals() ?? [], known);
+          if (token !== this.token) return;
+          this.runs = next.runs; this.topics = next.topics; this.states = next.states; this.error = next.error;
         }
       } catch (e) {
         if (token === this.token) this.error = String(e?.message ?? e);

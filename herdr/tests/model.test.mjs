@@ -331,6 +331,23 @@ test("Task abandonment controls and confirmation follow the command contract", a
     calls.length = 0; closed = 0;
   });
 
+  await t.test("a Topic shows in the space that started it, whichever repository the panel's folder is in", () => {
+    const saved = { spaces: context.spaces, terminals: context.terminals };
+    // The NewEra space was made while a flushing terminal had focus, so Herdr gives it flushing's folder.
+    context.spaces = () => [{ id: "spN", active: true, folder: "/w/flushing" }, { id: "spF", folder: "/w/cc" }];
+    context.terminals = () => [];
+    const own = { id: "a1", implicit: false, owner: { space: "spN" }, runs: [], tasks: [], dir: "/w/dsh/.cc-dispatch/topics/a1" };
+    const theirs = { id: "b1", implicit: false, owner: { space: "spF" }, runs: [], tasks: [], dir: "/w/flushing/.cc-dispatch/topics/b1" };
+    const orphan = { id: "c1", implicit: false, owner: { space: "gone" }, runs: [], tasks: [], dir: "/w/flushing/.cc-dispatch/topics/c1" };
+    const recorded = { dir: "/w/flushing/.cc-dispatch/dev-1", repo: "/w/flushing", space: "spF", live: false, calls: [] };
+    const unrecorded = { dir: "/w/flushing/.cc-dispatch/dev-0", repo: "/w/flushing", space: null, live: false, calls: [] };
+    const old = (r) => ({ id: `run:${r.dir}`, implicit: true, runs: [r], tasks: [] });
+    Object.assign(panel, { repo: "/w/flushing", runs: [recorded, unrecorded], topics: [own, theirs, orphan, old(recorded), old(unrecorded)], topicActive: () => false });
+    assert.deepEqual(Array.from(panel.split().mine, (x) => x.id), ["a1", "c1"],
+      "本空间发起的 Topic 在这里；别的空间的 Topic、记在别的空间的运行、以及同仓库里没记空间的旧运行（随仓库多数归 flushing 空间）都不串过来");
+    Object.assign(context, saved);
+  });
+
   await t.test("the summary timeline renders in its own dialog, where the panel's program list is absent", () => {
     const view = new context.TaskView();
     const topic = buildTopics([], { a: topicRecord({
@@ -503,7 +520,7 @@ test("Task abandonment controls and confirmation follow the command contract", a
   await t.test("focus moving within the same repo keeps what the panel shows; another repo starts over", async () => {
     let repo = "/r";
     Object.assign(context, {
-      findRepo: async () => repo, loadRuns: async () => ({ runs: [], topics: [], states: {}, error: null }),
+      findRepo: async () => repo, loadRuns: async () => ({ runs: [], topics: [], states: {}, error: null }), knownRoots: async () => [],
       terminals: () => [], checking: () => true, knownAgents: async () => [],
     });
     const jobs = [], cx2 = { notify() {}, sleep: async () => {}, spawn(fn) { jobs.push(fn(cx2)); } };

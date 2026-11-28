@@ -93,6 +93,12 @@ class Topics(unittest.TestCase):
                                                     "space": "s9", "cwd": "/other cwd"})
         self.assertIn(["get", "t9", "--json"], self.w.hc_state()["calls"])
 
+    def test_topic_commands_list_their_repository_once_for_the_panel(self):
+        repos = self.w.root / "repos"
+        self.init(CC_DISPATCH_REPOS=str(repos))
+        self.init(CC_DISPATCH_REPOS=str(repos))
+        self.assertEqual(repos.read_text().splitlines(), [str(self.w.repo)])
+
     def test_repo_defaults_to_git_top_and_accepts_repo_before_subcommand(self):
         r = subprocess.run([sys.executable, str(HD), "topic", "init", "--title", "Default"],
                            cwd=self.w.run_dir, env=self.w.env(HC_TERMINAL_ID=""),

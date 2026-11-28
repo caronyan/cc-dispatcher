@@ -185,7 +185,7 @@ function harness(props = {}, overrides = {}) {
     ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
     TextareaState: { new: ({ value = "" } = {}) => ({ text: value, value() { return this.text; }, on() {} }) },
     settings: () => ({}), theme: () => colors, agents: () => [], terminals: () => [], checking: () => false,
-    spaces: () => [{ id: "space", active: true }], blockProps: () => props,
+    spaces: () => [{ id: "space", active: true }], blockProps: () => props, knownRoots: async () => [],
     openOverlay: (args) => overlays.push(args), closeOverlay() {},
     exec: async (_program, _args, opts) => { remote.push(opts.on); return { code: 0 }; },
     topicCmd: async (files, hd, args) => {
@@ -430,7 +430,8 @@ test("marker text inside any dumped JSON value cannot cut or forge a list sectio
 
 test("the panel delivers in repositories with current or historical Topics, reloads changes and keeps unread answers in view", () => {
   const main = readFileSync(new URL("../cc-dispatch/mods/cc-dispatch/main.js", import.meta.url), "utf8");
-  assert.match(main, /repo && !checking\(\) && \(topics\.some\(\(topic\) => !topic\.implicit\)/, "main.js: delivery requires a repository outside static checks");
+  assert.match(main, /new Set\(\[repo, \.\.\.this\.split\(\)\.mine\.filter\(\(topic\) => !topic\.implicit\)\.map\(topicRepo\)\]\.filter\(Boolean\)\)/, "main.js: the folder's repository and the repositories of this space's Topics each deliver");
+  assert.match(main, /const canDeliver = !checking\(\) && \(topics\.some\(\(topic\) => !topic\.implicit && topicRepo\(topic\) === place\)/, "main.js: delivery stays off during static checks");
   assert.match(main, /test -d "\$1\/\.cc-dispatch\/topics"/, "main.js: deleted Topics can retain terminal notices");
   assert.match(main, /\["DELIVERED", "MESSAGE_DELIVERED", "UPDATED"\]\.some/, "main.js: reload the list on UPDATED as well");
   assert.match(main, /topic\.messages\?\.answersUnacked \?\? 0\) > 0/, "main.js: unread answers keep an ended Topic out of the earlier list");

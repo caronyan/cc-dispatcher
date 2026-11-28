@@ -12,11 +12,21 @@ export async function findRepo({ sh }, folder) {
 }
 
 /**
- * Runs under the shown repo and under every live helper's run folder, merged with the live
- * terminals. Returns { runs, topics, states, error }; Topics include drafts without helpers.
+ * The run folders of every repository hd_dispatch.py has worked in (its REPOS list, one path per line)
+ * that still has one, so a space shows the Topics it started wherever they are kept.
  */
-export async function loadRuns({ sh }, repo, terminals) {
-  const roots = runRoots(repo, terminals);
+export async function knownRoots({ sh }) {
+  const r = await sh('f="${CC_DISPATCH_REPOS:-$HOME/.cc-dispatch/repos}"; [ -f "$f" ] || exit 0; while IFS= read -r d; do [ -d "$d/.cc-dispatch" ] && printf "%s/.cc-dispatch\\n" "$d"; done < "$f"; exit 0');
+  return (r.stdout ?? "").split("\n").filter(Boolean);
+}
+
+/**
+ * Runs under the shown repo, under the `known` run folders (knownRoots) and under every live helper's run
+ * folder, merged with the live terminals. Returns { runs, topics, states, error }; Topics include drafts
+ * without helpers.
+ */
+export async function loadRuns({ sh }, repo, terminals, known = []) {
+  const roots = [...new Set([...runRoots(repo, terminals), ...known])].sort();
   if (!roots.length) return { runs: [], topics: [], states: {}, error: null };
   const r = await sh(LIST_SCRIPT, roots);
   if (r.code !== 0 && !r.stdout) return { runs: [], topics: [], states: {}, error: (r.stderr ?? "").trim() || `退出码 ${r.code}` };

@@ -42,6 +42,7 @@ skills/cc-herdr-dispatch-*/  各 skill 的 SKILL.md 与 references（提示模�
 - 跨 Topic 消息单独保存在 `.cc-dispatch/messages/`：`<id>.json` 保存发给该 Topic 的消息和问题答案，`<id>.summary.json` 保存未确认、待回答等计数摘要，`<id>.outbox.json` 保存待补投的通知与撤销事件。消息、摘要和发件队列都不随 Topic 归档或删除而删除，双方往来与已有答案保留，未投出的事件仍可补投；面板列表只读摘要，打开消息时再读正文。
 - worktree 在仓库旁的 `.cc-dispatch-wt/<repo>/` 下。
 - 子 agent 的回报文件在 `/tmp/cc-dispatch/`（可用 `CC_HD_HOME` 改）。
+- 用过的仓库记在 `~/.cc-dispatch/repos`（可用 `CC_DISPATCH_REPOS` 改），面板据此读出各空间发起的 Topic，不论它记在哪个仓库里。
 - 每个调用有一份只追加的事件流 `agents/<call>/events.jsonl`：派发、返工、自动重试、每次交回的状态与回报检查、卡住、清理，以及交回时 Codex 会话的累计 token / 命令 / 改动文件数。面板的用量和 Timeline、`hd_retro.py` 的复盘材料都读它；Codex 清掉自己的日志后历史仍在。格式见 `hd_dispatch.py --help`。
 - 用户在面板上暂停、继续或终止一次运行时，状态写在 `.cc-dispatch/<kind>-<run>/control.json`（`running|paused|stopping|stopped|handoff`、被挂起的调用；主 agent 交接时另记交接包和交接前的状态，新主 agent `adopt` 后记 `owner`）；终止后另有 `stop.md`（各调用状态、回报路径、未交合格回报者的屏幕末尾）和 `stop.log`。
 - skill 在准备时用 `topic start` 绑定 Task，收尾用 `topic finish` 写回结论与产物，同时标记 Task 和运行完成；子 agent 由主 agent `cleanup` 关掉终端。运行文件夹保留，供接手和复盘读取。

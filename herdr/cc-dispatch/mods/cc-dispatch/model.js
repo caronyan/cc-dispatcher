@@ -1721,15 +1721,29 @@ const under = (path, folder) => Boolean(path && folder) && (path === folder || p
 
 /**
  * The herdr space a run belongs to: its dispatching Claude's terminal's space while that lives,
- * else the one hd_dispatch.py recorded, else a space whose folder is in the run's repository.
+ * else the one hd_dispatch.py recorded, else the space most of its repository's runs are in (`byRepo`, from
+ * repoSpaces), else a space whose folder is in the run's repository.
  */
-export function runSpace(run, terminals, spaces) {
+export function runSpace(run, terminals, spaces, byRepo = null) {
   const parent = run.parent && (terminals ?? []).find((t) => t.address === run.parent);
   const live = parent?.labels?.["herdr.space"];
   if (live) return live;
   const ids = new Set((spaces ?? []).map((s) => s.id));
   if (run.space && ids.has(run.space)) return run.space;
-  return (spaces ?? []).find((s) => under(s.folder, run.repo))?.id ?? null;
+  return byRepo?.get(run.repo) ?? (spaces ?? []).find((s) => under(s.folder, run.repo))?.id ?? null;
+}
+
+/** Each repository's space as most of its runs with a known space have it (runSpace's fallback). */
+export function repoSpaces(runs, terminals, spaces) {
+  const counts = new Map();
+  for (const r of runs) {
+    const id = runSpace({ ...r, repo: null }, terminals, spaces);
+    if (!id) continue;
+    const c = counts.get(r.repo) ?? new Map();
+    c.set(id, (c.get(id) ?? 0) + 1);
+    counts.set(r.repo, c);
+  }
+  return new Map([...counts].map(([repo, c]) => [repo, [...c].sort((a, b) => b[1] - a[1])[0][0]]));
 }
 
 /**
@@ -1737,9 +1751,9 @@ export function runSpace(run, terminals, spaces) {
  * runs }] }. A run whose space is not known stays with the shown one when it is in its repository.
  */
 export function splitBySpace(runs, terminals, spaces, shown, repo) {
-  const mine = [], others = new Map();
+  const mine = [], others = new Map(), byRepo = repoSpaces(runs, terminals, spaces);
   for (const r of runs) {
-    const id = runSpace(r, terminals, spaces);
+    const id = runSpace(r, terminals, spaces, byRepo);
     if (id === shown?.id || (!id && r.repo === repo)) { mine.push(r); continue; }
     if (!r.live) continue;
     const key = id ?? `repo:${r.repo}`;

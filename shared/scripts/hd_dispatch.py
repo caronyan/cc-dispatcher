@@ -189,6 +189,9 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path(os.environ.get("CC_HD_HOME", "/tmp/cc-dispatch"))
+# Every repository a run or Topic was kept in, one path per line: the panel reads them all and shows each
+# Topic in the space that started it, wherever that space's folder is.
+REPOS = Path(os.environ.get("CC_DISPATCH_REPOS") or Path.home() / ".cc-dispatch" / "repos")
 CHECK = Path(__file__).with_name("hd_check.py")
 SETTLED = {"done", "idle", "error", "blocked"}
 # The panel is Chinese, so a report's prose is too; schema keys and enum values, code, commands and paths stay as they are.
@@ -1067,6 +1070,7 @@ def run_topic_held(fn):
 def cmd_run(a):
     run = Path(a.run).resolve()
     refuse_unless_running(run)
+    remember_repo(repo_of_run(run))
     activate_run(run)
     need_env()
     tag = run_tag(run)
@@ -2093,6 +2097,16 @@ def repo_of_run(run):
     return Path(run).resolve().parent.parent
 
 
+def remember_repo(repo):
+    """Adds the repository to REPOS once."""
+    repo = str(Path(repo).resolve())
+    if REPOS.exists() and repo in REPOS.read_text().splitlines():
+        return
+    REPOS.parent.mkdir(parents=True, exist_ok=True)
+    with REPOS.open("a") as f:
+        f.write(repo + "\n")
+
+
 def topic_dir(repo, tid):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", tid):
         fail("invalid topic id", failure="TOPIC_NOT_FOUND", code=3)
@@ -2165,13 +2179,16 @@ def save_backlog(repo, tid, data):
 
 def topic_repo(a):
     if getattr(a, "run", None):
-        return repo_of_run(a.run)
-    if a.repo:
-        return Path(a.repo).resolve()
-    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-    if r.returncode:
-        a.topic_parser.error("--repo is required outside a git repository")
-    return Path(r.stdout.strip()).resolve()
+        repo = repo_of_run(a.run)
+    elif a.repo:
+        repo = Path(a.repo).resolve()
+    else:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        if r.returncode:
+            a.topic_parser.error("--repo is required outside a git repository")
+        repo = Path(r.stdout.strip()).resolve()
+    remember_repo(repo)
+    return repo
 
 
 def topic_owner(terminal=None):

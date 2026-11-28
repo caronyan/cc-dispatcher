@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findRepo, loadRuns, loadReport, loadTask, loadDiff, earlierReports, handOver, topicCmd, loadSummary } from "../cc-dispatch/mods/cc-dispatch/loader.js";
+import { findRepo, knownRoots, loadRuns, loadReport, loadTask, loadDiff, earlierReports, handOver, topicCmd, loadSummary } from "../cc-dispatch/mods/cc-dispatch/loader.js";
 import { TOPIC_SCRIPT } from "../cc-dispatch/mods/cc-dispatch/model.js";
 
 // The same I/O main.js gives the loader, on a real shell.
@@ -49,6 +49,25 @@ test("loadRuns reads the repo's runs and the ones live helpers point at", async 
   assert.deepEqual(runs.map((r) => r.dir).sort(), [run, other.run].sort());
   const empty = realpathSync(mkdtempSync(join(tmpdir(), "ccd-empty-")));
   assert.deepEqual((await loadRuns(io, empty, [])).runs, []);
+});
+
+test("the panel reads every repository hd_dispatch.py listed that still has run folders", async () => {
+  const { repo, run } = fixture();
+  const gone = realpathSync(mkdtempSync(join(tmpdir(), "ccd-gone-")));
+  const list = join(realpathSync(mkdtempSync(join(tmpdir(), "ccd-repos-"))), "repos");
+  writeFileSync(list, `${repo}\n${gone}\n${join(gone, "missing")}\n`);
+  const saved = process.env.CC_DISPATCH_REPOS;
+  process.env.CC_DISPATCH_REPOS = list;
+  try {
+    const known = await knownRoots(io);
+    assert.deepEqual(known, [join(repo, ".cc-dispatch")]);
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), "ccd-elsewhere-")));
+    assert.deepEqual((await loadRuns(io, elsewhere, [], known)).runs.map((r) => r.dir), [run], "别的仓库里记下的运行也读进来");
+    process.env.CC_DISPATCH_REPOS = join(gone, "none");
+    assert.deepEqual(await knownRoots(io), []);
+  } finally {
+    if (saved == null) delete process.env.CC_DISPATCH_REPOS; else process.env.CC_DISPATCH_REPOS = saved;
+  }
 });
 
 test("report, task, earlier rounds and diff", async () => {

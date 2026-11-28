@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Tests never add their temp repositories to the person's list of repositories (hd_dispatch.REPOS).
+os.environ["CC_DISPATCH_REPOS"] = str(Path(tempfile.mkdtemp(prefix="hd-repos-")) / "repos")
 HD = HERE.parent / "scripts" / "hd_dispatch.py"
 SCHEMA = {"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}
 
